@@ -68,12 +68,12 @@ export class CodexRunner {
     const baseHeadSha = await this.git.head(input.job.worktreePath);
     const startedAt = nowIso();
     const args = [
+      "--ask-for-approval", "never",
       "exec",
       "--ephemeral",
       "--json",
       "--strict-config",
       "--sandbox", isReview ? "read-only" : "workspace-write",
-      "--ask-for-approval", "never",
       "--cd", input.job.worktreePath,
       "--config", "sandbox_workspace_write.network_access=false",
       "--config", 'shell_environment_policy.inherit="core"',

@@ -29,6 +29,7 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
     const execution = await runner.run({ job, kind: "worker", issueNumber: 1, prompt: "Implement the fixture.", runsRoot: store.runsRoot(job.id) });
     assert.equal(execution.workerResult?.status, "completed");
     const args = JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+    assert.deepEqual(args.slice(0, 3), ["--ask-for-approval", "never", "exec"]);
     assert.ok(args.includes("--ephemeral"));
     assert.ok(args.includes("--json"));
     assert.ok(args.includes("--strict-config"));

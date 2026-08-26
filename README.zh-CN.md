@@ -111,15 +111,16 @@ cp examples/release-plan.example.json /PRIVATE/PATH/release-plan.json
 
 `localPath`、`stateDir`、`worktreeRoot` 必须是互不重叠的绝对路径。
 
-Codex Worker 固定使用：
+Codex Worker 固定使用（approval policy 是 `codex` 顶层参数）：
 
 ```text
-codex exec
+codex
+--ask-for-approval never
+exec
 --ephemeral
 --json
 --strict-config
 --sandbox workspace-write
---ask-for-approval never
 --output-schema schemas/worker-result.schema.json
 --output-last-message <run>/result.json
 ```

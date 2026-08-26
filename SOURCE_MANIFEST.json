@@ -2,12 +2,12 @@
   "version": 1,
   "project": "herdr-codex-controller",
   "release": "0.1.0",
-  "generatedAt": "2026-08-26T01:57:40Z",
+  "generatedAt": "2026-08-26T11:52:24Z",
   "verification": {
     "command": "npm run verify",
     "tests": 14,
     "result": "passed",
-    "liveCodexGitHubTested": false
+    "liveCodexGitHubTested": true
   },
   "files": [
     {
@@ -37,8 +37,8 @@
     },
     {
       "path": "README.zh-CN.md",
-      "bytes": 7307,
-      "sha256": "fafea3b857afafb5d25f22a07059014e1633ce4a111ddd5ec0b4b51f99d7b46b"
+      "bytes": 7353,
+      "sha256": "3ec44584187a049c7f657664647fd2fece3fb87546acacc61212a91b9b38d531"
     },
     {
       "path": "RELEASE_NOTES.md",
@@ -68,12 +68,12 @@
     {
       "path": "dist/src/codex.js",
       "bytes": 9554,
-      "sha256": "535035fafc1e9878e2753a3bc3e53d0f18bb31359064af81b7476d0eebfdfb61"
+      "sha256": "9efbcff746dbe38bc087d0421d8f7ca3867b1810135bb8944eeff26b9f5c9b54"
     },
     {
       "path": "dist/src/codex.js.map",
       "bytes": 9247,
-      "sha256": "bd26835abfcce34bc4e24d75d3f926006475fbc1d9aa2381c6f3ed56660ab9f7"
+      "sha256": "a42a623a2d1f89502ee1d223de5f62abe587ab624ef61d830995f18830aeaef8"
     },
     {
       "path": "dist/src/command.d.ts",
@@ -337,13 +337,13 @@
     },
     {
       "path": "dist/test/codex-runner.test.js",
-      "bytes": 3264,
-      "sha256": "6dee392bacf9d72ce19085b74de7bf55e44e93539300dd38862ee9183c5d9e4d"
+      "bytes": 3349,
+      "sha256": "6c1a4a48ad2789831f86b4a5bbd59e58d8d865a943a349cca9a3568ac01aae85"
     },
     {
       "path": "dist/test/codex-runner.test.js.map",
-      "bytes": 2717,
-      "sha256": "d75fda84cf1a86a1a34de4833a50efc0bdb4fdebebb272bc98da1447b5916ec3"
+      "bytes": 2835,
+      "sha256": "7fba01d777fafb78328b4e255f35168c6c825d198e6ff1e8a7b6b0a54323d263"
     },
     {
       "path": "dist/test/command-interruption.test.d.ts",
@@ -463,7 +463,7 @@
     {
       "path": "src/codex.ts",
       "bytes": 9502,
-      "sha256": "1cc175266955b8790dccf53188c5ab85ca9242b2a23543b80fc63eb215d38ef6"
+      "sha256": "86b15cf736571f62ff983dba76cdf4af4d7f6a9aca7ad70420b0577408aea080"
     },
     {
       "path": "src/command.ts",
@@ -552,8 +552,8 @@
     },
     {
       "path": "test/codex-runner.test.ts",
-      "bytes": 3093,
-      "sha256": "b78cfc5ffebd24e127d49d63fbbb71f03ffcd51e68895511ed5d72e43c1aab54"
+      "bytes": 3174,
+      "sha256": "c90dfb009419dace1b33383a759ead3acee9509a9c7f19e2d046c8ee94d5dd7f"
     },
     {
       "path": "test/command-interruption.test.ts",
