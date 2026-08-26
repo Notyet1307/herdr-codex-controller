@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Herdr Codex Controller Config v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "repo", "localPath", "stateDir", "worktreeRoot", "baseRef", "remote", "branchPrefix", "shell", "codex", "validation", "policy", "review", "delivery"],
+  "properties": {
+    "version": { "const": 1 },
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "localPath": { "type": "string", "minLength": 1 },
+    "stateDir": { "type": "string", "minLength": 1 },
+    "worktreeRoot": { "type": "string", "minLength": 1 },
+    "baseRef": { "type": "string", "minLength": 1 },
+    "remote": { "type": "string", "minLength": 1 },
+    "branchPrefix": { "type": "string", "minLength": 1 },
+    "shell": { "type": "string", "minLength": 1 },
+    "codex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bin", "workerProfile", "reviewerProfile", "workerTimeoutMs", "reviewerTimeoutMs", "terminationGraceMs", "networkAccess"],
+      "properties": {
+        "bin": { "type": "string", "minLength": 1 },
+        "workerProfile": { "type": ["string", "null"] },
+        "reviewerProfile": { "type": ["string", "null"] },
+        "workerTimeoutMs": { "type": "integer", "minimum": 60000 },
+        "reviewerTimeoutMs": { "type": "integer", "minimum": 60000 },
+        "terminationGraceMs": { "type": "integer", "minimum": 1000 },
+        "networkAccess": { "const": false }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setup", "issue", "release", "maxOutputBytes"],
+      "properties": {
+        "setup": { "$ref": "#/$defs/commands" },
+        "issue": { "$ref": "#/$defs/commands" },
+        "release": { "$ref": "#/$defs/commands" },
+        "maxOutputBytes": { "type": "integer", "minimum": 4096 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxIssueRepairRounds", "maxReleaseHardeningRounds", "maxCiRepairRounds", "maxIssues", "maxChangedFiles", "maxChangedLines"],
+      "properties": {
+        "maxIssueRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "maxReleaseHardeningRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "maxCiRepairRounds": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "maxIssues": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "maxChangedFiles": { "type": "integer", "minimum": 1 },
+        "maxChangedLines": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "blockingSeverities"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "blockingSeverities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["critical", "major"] }
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["createPullRequest", "draft", "autoMerge", "mergeMethod", "allowNoChecks", "pollIntervalMs"],
+      "properties": {
+        "createPullRequest": { "type": "boolean" },
+        "draft": { "type": "boolean" },
+        "autoMerge": { "type": "boolean" },
+        "mergeMethod": { "enum": ["merge", "squash", "rebase"] },
+        "allowNoChecks": { "type": "boolean" },
+        "pollIntervalMs": { "type": "integer", "minimum": 1000 }
+      }
+    }
+  },
+  "$defs": {
+    "commands": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "type": "string", "minLength": 1 },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command"],
+            "properties": {
+              "command": { "type": "string", "minLength": 1 },
+              "timeoutMs": { "type": "integer", "minimum": 1000 }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,245 @@
+#!/usr/bin/env node
+import { join, resolve } from "node:path";
+import { loadConfig } from "./config.js";
+import { loadPlan } from "./plan.js";
+import { JobStore, retryBlockedJob } from "./state.js";
+import { GitClient } from "./git.js";
+import { GitHubClient } from "./github.js";
+import { CodexRunner } from "./codex.js";
+import { Validator } from "./validator.js";
+import { ReleaseController } from "./controller.js";
+import { withControllerLock } from "./lock.js";
+import { digestJson, nowIso, sleep } from "./util.js";
+import { writeTextAtomic } from "./fs-atomic.js";
+import type { JobState, StepResult } from "./types.js";
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.command === "help") {
+    printHelp();
+    return;
+  }
+  const configPath = requiredOption(args, "config");
+  const config = loadConfig(configPath);
+  const store = new JobStore(config);
+
+  if (args.command === "config-validate") {
+    output(args, { ok: true, configDigest: digestJson(config), config });
+    return;
+  }
+  if (args.command === "plan-validate") {
+    const planPath = requiredOption(args, "plan");
+    const plan = loadPlan(planPath);
+    output(args, { ok: true, planDigest: digestJson(plan), plan });
+    return;
+  }
+
+  const git = new GitClient(config);
+  const github = new GitHubClient(config);
+  const codex = new CodexRunner(config, git);
+  const validator = new Validator(config);
+  const controller = new ReleaseController({ store, git, github, codex, validator });
+
+  if (args.command === "doctor") {
+    await git.preflight();
+    await github.preflight();
+    await codex.preflight();
+    output(args, { ok: true, checkedAt: nowIso(), configDigest: digestJson(config) });
+    return;
+  }
+
+  if (args.command === "start") {
+    const planPath = requiredOption(args, "plan");
+    const plan = loadPlan(planPath);
+    if (plan.issues.length > config.policy.maxIssues) {
+      throw new Error(`plan has ${plan.issues.length} issues; configured maximum is ${config.policy.maxIssues}`);
+    }
+    const job = await withControllerLock(store.repositoryLockPath(), async () => {
+      const active = store.active();
+      if (active.length > 0) {
+        throw new Error(`repository already has an active release job: ${active.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
+      }
+      return store.create({
+        configPath: resolve(configPath),
+        planPath: resolve(planPath),
+        plan,
+        configDigest: digestJson(config),
+        planDigest: digestJson(plan),
+      });
+    });
+    output(args, summarizeJob(job));
+    return;
+  }
+
+  const jobId = requiredOption(args, "job");
+  if (args.command === "status") {
+    output(args, args.options.operator ? operatorStatus(store.load(jobId)) : summarizeJob(store.load(jobId)));
+    return;
+  }
+
+  await withControllerLock(store.repositoryLockPath(), async () => {
+    if (args.command !== "cleanup") {
+      const conflicting = store.active(jobId);
+      if (conflicting.length > 0) {
+        throw new Error(`another release job is active for this repository: ${conflicting.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
+      }
+    }
+    if (args.command === "step") {
+      output(args, await controller.step(jobId));
+      return;
+    }
+    if (args.command === "run") {
+      const maximum = optionalInteger(args, "max-steps", 1, 10_000) ?? 200;
+      const history: StepResult[] = [];
+      for (let index = 0; index < maximum; index += 1) {
+        const result = await controller.step(jobId);
+        history.push(result);
+        if (!args.options.json) process.stdout.write(`${result.action}: ${result.message}\n`);
+        const job = store.load(jobId);
+        if (result.terminal || job.status === "blocked" || job.status === "completed" || job.status === "failed" || job.status === "ready_to_merge") break;
+        if (result.retryAfterMs) await sleep(result.retryAfterMs);
+      }
+      if (args.options.json) output(args, { job: summarizeJob(store.load(jobId)), steps: history });
+      return;
+    }
+    if (args.command === "retry") {
+      const reason = requiredOption(args, "reason");
+      let job = store.load(jobId);
+      if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
+      const notePath = join(store.root(job.id), `operator-retry-${Date.now()}.md`);
+      writeTextAtomic(notePath, `# Operator retry\n\nTime: ${nowIso()}\nPrevious code: ${job.blocked.code}\nPrevious phase: ${job.blocked.fromPhase}\n\n${reason.trim()}\n`);
+      const fromPhase = job.blocked.fromPhase;
+      job = retryBlockedJob(job);
+      const issue = job.currentIssueNumber === null ? null : job.issues.find((entry) => entry.number === job.currentIssueNumber) ?? null;
+      if (issue && (fromPhase === "implement" || fromPhase === "issue_validate")) {
+        issue.status = "running";
+        issue.nextRunKind = "recovery";
+        job.phase = "implement";
+      }
+      store.save(job);
+      output(args, { action: "retry_authorized", notePath, job: summarizeJob(job) });
+      return;
+    }
+    if (args.command === "abort") {
+      const reason = requiredOption(args, "reason");
+      const job = store.load(jobId);
+      if (job.activeRun) throw new Error("cannot abort while an active Codex run is recorded; first reconcile it with step");
+      const notePath = join(store.root(job.id), `operator-abort-${Date.now()}.md`);
+      writeTextAtomic(notePath, `# Operator abort\n\nTime: ${nowIso()}\n\n${reason.trim()}\n`);
+      job.status = "failed";
+      job.blocked = null;
+      store.save(job);
+      output(args, { action: "job_aborted", notePath, job: summarizeJob(job) });
+      return;
+    }
+    if (args.command === "cleanup") {
+      const job = store.load(jobId);
+      if (job.status !== "completed" && job.status !== "failed") throw new Error("cleanup requires a completed or failed job");
+      if (job.activeRun) throw new Error("cleanup refuses an active run");
+      await git.removeWorktree(job);
+      output(args, { action: "worktree_removed", jobId: job.id, worktreePath: job.worktreePath });
+      return;
+    }
+    throw new Error(`unsupported command: ${args.command}`);
+  });
+}
+
+type ParsedArgs = {
+  command: "help" | "config-validate" | "plan-validate" | "doctor" | "start" | "status" | "step" | "run" | "retry" | "abort" | "cleanup";
+  options: Record<string, string | boolean>;
+};
+
+function parseArgs(argv: string[]): ParsedArgs {
+  if (argv.length === 0 || argv[0] === "help" || argv[0] === "--help" || argv[0] === "-h") return { command: "help", options: {} };
+  let command: ParsedArgs["command"];
+  let offset = 1;
+  if (argv[0] === "config" && argv[1] === "validate") { command = "config-validate"; offset = 2; }
+  else if (argv[0] === "plan" && argv[1] === "validate") { command = "plan-validate"; offset = 2; }
+  else if (["doctor", "start", "status", "step", "run", "retry", "abort", "cleanup"].includes(argv[0]!)) command = argv[0] as ParsedArgs["command"];
+  else throw new Error(`unknown command: ${argv[0]}`);
+  const options: Record<string, string | boolean> = {};
+  for (let index = offset; index < argv.length; index += 1) {
+    const token = argv[index]!;
+    if (!token.startsWith("--")) throw new Error(`unexpected positional argument: ${token}`);
+    const key = token.slice(2);
+    if (key === "json" || key === "operator") {
+      options[key] = true;
+      continue;
+    }
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`option --${key} requires a value`);
+    if (key in options) throw new Error(`duplicate option --${key}`);
+    options[key] = value;
+    index += 1;
+  }
+  return { command, options };
+}
+
+function requiredOption(args: ParsedArgs, key: string): string {
+  const value = args.options[key];
+  if (typeof value !== "string" || !value.trim()) throw new Error(`--${key} is required`);
+  return value;
+}
+
+function optionalInteger(args: ParsedArgs, key: string, minimum: number, maximum: number): number | null {
+  const value = args.options[key];
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !/^\d+$/.test(value)) throw new Error(`--${key} must be an integer`);
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < minimum || number > maximum) throw new Error(`--${key} must be between ${minimum} and ${maximum}`);
+  return number;
+}
+
+function output(args: ParsedArgs, value: unknown): void {
+  if (args.options.json) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  else if (typeof value === "string") process.stdout.write(`${value}\n`);
+  else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function summarizeJob(job: JobState) {
+  return {
+    id: job.id,
+    status: job.status,
+    phase: job.phase,
+    repo: job.repo,
+    baseSha: job.baseSha,
+    branch: job.branch,
+    worktreePath: job.worktreePath,
+    currentIssueNumber: job.currentIssueNumber,
+    issues: job.issues.map((issue) => ({ number: issue.number, status: issue.status, commitSha: issue.commitSha, repairRounds: issue.repairRounds })),
+    candidateSha: job.candidateSha,
+    reviewRound: job.reviewRound,
+    hardeningRounds: job.hardeningRounds,
+    pullRequest: job.pullRequest,
+    blocked: job.blocked,
+    updatedAt: job.updatedAt,
+  };
+}
+
+function operatorStatus(job: JobState) {
+  return {
+    ...summarizeJob(job),
+    activeRun: job.activeRun,
+    lastRun: job.runs.at(-1) ?? null,
+    lastValidation: job.validations.at(-1) ?? null,
+    hardeningReasonPath: job.hardeningReasonPath,
+    lastReviewPath: job.lastReviewPath,
+    nextAction: nextAction(job),
+  };
+}
+
+function nextAction(job: JobState): string {
+  if (job.status === "blocked") return `Inspect blocked evidence and run retry --reason after resolving ${job.blocked?.code ?? "the blocker"}.`;
+  if (job.status === "ready_to_merge") return `Merge PR #${job.pullRequest?.number ?? "?"}, then run step to observe completion.`;
+  if (job.status === "completed" || job.status === "failed") return "No workflow action remains; cleanup is optional.";
+  return `Run step or run to continue phase ${job.phase}.`;
+}
+
+function printHelp(): void {
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate --config PATH [--json]\n  plan validate   --config PATH --plan PATH [--json]\n  doctor          --config PATH [--json]\n  start           --config PATH --plan PATH [--json]\n  status          --config PATH --job ID [--operator] [--json]\n  step            --config PATH --job ID [--json]\n  run             --config PATH --job ID [--max-steps N] [--json]\n  retry           --config PATH --job ID --reason TEXT [--json]\n  abort           --config PATH --job ID --reason TEXT [--json]\n  cleanup         --config PATH --job ID [--json]\n`);
+}
+
+main().catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

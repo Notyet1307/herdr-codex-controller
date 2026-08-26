@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "selfReview", "testsRun", "residualRisks", "blockedReason"],
+  "properties": {
+    "status": { "type": "string", "enum": ["completed", "blocked"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "selfReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["performed", "findingsFixed", "remainingConcerns"],
+      "properties": {
+        "performed": { "type": "boolean" },
+        "findingsFixed": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "remainingConcerns": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      }
+    },
+    "testsRun": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "outcome"],
+        "properties": {
+          "command": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "outcome": { "type": "string", "enum": ["passed", "failed", "not-run"] }
+        }
+      }
+    },
+    "residualRisks": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+    },
+    "blockedReason": { "type": ["string", "null"], "maxLength": 2000 }
+  }
+}

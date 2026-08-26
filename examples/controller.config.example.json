@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "repo": "OWNER/REPOSITORY",
+  "localPath": "/ABSOLUTE/PATH/TO/LOCAL/CHECKOUT",
+  "stateDir": "/ABSOLUTE/PRIVATE/PATH/herdr-codex-state",
+  "worktreeRoot": "/ABSOLUTE/PRIVATE/PATH/herdr-codex-worktrees",
+  "baseRef": "main",
+  "remote": "origin",
+  "branchPrefix": "agent/release",
+  "shell": "/bin/bash",
+  "codex": {
+    "bin": "codex",
+    "workerProfile": null,
+    "reviewerProfile": null,
+    "workerTimeoutMs": 3600000,
+    "reviewerTimeoutMs": 1800000,
+    "terminationGraceMs": 10000,
+    "networkAccess": false
+  },
+  "validation": {
+    "setup": [
+      { "command": "npm ci", "timeoutMs": 1800000 }
+    ],
+    "issue": [
+      { "command": "npm run typecheck", "timeoutMs": 900000 }
+    ],
+    "release": [
+      { "command": "npm run typecheck", "timeoutMs": 900000 },
+      { "command": "npm test", "timeoutMs": 1800000 },
+      { "command": "npm run build", "timeoutMs": 900000 }
+    ],
+    "maxOutputBytes": 131072
+  },
+  "policy": {
+    "maxIssueRepairRounds": 1,
+    "maxReleaseHardeningRounds": 1,
+    "maxCiRepairRounds": 1,
+    "maxIssues": 8,
+    "maxChangedFiles": 50,
+    "maxChangedLines": 4000
+  },
+  "review": {
+    "enabled": true,
+    "blockingSeverities": ["critical", "major"]
+  },
+  "delivery": {
+    "createPullRequest": true,
+    "draft": false,
+    "autoMerge": false,
+    "mergeMethod": "squash",
+    "allowNoChecks": false,
+    "pollIntervalMs": 15000
+  }
+}

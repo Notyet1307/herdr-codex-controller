@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "findings"],
+  "properties": {
+    "status": { "type": "string", "enum": ["pass", "changes", "blocked"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "path", "line", "summary", "rationale", "recommendation", "relatedIssues"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["critical", "major", "minor"] },
+          "path": { "type": ["string", "null"], "maxLength": 1000 },
+          "line": { "type": ["integer", "null"], "minimum": 1 },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "recommendation": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "relatedIssues": {
+            "type": "array",
+            "maxItems": 20,
+            "items": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    }
+  }
+}
