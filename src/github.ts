@@ -26,7 +26,7 @@ export class GitHubClient {
     if (value.nameWithOwner !== this.config.repo) throw new Error("GitHub repository identity differs from config.repo");
   }
 
-  async fetchIssue(number: number): Promise<IssueSnapshot> {
+  async fetchIssue(number: number, options: { allowClosed?: boolean } = {}): Promise<IssueSnapshot> {
     const result = requireCommandSuccess(await this.run([
       "issue", "view", String(number), "--repo", this.config.repo,
       "--json", "number,title,body,state,labels,assignees,url",
@@ -43,7 +43,7 @@ export class GitHubClient {
       fetchedAt: nowIso(),
     };
     if (snapshotIdentity.number !== number) throw new Error(`GitHub returned issue #${snapshotIdentity.number} for requested #${number}`);
-    if (snapshotIdentity.state !== "OPEN") throw new Error(`issue #${number} is not OPEN`);
+    if (snapshotIdentity.state !== "OPEN" && !options.allowClosed) throw new Error(`issue #${number} is not OPEN`);
     return { ...snapshotIdentity, digest: digestJson(snapshotIdentity) };
   }
 
