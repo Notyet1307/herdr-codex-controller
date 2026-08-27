@@ -174,6 +174,45 @@ test("operator retry after hardening exhaustion authorizes exactly one additiona
   }
 });
 
+test("operator retry after CI exhaustion authorizes exactly one CI hardening round", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      policy: { ...testConfig(repo).policy, maxCiRepairRounds: 0 },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    job.phase = "ci";
+    job.hardeningRounds = 2;
+    job.ciRepairRounds = 0;
+    job = blockJob(
+      job,
+      "ci_failed",
+      "CI repair requires operator authority",
+      join(store.root(job.id), "hardening-02-ci-failure.md"),
+    );
+
+    const retried = retryBlockedJob(job);
+
+    assert.equal(retried.status, "running");
+    assert.equal(retried.phase, "harden");
+    assert.equal(retried.hardeningRounds, 3);
+    assert.equal(retried.ciRepairRounds, 1);
+    assert.equal(retried.hardeningReasonPath, job.blocked?.detailsPath);
+    assert.equal(retried.blocked, null);
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("an interrupted Worker run is reconciled as a fresh recovery run without session resume", async () => {
   const repo = createTestRepo();
   try {

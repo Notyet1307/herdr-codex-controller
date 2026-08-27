@@ -157,12 +157,15 @@ export function blockJob(job: JobState, code: string, message: string, detailsPa
 
 export function retryBlockedJob(job: JobState): JobState {
   if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
-  const explicitlyAuthorizedHardening = job.blocked.code === "release_hardening_exhausted";
+  const explicitlyAuthorizedCiRepair = job.blocked.code === "ci_failed";
+  const explicitlyAuthorizedHardening =
+    job.blocked.code === "release_hardening_exhausted" || explicitlyAuthorizedCiRepair;
   return {
     ...job,
     status: "running",
     phase: explicitlyAuthorizedHardening ? "harden" : job.blocked.fromPhase,
     hardeningRounds: explicitlyAuthorizedHardening ? job.hardeningRounds + 1 : job.hardeningRounds,
+    ciRepairRounds: explicitlyAuthorizedCiRepair ? job.ciRepairRounds + 1 : job.ciRepairRounds,
     hardeningReasonPath: explicitlyAuthorizedHardening
       ? job.blocked.detailsPath ?? job.hardeningReasonPath
       : job.hardeningReasonPath,
