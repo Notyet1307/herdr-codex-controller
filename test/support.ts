@@ -9,12 +9,13 @@ import type {
   JobState,
   PullRequestState,
   ReleasePlan,
+  ReleasePlanV2,
   ReviewResult,
   RunKind,
   WorkerResult,
 } from "../src/types.js";
 import type { CodexPort, GitHubPort } from "../src/ports.js";
-import { digestJson, nowIso } from "../src/util.js";
+import { digestJson, nowIso, sha256PrefixedUtf8 } from "../src/util.js";
 import { ensurePrivateDir, writeJsonAtomic, writeTextAtomic } from "../src/fs-atomic.js";
 import type { GitClient } from "../src/git.js";
 
@@ -120,6 +121,47 @@ export function testPlan(issueNumbers = [1, 2]): ReleasePlan {
       allowNoop: false,
     })),
     releaseAcceptanceCriteria: ["All issue files exist."],
+    reviewFocus: ["Cross-issue correctness."],
+  };
+}
+
+export function testPlanV2(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlanV2 {
+  const parentIssue = 100;
+  return {
+    version: 2,
+    source: {
+      planner: "pi-ticket-planning",
+      repo: "example/project",
+      baseRef: "main",
+      baseSha: git(repo.source, ["rev-parse", "origin/main"]),
+      parentBinding: {
+        number: parentIssue,
+        expectedTitle: `Issue ${parentIssue}`,
+        expectedBodyHash: sha256PrefixedUtf8(`Create issue-${parentIssue}.txt.`),
+      },
+      specContentHash: sha256PrefixedUtf8("fixture specification"),
+      deliveryGraphDigest: sha256PrefixedUtf8("fixture delivery graph"),
+    },
+    id: "release-fixture-v2",
+    title: "Source-bound fixture release",
+    objective: "Implement the exact source-bound fixture issues as one coherent release.",
+    parentIssue,
+    issues: issueNumbers.map((number, index) => ({
+      number,
+      order: index + 1,
+      dependsOn: index === 0 ? [] : [issueNumbers[index - 1]!],
+      objective: `Implement exact fixture issue ${number}.`,
+      acceptanceCriteria: [
+        `issue-${number}.txt exists`,
+        `Issue ${number} behavior is covered`,
+        `Issue ${number} remains compatible`,
+      ],
+      suggestedValidation: [],
+      allowNoop: false,
+      expectedTitle: `Issue ${number}`,
+      expectedBodyHash: sha256PrefixedUtf8(`Create issue-${number}.txt.`),
+    })),
+    releaseAcceptanceCriteria: ["All exact source-bound issue files exist."],
     reviewFocus: ["Cross-issue correctness."],
   };
 }
