@@ -25,6 +25,31 @@ node --version
 3. 连续完成数个小 Release 后，再考虑 auto-merge。
 4. 先保持单仓库单 Job；多仓库并发由独立进程和独立目录实现。
 
+## Dispatcher 上线与定时执行
+
+连续领取是 Controller 上方的可选层。先手工执行并检查至少一次 idle 结果，再交给桌面定时任务：
+
+```bash
+node dist/src/cli.js config validate --config /PRIVATE/PATH/controller.json --json
+node dist/src/cli.js doctor --config /PRIVATE/PATH/controller.json --json
+node dist/src/cli.js dispatch --config /PRIVATE/PATH/controller.json --dispatcher /PRIVATE/PATH/dispatcher.json --json
+node dist/src/cli.js dispatch status --config /PRIVATE/PATH/controller.json --dispatcher /PRIVATE/PATH/dispatcher.json --json
+```
+
+安全前提：
+
+- Dispatcher 配置的 `parentIssue` 是唯一 admission map；只按 GitHub 返回的 sub-issue 顺序选择；
+- `readyLabel` 固定为 `ready-for-agent`；Dispatcher 不添加或删除该标签；
+- 必须观察到 Child 为 OPEN、无 assignee、原生 `issue_dependencies_summary.blocked_by=0`；字段缺失即失败；
+- Claim 是 `gh issue edit --add-assignee <当前登录用户>`，写后必须观察到唯一 assignee 正是该用户；
+- Controller 必须启用 aggregate review、critical/major 阻断、PR checks、squash auto-merge，并禁用 `allowNoChecks`；
+- `postMerge.requiredWorkflows` 使用 `gh run list` 返回的精确 workflow name，列表不能为空；
+- 定时任务只运行 `dispatch` 命令，不修改 label、不执行 Controller retry、不清理 Worktree/证据。
+
+`issue_completed_verified` 不是终态：形成完整 post-merge 证据后，同一个 `dispatch` 进程会立即选择并领取下一个合格 Issue。`queue_idle` 才是正常终态，表示当前没有满足全部 admission gate 的 Issue。`repository_busy` 表示同一 state root 已有其他 Job；本次不领取，下一次计划运行再检查。`job_blocked` 和 `dispatcher_blocked` 都是人工处理点，不应通过扩大 retry 次数绕过。
+
+每次成功交付后，Dispatcher 在 `stateDir/dispatcher/state.json` 保留候选 SHA、PR、merge SHA、main workflow receipts 和完成时间；只有这些证据齐全才清空当前 claim，并在当前运行内开放后继 Issue 的 admission slot。桌面定时任务仍可在 `queue_idle` 后定期唤醒，以领取后来新增或解除 blocker 的 Issue。
+
 ## v2 Planner handoff 启动
 
 v2 只接受公开 Release Plan 文件；不要安装/加载 `pi-ticket-planning` package，也不要让 Controller 读取 Planner 私有 artifact。
@@ -56,6 +81,10 @@ v2 Job 的第一次 `step` 只在 git/GitHub/Codex preflight、remote base、Par
 - `validator_mutated_worktree`：验证命令修改了 Git-visible 文件；修复命令或 `.gitignore`。
 - `review_candidate_drift`：Review 前 candidate 不再等于 clean HEAD。
 - `pull_request_head_drift`：PR 被其他写者更新；人工决定是否重新建立 candidate。
+- `dispatcher_issue_source_drift` / `dispatcher_parent_membership_drift`：领取后的 Child 内容或 Parent membership 改变；停止并重新批准 Issue，而不是沿用旧内容。
+- `dispatcher_claim_conflict`：Claim 后未观察到当前 GitHub 用户是唯一 assignee。
+- `post_merge_ci_failed`：至少一个配置的 main push workflow 非 success；不会领取下一项。
+- `post_merge_verification_timeout`：merge/base、Issue closure 或 main workflow receipt 在时限内没有形成完整证据。
 - `config_drift`：当前配置与 Job 启动时绑定的 digest 不一致；恢复完全相同的配置后再继续。`config.snapshot.json` 只用于证据和人工核对，不会被运行时静默采用。
 - `plan_base_drift`：当前 remote/baseRef commit 不等于 v2 `source.baseSha`。
 - `plan_parent_not_open` / `plan_parent_drift`：Parent 已关闭或精确 title/raw-body hash 漂移。

@@ -8,12 +8,13 @@
 
 系统不控制 Codex 内部推理过程，只控制外部交付事实。
 
-## 2. 三个组件
+## 2. 三个核心组件和一个可选上层
 
 ```text
 Release Plan  → 决定做什么、顺序和验收标准
 Codex CLI     → 决定如何探索、实现、自测和自我 Review
 Controller    → Worktree、状态、验证、commit、PR、CI、人工 gate
+Dispatcher    → 可选；只做严格 admission、GitHub claim、单 Job 串行与 post-merge gate
 ```
 
 ## 3. Release Plan 与来源绑定
@@ -155,6 +156,24 @@ V1 可安全增加：
 - 更多确定性 validation adapter；
 - PR body 和 label 策略；
 - 可选人工批准。
+
+可选 Dispatcher 仍位于单个 Release Controller 之上。它不保存 Codex Session，不并行同仓库 Writer，也不决定如何实现 Issue。其新增耐久状态只覆盖无法从单一系统原子重建的跨边界事实：GitHub claim、对应 Controller Job、以及下一次 claim 前必须满足的 post-merge receipts。
+
+Dispatcher 的选择与交付序列是：
+
+```text
+Parent sub-issue order
+→ OPEN + ready-for-agent + unassigned + native open blockers=0
+→ exclusive current-user claim
+→ deterministic one-Issue Plan
+→ pre-Worker exact source recheck
+→ serial Controller Job
+→ exact-HEAD auto-merge
+→ origin/base ancestry + Issue CLOSED + required main workflows SUCCESS
+→ release next admission slot and claim the next eligible Child in the same dispatch run
+```
+
+任何字段缺失、身份漂移、Controller blocked、PR/CI 失败或 post-merge evidence 不完整都会保留 claim 并停止。
 
 V1 不应重新增加：
 

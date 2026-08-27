@@ -28,6 +28,16 @@ export class GitClient {
     return sha;
   }
 
+  async isAncestorOfRemoteBase(sha: string): Promise<boolean> {
+    assertSha(sha);
+    const result = await this.run(this.config.localPath, [
+      "merge-base", "--is-ancestor", sha, `${this.config.remote}/${this.config.baseRef}`,
+    ]);
+    if (result.exitCode === 0) return true;
+    if (result.exitCode === 1) return false;
+    throw new Error(`cannot verify merged commit ancestry: ${result.stderrTail || result.stdoutTail}`);
+  }
+
   async ensureWorktree(job: JobState): Promise<void> {
     if (!job.baseSha) throw new Error("job base SHA is missing");
     ensurePrivateDir(this.config.worktreeRoot);

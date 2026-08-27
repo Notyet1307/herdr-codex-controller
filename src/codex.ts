@@ -17,6 +17,10 @@ import type { GitClient } from "./git.js";
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const WORKER_SCHEMA = join(PACKAGE_ROOT, "schemas", "worker-result.schema.json");
 const REVIEW_SCHEMA = join(PACKAGE_ROOT, "schemas", "review-result.schema.json");
+const WORKER_MODEL = "gpt-5.6-terra";
+const WORKER_REASONING_EFFORT = "high";
+const REVIEWER_MODEL = "gpt-5.6-sol";
+const REVIEWER_REASONING_EFFORT = "max";
 
 export type CodexExecution = {
   record: CodexRunRecord;
@@ -83,6 +87,11 @@ export class CodexRunner {
     ];
     const profile = isReview ? this.config.codex.reviewerProfile : this.config.codex.workerProfile;
     if (profile) args.push("--profile", profile);
+    args.push("--model", isReview ? REVIEWER_MODEL : WORKER_MODEL);
+    args.push(
+      "--config",
+      `model_reasoning_effort="${isReview ? REVIEWER_REASONING_EFFORT : WORKER_REASONING_EFFORT}"`,
+    );
     args.push("-");
     const command = await runCommand({
       command: this.config.codex.bin,

@@ -13,6 +13,9 @@ import { digestJson, nowIso, sleep } from "./util.js";
 import { writeTextAtomic } from "./fs-atomic.js";
 import type { JobState, ReleasePlan, StepResult } from "./types.js";
 import { ControllerError } from "./errors.js";
+import { assertDispatcherCompatible, loadDispatcherConfig } from "./dispatcher-config.js";
+import { IssueDispatcher } from "./dispatcher.js";
+import type { DispatcherStepResult } from "./types.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -75,6 +78,45 @@ async function main(): Promise<void> {
     await github.preflight();
     await codex.preflight();
     output(args, { ok: true, checkedAt: nowIso(), configDigest });
+    return;
+  }
+
+  if (args.command === "dispatch" || args.command === "dispatch-status" || args.command === "dispatch-retry") {
+    const dispatcherConfigPath = requiredOption(args, "dispatcher");
+    const dispatcherConfig = loadDispatcherConfig(dispatcherConfigPath);
+    assertDispatcherCompatible(dispatcherConfig, config);
+    const dispatcher = new IssueDispatcher({
+      store,
+      controller,
+      git,
+      github,
+      controllerConfig: config,
+      controllerConfigPath: resolve(configPath),
+      controllerConfigDigest: configDigest,
+      dispatcherConfig,
+      dispatcherConfigPath: resolve(dispatcherConfigPath),
+      dispatcherConfigDigest: digestJson(dispatcherConfig),
+    });
+    if (args.command === "dispatch-status") {
+      output(args, dispatcher.status());
+      return;
+    }
+    await withControllerLock(store.repositoryLockPath(), async () => {
+      if (args.command === "dispatch-retry") {
+        output(args, dispatcher.retry(requiredOption(args, "reason")));
+        return;
+      }
+      const maximum = optionalInteger(args, "max-steps", 1, 10_000) ?? 500;
+      const history: DispatcherStepResult[] = [];
+      for (let index = 0; index < maximum; index += 1) {
+        const result = await dispatcher.step();
+        history.push(result);
+        if (!args.options.json) process.stdout.write(`${result.action}: ${result.message}\n`);
+        if (result.terminal) break;
+        if (result.retryAfterMs) await sleep(result.retryAfterMs);
+      }
+      if (args.options.json) output(args, { dispatcher: dispatcher.status(), steps: history });
+    });
     return;
   }
 
@@ -152,7 +194,7 @@ async function main(): Promise<void> {
 }
 
 type ParsedArgs = {
-  command: "help" | "config-validate" | "plan-validate" | "doctor" | "start" | "status" | "step" | "run" | "retry" | "abort" | "cleanup";
+  command: "help" | "config-validate" | "plan-validate" | "doctor" | "start" | "status" | "step" | "run" | "retry" | "abort" | "cleanup" | "dispatch" | "dispatch-status" | "dispatch-retry";
   options: Record<string, string | boolean>;
 };
 
@@ -162,6 +204,9 @@ function parseArgs(argv: string[]): ParsedArgs {
   let offset = 1;
   if (argv[0] === "config" && argv[1] === "validate") { command = "config-validate"; offset = 2; }
   else if (argv[0] === "plan" && argv[1] === "validate") { command = "plan-validate"; offset = 2; }
+  else if (argv[0] === "dispatch" && argv[1] === "status") { command = "dispatch-status"; offset = 2; }
+  else if (argv[0] === "dispatch" && argv[1] === "retry") { command = "dispatch-retry"; offset = 2; }
+  else if (argv[0] === "dispatch") { command = "dispatch"; offset = 1; }
   else if (["doctor", "start", "status", "step", "run", "retry", "abort", "cleanup"].includes(argv[0]!)) command = argv[0] as ParsedArgs["command"];
   else throw new Error(`unknown command: ${argv[0]}`);
   const options: Record<string, string | boolean> = {};
@@ -273,7 +318,7 @@ function nextAction(job: JobState): string {
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate --config PATH [--json]\n  plan validate   --config PATH --plan PATH [--json]\n  doctor          --config PATH [--json]\n  start           --config PATH --plan PATH [--expected-config-digest 64HEX] [--json]\n  status          --config PATH --job ID [--operator] [--json]\n  step            --config PATH --job ID [--json]\n  run             --config PATH --job ID [--max-steps N] [--json]\n  retry           --config PATH --job ID --reason TEXT [--json]\n  abort           --config PATH --job ID --reason TEXT [--json]\n  cleanup         --config PATH --job ID [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate  --config PATH [--json]\n  plan validate    --config PATH --plan PATH [--json]\n  doctor           --config PATH [--json]\n  start            --config PATH --plan PATH [--expected-config-digest 64HEX] [--json]\n  status           --config PATH --job ID [--operator] [--json]\n  step             --config PATH --job ID [--json]\n  run              --config PATH --job ID [--max-steps N] [--json]\n  retry            --config PATH --job ID --reason TEXT [--json]\n  abort            --config PATH --job ID --reason TEXT [--json]\n  cleanup          --config PATH --job ID [--json]\n  dispatch         --config PATH --dispatcher PATH [--max-steps N] [--json]\n  dispatch status  --config PATH --dispatcher PATH [--json]\n  dispatch retry   --config PATH --dispatcher PATH --reason TEXT [--json]\n`);
 }
 
 main().catch((error) => {

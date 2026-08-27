@@ -1,5 +1,17 @@
 # Unreleased
 
+Added an optional fail-closed serial Issue dispatcher and hardened auto-merge:
+
+- select only the first parent-ordered open `ready-for-agent` child with no assignee and zero native open blockers;
+- persist claim/job identity across GitHub/local crash windows and recheck exact Issue source immediately before the first Worker;
+- require reviewed squash auto-merge with `gh pr merge --auto --match-head-commit <candidateSha>`;
+- refuse a subsequent claim until the merge commit is on the configured base, the Issue is closed, and every configured main push workflow succeeds;
+- continue in the same dispatcher run to select and claim the next eligible Issue once all post-merge gates pass;
+- expose `dispatch`, `dispatch status`, and explicit `dispatch retry` commands with a closed JSON Schema and example policy;
+- keep labels, retries, cleanup, Agent state, and same-repository parallelism outside automatic authority.
+
+Pinned Codex execution routing so all writing and hardening runs use `gpt-5.6-terra` with `high` reasoning, while only aggregate read-only release review uses `gpt-5.6-sol` with `max` reasoning. Explicit invocation flags override any profile-level model defaults.
+
 Added a backward-compatible Release Plan v2 source-binding contract for `pi-ticket-planning` handoffs:
 
 - preserved Release Plan v1 validation and execution semantics;

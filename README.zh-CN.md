@@ -72,6 +72,53 @@ complete 或人工 gate
 - 不恢复 Codex Session；中断后保留 Worktree，并由 fresh Codex 重新检查；
 - 单仓库串行：同一 `stateDir` 只允许一个非终态 Release Job；多仓库并发应使用独立进程、独立 `stateDir` 和 `worktreeRoot`。
 
+## 可选的连续 Issue Dispatcher
+
+Dispatcher 是 Controller 上方的薄 admission/串行调度层，不是 Agent Runtime，也不会做开放式规划。每次只处理一个 Parent 的一个 Child：
+
+```text
+读取 Parent 的原生 sub-issue 顺序
+→ 选择第一个 OPEN + ready-for-agent + 无 assignee + open blocker=0 的 Child
+→ 以当前 GitHub 登录身份独占领取
+→ 从固定的 What to build / Acceptance criteria 段生成单 Issue v1 Plan
+→ Controller prepare 后、首个 Worker 前再次核对 Parent membership、title、raw body hash、label、assignee 和 blocker
+→ 串行运行一个 Controller Job
+→ exact candidate review + PR checks
+→ gh pr merge --squash --auto --match-head-commit <candidateSha>
+→ 验证 merge SHA 已进入 origin/base、Issue 已关闭、配置的 main push workflows 全部 success
+→ 同一次 dispatch 立即选择并领取下一个合格 Issue
+→ 队列无合格项时以 queue_idle 正常停止；blocked/failure 时 fail closed
+```
+
+它不会自动添加 `ready-for-agent`、不会抢已分配 Issue、不会跳过 blocker、不会在 blocked/CI failure 时自动 retry，也不会同时驱动两个同仓库 Job。GitHub 未返回原生 dependency summary 时也会 fail closed。
+
+Dispatcher 只接受以下 Controller 策略：`review.enabled=true`、`critical`/`major` 都阻断、`createPullRequest=true`、`autoMerge=true`、`allowNoChecks=false`、`mergeMethod=squash`。
+
+配置和命令：
+
+```bash
+cp examples/dispatcher.config.example.json /PRIVATE/PATH/dispatcher.json
+
+node dist/src/cli.js dispatch \
+  --config /PRIVATE/PATH/controller.json \
+  --dispatcher /PRIVATE/PATH/dispatcher.json
+
+node dist/src/cli.js dispatch status \
+  --config /PRIVATE/PATH/controller.json \
+  --dispatcher /PRIVATE/PATH/dispatcher.json --json
+```
+
+只有 Dispatcher 自身因外部事实漂移或 post-merge gate 失败进入 `blocked` 时，解决真实原因后才显式授权：
+
+```bash
+node dist/src/cli.js dispatch retry \
+  --config /PRIVATE/PATH/controller.json \
+  --dispatcher /PRIVATE/PATH/dispatcher.json \
+  --reason "已检查并解决阻断原因"
+```
+
+若内部 Controller Job blocked，仍使用标准 `retry --job ... --reason ...`，Dispatcher 不代替该授权。
+
 ## 环境要求
 
 - Node.js `>=22.16.0`
@@ -131,6 +178,7 @@ v2 示例中的 SHA/hash 只是满足格式的占位值，不能直接启动；�
 schemas/release-plan-v1.schema.json
 schemas/release-plan-v2.schema.json
 schemas/release-plan.schema.json       # oneOf(v1, v2)
+schemas/dispatcher-config.schema.json  # 可选串行 Dispatcher policy
 ```
 
 `expectedTitle` 使用 GitHub API 返回的原始字符串做 `===` 比较，不 trim、不大小写折叠、不 Unicode normalize。`expectedBodyHash` 对 GitHub API 返回的原始 body 做 UTF-8 SHA-256；不 trim、不 normalize、不转换换行、不解析 Markdown，空 body 按空字符串计算。Issue body hash 带 `sha256:` 前缀，config/plan digest 不带前缀。
@@ -177,7 +225,7 @@ shell_environment_policy.inherit="core"
 shell_environment_policy.ignore_default_excludes=false
 ```
 
-`workerProfile` 和 `reviewerProfile` 可以先设为 `null`，使用当前 Codex 默认配置。若指定 profile，该 profile 不应启用可写外部 MCP、危险 hooks、额外 writable roots 或 live web search。
+模型路由由每次调用的显式参数固定：`worker`、`issue-repair`、`release-harden` 使用 `gpt-5.6-terra` + `high`；只有只读 aggregate `review` 使用 `gpt-5.6-sol` + `max`。`workerProfile` 和 `reviewerProfile` 可以先设为 `null`；若指定 profile，它只用于附加安全配置，显式模型/推理档位仍覆盖 profile，并且 profile 不应启用可写外部 MCP、危险 hooks、额外 writable roots 或 live web search。
 
 ## 第一次使用
 
@@ -308,7 +356,10 @@ npm run verify
 - 中断运行基于 Worktree 的 fresh recovery；
 - `SIGINT`/`SIGTERM` 终止子进程组并保留 fresh-recovery 边界；
 - `codex exec` 的 ephemeral、structured output、sandbox 和网络关闭参数；
+- Codex 写入 run 的 `gpt-5.6-terra/high` 与 aggregate Reviewer 的 `gpt-5.6-sol/max` 显式路由；
 - PR 的 exact head branch、base branch 与 candidate SHA 绑定。
+- auto-merge 的 `--match-head-commit` exact reviewed-candidate 绑定；
+- Dispatcher 的 Parent 顺序、ready label、原生 blocker、独占 assignee、pre-Worker source binding 和 post-merge main workflow gate。
 
 这些是确定性本地/假端口测试，不代表 `pi-ticket-planning` 与真实 Controller/GitHub/Codex 的跨仓 canary 已执行。跨仓闭环只有在 Planner 后续以真实 v2 handoff 运行通过后才能宣称。
 
