@@ -107,10 +107,22 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     let reviews = 0;
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind === "review") {
+        assert.match(input.prompt, /# Included Issue scope/);
+        assert.match(input.prompt, /BEGIN HERDR_ISSUE_[0-9A-F]{20}/);
+        assert.match(input.prompt, /Create issue-1\.txt\./);
+        assert.match(input.prompt, /explicitly listed as out of scope/);
+        assert.match(input.prompt, /assigned to a downstream Issue/);
         reviews += 1;
         return reviews === 1
           ? { review: { status: "changes", summary: "Needs hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "Missing hardening evidence", rationale: "Fixture", recommendation: "Add hardening.txt", relatedIssues: [1] }] } }
           : { review: { status: "pass", summary: "Hardened candidate passes", findings: [] } };
+      }
+      if (input.kind === "release-harden") {
+        assert.match(input.prompt, /# Included Issue scope/);
+        assert.match(input.prompt, /BEGIN HERDR_ISSUE_[0-9A-F]{20}/);
+        assert.match(input.prompt, /Create issue-1\.txt\./);
+        assert.match(input.prompt, /reject that finding in your self-review/);
+        assert.match(input.prompt, /valid in-scope defect/);
       }
       return {};
     });
