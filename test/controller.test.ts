@@ -175,6 +175,42 @@ test("operator retry after hardening exhaustion authorizes exactly one additiona
   }
 });
 
+test("operator retry after an oversized release diff authorizes one shrinking hardening round", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    job.phase = "release_validate";
+    job.hardeningRounds = 3;
+    job = blockJob(
+      job,
+      "release_diff_too_large",
+      "the release diff exceeds the configured changed-line limit",
+      join(store.root(job.id), "release-validation.json"),
+    );
+
+    const authorizationPath = join(store.root(job.id), "operator-retry.md");
+    const retried = retryBlockedJob(job, authorizationPath);
+
+    assert.equal(retried.status, "running");
+    assert.equal(retried.phase, "harden");
+    assert.equal(retried.hardeningRounds, 4);
+    assert.equal(retried.hardeningReasonPath, authorizationPath);
+    assert.equal(retried.blocked, null);
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("operator retry after CI exhaustion authorizes exactly one CI hardening round", () => {
   const repo = createTestRepo();
   try {

@@ -159,7 +159,9 @@ export function retryBlockedJob(job: JobState, authorizationPath?: string): JobS
   if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
   const explicitlyAuthorizedCiRepair = job.blocked.code === "ci_failed";
   const explicitlyAuthorizedHardening =
-    job.blocked.code === "release_hardening_exhausted" || explicitlyAuthorizedCiRepair;
+    job.blocked.code === "release_hardening_exhausted"
+    || job.blocked.code === "release_diff_too_large"
+    || explicitlyAuthorizedCiRepair;
   return {
     ...job,
     status: "running",
