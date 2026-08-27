@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "source": {
+    "planner": "pi-ticket-planning",
+    "repo": "OWNER/REPO",
+    "baseRef": "main",
+    "baseSha": "0123456789abcdef0123456789abcdef01234567",
+    "parentBinding": {
+      "number": 100,
+      "expectedTitle": "Exact Parent Issue title from the GitHub API",
+      "expectedBodyHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "specContentHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "deliveryGraphDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "id": "source-bound-release-001",
+  "title": "Implement the approved source-bound product increment",
+  "objective": "Deliver exactly the approved base and Issue contents as one coherent release.",
+  "parentIssue": 100,
+  "issues": [
+    {
+      "number": 101,
+      "order": 1,
+      "dependsOn": [],
+      "objective": "Implement the exact behavior approved for Child Issue #101.",
+      "acceptanceCriteria": [
+        "The approved behavior for Child Issue #101 is implemented.",
+        "Relevant deterministic tests cover the behavior and error paths.",
+        "Existing supported behavior remains backward compatible."
+      ],
+      "suggestedValidation": [],
+      "allowNoop": false,
+      "expectedTitle": "Exact Child Issue title from the GitHub API",
+      "expectedBodyHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "releaseAcceptanceCriteria": [
+    "The exact approved Child Issue works against the approved base commit.",
+    "Full repository validation passes."
+  ],
+  "reviewFocus": [
+    "Source-bound scope and backward compatibility.",
+    "Error recovery and security-sensitive boundaries."
+  ]
+}

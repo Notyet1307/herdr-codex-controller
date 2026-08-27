@@ -36,6 +36,10 @@ src/state.ts
 src/prompts.ts
 examples/controller.config.example.json
 examples/release-plan.example.json
+examples/release-plan-v2.example.json
+schemas/release-plan-v1.schema.json
+schemas/release-plan-v2.schema.json
+schemas/release-plan.schema.json
 ```
 
 用下面这句话作为你的架构判断基线：
@@ -142,7 +146,12 @@ gh issue view <EACH_ISSUE> --repo <OWNER/REPO> --json number,title,body,state,la
 
 ## 阶段 4：生成 Release Plan
 
-以 `examples/release-plan.example.json` 为模板，按用户给定顺序写入 Issue。
+先判断来源，不得混用两个版本：
+
+- 手工接入或旧集成：以 `examples/release-plan.example.json` 为模板生成 v1。
+- 已由 `pi-ticket-planning` 批准并导出的 exact handoff：原样接收 v2，并用 `examples/release-plan-v2.example.json` 与 schema 核对结构。不要自行猜测或伪造 source hash，也不要读取 Planner 私有 Planning Case/Handoff artifact。
+
+v1 按用户给定顺序写入 Issue。
 
 每个 Issue 至少包含：
 
@@ -178,6 +187,20 @@ reviewFocus
 
 不要把完整项目规划系统塞进这个 Plan。它只是当前一组已确定 Issue 的执行输入。
 
+v2 还必须确认：
+
+```text
+source.repo == config.repo
+source.baseRef == config.baseRef
+source.baseSha 是批准时的 40 位小写 exact commit
+parentBinding.number == parentIssue
+Parent/Child expectedTitle 是 GitHub API 原始 title
+Parent/Child expectedBodyHash 是原始 body UTF-8 SHA-256（带 sha256:）
+每个 Child 有 3–8 条 AC、suggestedValidation=[]、allowNoop=false
+```
+
+不得 trim/normalize `expectedTitle`，不得 trim、转换换行或解析 Markdown 后再 hash body。
+
 ## 阶段 5：静态验证与 doctor
 
 执行：
@@ -194,7 +217,9 @@ node dist/src/cli.js doctor \
   --config <PRIVATE_RUNTIME_ROOT>/controller.json --json
 ```
 
-任何失败都要先修真实原因。不要跳过 doctor。
+记录 `config validate` 返回的 `configDigest` 和 `plan validate` 返回的 `planDigest`。digest 是 validated object 递归排序 object keys、保留 array 顺序、`JSON.stringify` 后的 SHA-256 小写 hex；不带 `sha256:` 前缀。
+
+任何失败都要先修真实原因。不要跳过 doctor，也不要在记录 digest 后修改 config。
 
 ## 阶段 6：第一次本地 Release 演练
 
@@ -205,6 +230,18 @@ node dist/src/cli.js start \
   --config <PRIVATE_RUNTIME_ROOT>/controller.json \
   --plan <PRIVATE_RUNTIME_ROOT>/release-plan.json --json
 ```
+
+上面是 v1 兼容调用。v2 必须增加刚才批准的 exact config digest：
+
+```bash
+node dist/src/cli.js start \
+  --config <PRIVATE_RUNTIME_ROOT>/controller.json \
+  --plan <PRIVATE_RUNTIME_ROOT>/release-plan.json \
+  --expected-config-digest <CONFIG_DIGEST_64_LOWERCASE_HEX> \
+  --json
+```
+
+v2 第一次 `step` 必须先观察到 current remote base、Parent OPEN/title/body、全部 Child OPEN/title/body exact 通过；只有随后才允许出现 Worktree、setup validation 或 Codex run。任何 `plan_*_drift` / `plan_*_not_open` 都停止，不 retry、不自动更新 Plan，回到 Planner 生成新 handoff。
 
 记录返回的 Job ID，然后先逐步执行并观察前 3～5 个 transition：
 
@@ -218,6 +255,7 @@ node dist/src/cli.js status --config <PRIVATE_RUNTIME_ROOT>/controller.json --jo
 ```text
 Worktree/branch 正确
 Issue snapshot 正确
+v2 Parent/Child source verification 发生在 Worktree/setup/Codex run 前
 Codex Worker 使用 fresh exec
 Codex 未 commit/push/调用 gh
 Controller validation 命令正确
@@ -294,6 +332,7 @@ PR 必须指向 exact reviewed candidate SHA。Checks 通过后，Controller 进
 8. PR/CI 状态（若启用）
 9. 所有人工推断、blocked、retry 和剩余风险
 10. 明确确认没有引入 Pi/Herdr/subagent runtime 或 per-Issue Reviewer
+11. 若使用 v2，分别列出 config digest gate、base/Parent/Child source gate；未实际运行真实 Planner cross-repo canary 时明确写“未运行”，不得用本地 fixture 代替
 ```
 
 优先把系统真正运行起来，而不是继续扩展架构。只有实测数据证明某个缺口重复出现，才提出最小改动。

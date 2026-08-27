@@ -100,6 +100,14 @@ cp examples/controller.config.example.json /PRIVATE/PATH/controller.json
 cp examples/release-plan.example.json /PRIVATE/PATH/release-plan.json
 ```
 
+上面的 Release Plan 示例是 v1（手工/旧集成）。只有接收 `pi-ticket-planning` 的精确 source-bound handoff 时，才使用：
+
+```bash
+cp examples/release-plan-v2.example.json /PRIVATE/PATH/release-plan.json
+```
+
+v2 示例中的 SHA/hash 只是满足格式的占位值，不能直接启动；所有 source/expected 字段必须来自 Planner 批准的真实 handoff。
+
 必须修改：
 
 - `repo`
@@ -110,6 +118,42 @@ cp examples/release-plan.example.json /PRIVATE/PATH/release-plan.json
 - Release Plan 中的 Issue 编号和验收标准
 
 `localPath`、`stateDir`、`worktreeRoot` 必须是互不重叠的绝对路径。
+
+## Release Plan v1 / v2
+
+- v1 是手工计划和旧集成的兼容格式；`parentIssue` 可为 `null`，Issue `objective` 可为 `null`，并保留既有 `suggestedValidation`、`allowNoop` 语义。
+- v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent Issue 的精确 title/body hash，以及每个 Child Issue 的精确 title/body hash。
+- Controller 不读取 Planner 的 Planning Case、Handoff 私有 artifact 或 Delivery Graph；v2 文件本身就是完整公开契约。
+
+公开 schema：
+
+```text
+schemas/release-plan-v1.schema.json
+schemas/release-plan-v2.schema.json
+schemas/release-plan.schema.json       # oneOf(v1, v2)
+```
+
+`expectedTitle` 使用 GitHub API 返回的原始字符串做 `===` 比较，不 trim、不大小写折叠、不 Unicode normalize。`expectedBodyHash` 对 GitHub API 返回的原始 body 做 UTF-8 SHA-256；不 trim、不 normalize、不转换换行、不解析 Markdown，空 body 按空字符串计算。Issue body hash 带 `sha256:` 前缀，config/plan digest 不带前缀。
+
+config/plan digest 的算法为：先验证并构造 Controller 返回的对象；递归排序每个 object 的 key，保留 array 顺序；对 `JSON.stringify` 结果计算 SHA-256，输出 64 位小写 hex。`config validate` 和 `plan validate` 返回的 digest 是启动时应使用和记录的权威值。
+
+v2 prepare 严格按以下顺序执行：
+
+```text
+git preflight
+→ GitHub preflight
+→ Codex 版本/登录 preflight（不执行 codex exec）
+→ fetch 当前 remote/baseRef
+→ baseSha exact gate
+→ fetch + verify Parent OPEN/title/body
+→ fetch + verify 全部 Child OPEN/title/body
+→ ensureWorktree
+→ 写入 snapshots
+→ setup validation
+→ implement
+```
+
+`plan_base_drift`、`plan_parent_not_open`、`plan_parent_drift`、`plan_issue_not_open`、`plan_issue_drift` 都发生在 Worktree、setup 和 Codex run 之前。Controller 不自动更新漂移的 Plan；应停止旧 Job，回到 Planner 生成并批准新的 v2 Plan。
 
 Codex Worker 固定使用（approval policy 是 `codex` 顶层参数）：
 
@@ -154,6 +198,18 @@ node dist/src/cli.js start \
   --config /PRIVATE/PATH/controller.json \
   --plan /PRIVATE/PATH/release-plan.json --json
 ```
+
+上面的 `start` 对 v1 保持兼容。v2 必须从刚才 `config validate` 的输出复制精确 `configDigest`，且不得带 `sha256:` 前缀：
+
+```bash
+node dist/src/cli.js start \
+  --config /PRIVATE/PATH/controller.json \
+  --plan /PRIVATE/PATH/release-plan.json \
+  --expected-config-digest 64位小写CONFIG_DIGEST \
+  --json
+```
+
+缺失、格式非法或与当前已验证配置不一致会分别以 `expected_config_digest_required`、`expected_config_digest_invalid`、`expected_config_digest_mismatch` 失败，并且不会创建 Job。
 
 `start` 返回 Job ID。随后运行：
 
@@ -207,6 +263,8 @@ stateDir/
     config.snapshot.json
     plan.snapshot.json
     issues/
+      parent-issue-<number>.json   # v2
+      issue-<number>.json
     runs/
       <run-id>/
         prompt.md
@@ -240,6 +298,9 @@ npm run verify
 当前测试覆盖：
 
 - 配置和有序依赖计划；
+- v1 向后兼容，以及 v2 JSON Schema/runtime/CLI 契约一致性；
+- v2 config digest 启动 gate、Job 持久化和 digest 漂移阻断；
+- v2 base/Parent/Child 精确校验及所有漂移路径的零 Worktree/setup/Codex 副作用；
 - 真实 Git branch/worktree/commit；
 - 多 Issue fresh Worker；
 - Issue validation 失败后的 bounded repair；
@@ -248,5 +309,7 @@ npm run verify
 - `SIGINT`/`SIGTERM` 终止子进程组并保留 fresh-recovery 边界；
 - `codex exec` 的 ephemeral、structured output、sandbox 和网络关闭参数；
 - PR 的 exact head branch、base branch 与 candidate SHA 绑定。
+
+这些是确定性本地/假端口测试，不代表 `pi-ticket-planning` 与真实 Controller/GitHub/Codex 的跨仓 canary 已执行。跨仓闭环只有在 Planner 后续以真实 v2 handoff 运行通过后才能宣称。
 
 更详细的边界见 [`ARCHITECTURE.zh-CN.md`](./ARCHITECTURE.zh-CN.md) 和 [`docs/OPERATIONS.zh-CN.md`](./docs/OPERATIONS.zh-CN.md)。
