@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { ControllerConfig, JobState, ReleasePlan } from "./types.js";
 import { copyJsonSnapshot, ensurePrivateDir, readJsonFile, writeJsonAtomic } from "./fs-atomic.js";
 import { digestJson, nowIso, safeToken } from "./util.js";
+import { assertPlanCompatibleWithConfig, isReleasePlanV2 } from "./plan.js";
 
 export class JobStore {
   readonly jobsRoot: string;
@@ -12,6 +13,9 @@ export class JobStore {
   }
 
   create(input: { configPath: string; planPath: string; plan: ReleasePlan; configDigest: string; planDigest: string }): JobState {
+    assertPlanCompatibleWithConfig(input.plan, this.config);
+    if (input.configDigest !== digestJson(this.config)) throw new Error("job configDigest is not the current validated config digest");
+    if (input.planDigest !== digestJson(input.plan)) throw new Error("job planDigest is not the current validated plan digest");
     const id = safeToken(input.plan.id);
     const root = this.root(id);
     if (existsSync(root)) throw new Error(`job already exists: ${id}`);
@@ -165,6 +169,9 @@ export function retryBlockedJob(job: JobState): JobState {
 export function assertJob(job: JobState): void {
   if (!job || job.version !== 1 || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
     throw new Error("job state is invalid or its plan digest drifted");
+  }
+  if (isReleasePlanV2(job.plan) && job.baseSha !== null && job.baseSha !== job.plan.source.baseSha) {
+    throw new Error("job base SHA differs from its Release Plan v2 source binding");
   }
   const issueNumbers = job.issues.map((issue) => issue.number);
   if (new Set(issueNumbers).size !== issueNumbers.length) throw new Error("job contains duplicate issues");

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { createTestRepo, testConfig, testPlan, writeInputs } from "./support.js";
+import { digestJson } from "../src/util.js";
+import { createTestRepo, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
 
 test("CLI starts and completes a local no-PR release with fake gh and Codex executables", () => {
   const repo = createTestRepo();
@@ -56,5 +57,92 @@ test("CLI enforces one active release per repository state root", () => {
     });
     assert.notEqual(second.status, 0);
     assert.match(String(second.stderr), /active release job/);
+  } finally { repo.cleanup(); }
+});
+
+test("CLI plan validate accepts v2 and rejects config source mismatches", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const cli = resolve("dist/src/cli.js");
+    const valid = spawnSync("node", [cli, "plan", "validate", "--config", configPath, "--plan", planPath, "--json"], {
+      cwd: resolve("."), encoding: "utf8",
+    });
+    assert.equal(valid.status, 0, valid.stderr);
+    const output = JSON.parse(String(valid.stdout));
+    assert.equal(output.ok, true);
+    assert.equal(output.plan.version, 2);
+    assert.match(output.planDigest, /^[a-f0-9]{64}$/);
+
+    writeFileSync(planPath, `${JSON.stringify({ ...plan, source: { ...plan.source, repo: "other/project" } })}\n`, "utf8");
+    const repoMismatch = spawnSync("node", [cli, "plan", "validate", "--config", configPath, "--plan", planPath], {
+      cwd: resolve("."), encoding: "utf8",
+    });
+    assert.notEqual(repoMismatch.status, 0);
+    assert.match(String(repoMismatch.stderr), /plan_source_repo_mismatch/);
+
+    writeFileSync(planPath, `${JSON.stringify({ ...plan, source: { ...plan.source, baseRef: "develop" } })}\n`, "utf8");
+    const refMismatch = spawnSync("node", [cli, "plan", "validate", "--config", configPath, "--plan", planPath], {
+      cwd: resolve("."), encoding: "utf8",
+    });
+    assert.notEqual(refMismatch.status, 0);
+    assert.match(String(refMismatch.stderr), /plan_source_base_ref_mismatch/);
+  } finally { repo.cleanup(); }
+});
+
+test("CLI v2 start requires the exact approved config digest before Job creation", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const cli = resolve("dist/src/cli.js");
+    const baseArgs = [cli, "start", "--config", configPath, "--plan", planPath, "--json"];
+    const jobPath = join(config.stateDir, "jobs", plan.id, "job.json");
+
+    const missing = spawnSync("node", baseArgs, { cwd: resolve("."), encoding: "utf8" });
+    assert.notEqual(missing.status, 0);
+    assert.match(String(missing.stderr), /expected_config_digest_required/);
+    assert.equal(existsSync(jobPath), false);
+
+    const wrong = spawnSync("node", [...baseArgs, "--expected-config-digest", "0".repeat(64)], {
+      cwd: resolve("."), encoding: "utf8",
+    });
+    assert.notEqual(wrong.status, 0);
+    assert.match(String(wrong.stderr), /expected_config_digest_mismatch/);
+    assert.equal(existsSync(jobPath), false);
+
+    for (const invalidDigest of [`sha256:${"0".repeat(64)}`, "A".repeat(64), ""]) {
+      const invalid = spawnSync("node", [...baseArgs, "--expected-config-digest", invalidDigest], {
+        cwd: resolve("."), encoding: "utf8",
+      });
+      assert.notEqual(invalid.status, 0);
+      assert.match(String(invalid.stderr), /expected_config_digest_invalid/);
+      assert.equal(existsSync(jobPath), false);
+    }
+
+    const approvedDigest = digestJson(config);
+    const duplicate = spawnSync("node", [
+      ...baseArgs,
+      "--expected-config-digest", approvedDigest,
+      "--expected-config-digest", approvedDigest,
+    ], { cwd: resolve("."), encoding: "utf8" });
+    assert.notEqual(duplicate.status, 0);
+    assert.match(String(duplicate.stderr), /expected_config_digest_invalid/);
+    assert.equal(existsSync(jobPath), false);
+
+    const exact = spawnSync("node", [...baseArgs, "--expected-config-digest", approvedDigest], {
+      cwd: resolve("."), encoding: "utf8",
+    });
+    assert.equal(exact.status, 0, exact.stderr);
+    const started = JSON.parse(String(exact.stdout));
+    assert.equal(started.id, plan.id);
+    const persisted = JSON.parse(readFileSync(jobPath, "utf8"));
+    assert.equal(persisted.plan.version, 2);
+    assert.equal(persisted.configDigest, approvedDigest);
+    assert.equal(persisted.planDigest, digestJson(plan));
+    assert.equal(persisted.baseSha, null);
   } finally { repo.cleanup(); }
 });

@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "release-001",
-  "title": "Implement the first complete product increment",
+  "id": "manual-release-001",
+  "title": "Implement the first complete manually planned product increment",
   "objective": "Deliver the ordered GitHub Issues as one coherent, independently verifiable release.",
   "parentIssue": null,
   "issues": [

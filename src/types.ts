@@ -53,7 +53,7 @@ export type ControllerConfig = {
   };
 };
 
-export type ReleasePlanIssue = {
+export type ReleasePlanIssueV1 = {
   number: number;
   order: number;
   dependsOn: number[];
@@ -63,16 +63,57 @@ export type ReleasePlanIssue = {
   allowNoop: boolean;
 };
 
-export type ReleasePlan = {
+export type ReleasePlanV1 = {
   version: 1;
   id: string;
   title: string;
   objective: string;
   parentIssue: number | null;
-  issues: ReleasePlanIssue[];
+  issues: ReleasePlanIssueV1[];
   releaseAcceptanceCriteria: string[];
   reviewFocus: string[];
 };
+
+export type ReleasePlanSourceV2 = {
+  planner: "pi-ticket-planning";
+  repo: string;
+  baseRef: string;
+  baseSha: string;
+  parentBinding: {
+    number: number;
+    expectedTitle: string;
+    expectedBodyHash: string;
+  };
+  specContentHash: string;
+  deliveryGraphDigest: string;
+};
+
+export type ReleasePlanIssueV2 = {
+  number: number;
+  order: number;
+  dependsOn: number[];
+  objective: string;
+  acceptanceCriteria: string[];
+  suggestedValidation: [];
+  allowNoop: false;
+  expectedTitle: string;
+  expectedBodyHash: string;
+};
+
+export type ReleasePlanV2 = {
+  version: 2;
+  source: ReleasePlanSourceV2;
+  id: string;
+  title: string;
+  objective: string;
+  parentIssue: number;
+  issues: ReleasePlanIssueV2[];
+  releaseAcceptanceCriteria: string[];
+  reviewFocus: string[];
+};
+
+export type ReleasePlanIssue = ReleasePlanIssueV1 | ReleasePlanIssueV2;
+export type ReleasePlan = ReleasePlanV1 | ReleasePlanV2;
 
 export type IssueSnapshot = {
   number: number;

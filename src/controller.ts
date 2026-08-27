@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CommandConfig,
+  IssueSnapshot,
   IssueExecution,
   JobState,
   ReviewResult,
@@ -13,7 +14,8 @@ import { ControllerError, asControllerError } from "./errors.js";
 import { CommandInterruptedError } from "./command.js";
 import { JobStore, blockJob, currentIssue, nextPendingIssue } from "./state.js";
 import { readJsonFile, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
-import { digestJson, newId, nowIso } from "./util.js";
+import { digestJson, newId, nowIso, sha256PrefixedUtf8 } from "./util.js";
+import { assertPlanCompatibleWithConfig, isReleasePlanV2 } from "./plan.js";
 import {
   renderIssueWorkerPrompt,
   renderReleaseHardeningPrompt,
@@ -134,9 +136,15 @@ export class ReleaseController {
   }
 
   private async prepare(job: JobState): Promise<StepResult> {
+    assertPlanCompatibleWithConfig(job.plan, this.deps.store.config);
     if (job.plan.issues.length > this.deps.store.config.policy.maxIssues) {
       throw new ControllerError("release_too_many_issues", `Plan has ${job.plan.issues.length} issues; configured maximum is ${this.deps.store.config.policy.maxIssues}.`);
     }
+    if (isReleasePlanV2(job.plan)) return this.prepareSourceBoundV2(job);
+    return this.prepareV1(job);
+  }
+
+  private async prepareV1(job: JobState): Promise<StepResult> {
     await this.deps.git.preflight();
     await this.deps.github.preflight();
     await this.deps.codex.preflight();
@@ -156,6 +164,90 @@ export class ReleaseController {
       writeJsonAtomic(join(issueRoot, `issue-${issue.number}.json`), snapshot);
       issue.snapshot = snapshot;
     }
+    return this.runSetupValidation(job, baseSha);
+  }
+
+  private async prepareSourceBoundV2(job: JobState): Promise<StepResult> {
+    const verified = await this.verifyPlanSourceBeforeSideEffects(job);
+    job = { ...job, baseSha: verified.baseSha };
+    await this.deps.git.ensureWorktree(job);
+    if (!(await this.deps.git.isClean(job.worktreePath))) {
+      throw new ControllerError("initial_worktree_dirty", "The release worktree is dirty before the first Worker run.");
+    }
+
+    const issueRoot = this.deps.store.issuesRoot(job.id);
+    if (verified.parent) {
+      writeJsonAtomic(join(issueRoot, `parent-issue-${verified.parent.number}.json`), verified.parent);
+    }
+    for (const issue of job.issues) {
+      const snapshot = verified.issues.get(issue.number);
+      if (!snapshot) {
+        throw new ControllerError("plan_issue_drift", `Verified snapshot for Issue #${issue.number} is missing.`);
+      }
+      writeJsonAtomic(join(issueRoot, `issue-${issue.number}.json`), snapshot);
+      issue.snapshot = snapshot;
+    }
+    this.deps.store.save(job);
+    return this.runSetupValidation(job, verified.baseSha);
+  }
+
+  private async verifyPlanSourceBeforeSideEffects(job: JobState): Promise<{
+    baseSha: string;
+    parent: IssueSnapshot;
+    issues: Map<number, IssueSnapshot>;
+  }> {
+    if (!isReleasePlanV2(job.plan)) {
+      throw new ControllerError("plan_version_mismatch", "Exact source verification requires Release Plan v2.");
+    }
+    const plan = job.plan;
+    await this.deps.git.preflight();
+    await this.deps.github.preflight();
+    await this.deps.codex.preflight();
+
+    const baseSha = await this.deps.git.fetchBase();
+    if (baseSha !== plan.source.baseSha) {
+      throw new ControllerError(
+        "plan_base_drift",
+        "The current remote base commit differs from the Release Plan v2 source binding.",
+      );
+    }
+    if (job.baseSha === null) {
+      this.deps.store.save({ ...job, baseSha });
+    }
+
+    const parent = await this.deps.github.fetchIssue(plan.source.parentBinding.number, { allowClosed: true });
+    if (parent.state !== "OPEN") {
+      throw new ControllerError("plan_parent_not_open", `Parent Issue #${plan.parentIssue} is not OPEN.`);
+    }
+    if (parent.number !== plan.source.parentBinding.number
+      || parent.title !== plan.source.parentBinding.expectedTitle
+      || sha256PrefixedUtf8(parent.body) !== plan.source.parentBinding.expectedBodyHash) {
+      throw new ControllerError(
+        "plan_parent_drift",
+        `Parent Issue #${plan.parentIssue} no longer matches its exact title/body source binding.`,
+      );
+    }
+
+    const issues = new Map<number, IssueSnapshot>();
+    for (const planIssue of plan.issues) {
+      const snapshot = await this.deps.github.fetchIssue(planIssue.number, { allowClosed: true });
+      if (snapshot.state !== "OPEN") {
+        throw new ControllerError("plan_issue_not_open", `Child Issue #${planIssue.number} is not OPEN.`);
+      }
+      if (snapshot.number !== planIssue.number
+        || snapshot.title !== planIssue.expectedTitle
+        || sha256PrefixedUtf8(snapshot.body) !== planIssue.expectedBodyHash) {
+        throw new ControllerError(
+          "plan_issue_drift",
+          `Child Issue #${planIssue.number} no longer matches its exact title/body source binding.`,
+        );
+      }
+      issues.set(planIssue.number, snapshot);
+    }
+    return { baseSha, parent, issues };
+  }
+
+  private async runSetupValidation(job: JobState, baseSha: string): Promise<StepResult> {
     const head = await this.deps.git.head(job.worktreePath);
     const worktreeDigest = await this.deps.git.worktreeDigest(job.worktreePath);
     const setup = await this.deps.validator.run({

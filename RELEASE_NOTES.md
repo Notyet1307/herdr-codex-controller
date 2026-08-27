@@ -1,3 +1,19 @@
+# Unreleased
+
+Added a backward-compatible Release Plan v2 source-binding contract for `pi-ticket-planning` handoffs:
+
+- preserved Release Plan v1 validation and execution semantics;
+- published versioned v1/v2 schemas plus the existing `release-plan.schema.json` `oneOf` entry point;
+- bound v2 plans to exact config `repo`/`baseRef` and required an approved current config digest at `start`;
+- verified current remote base, Parent OPEN/title/raw-body hash, and every Child OPEN/title/raw-body hash before Worktree creation, setup validation, or Codex execution;
+- persisted the complete v2 plan, plan digest, verified base SHA, and exact GitHub snapshots in Controller-owned Job state;
+- added stable config/source drift error codes and zero-side-effect failure tests;
+- added schema/runtime/CLI contract fixtures using a development-only JSON Schema validator; runtime npm dependencies remain zero.
+
+Verified with strict TypeScript checking, 27 deterministic tests, and `npm audit` with zero known vulnerabilities at verification time. These tests do not claim that a real cross-repository `pi-ticket-planning` → Controller canary has run; that evidence must come from a later Planner handoff.
+
+Rollback affects only future v2 Job creation: reverting this change does not rewrite existing v1 Jobs, Worktrees, commits, PRs, or Controller evidence.
+
 # v0.1.0
 
 Initial standalone Codex-first release controller.

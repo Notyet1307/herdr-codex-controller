@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
-import { loadPlan } from "./plan.js";
+import { assertPlanCompatibleWithConfig, isReleasePlanV2, loadPlan } from "./plan.js";
 import { JobStore, retryBlockedJob } from "./state.js";
 import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
@@ -11,7 +11,8 @@ import { ReleaseController } from "./controller.js";
 import { withControllerLock } from "./lock.js";
 import { digestJson, nowIso, sleep } from "./util.js";
 import { writeTextAtomic } from "./fs-atomic.js";
-import type { JobState, StepResult } from "./types.js";
+import type { JobState, ReleasePlan, StepResult } from "./types.js";
+import { ControllerError } from "./errors.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -21,18 +22,47 @@ async function main(): Promise<void> {
   }
   const configPath = requiredOption(args, "config");
   const config = loadConfig(configPath);
-  const store = new JobStore(config);
+  const configDigest = digestJson(config);
 
   if (args.command === "config-validate") {
-    output(args, { ok: true, configDigest: digestJson(config), config });
+    output(args, { ok: true, configDigest, config });
     return;
   }
   if (args.command === "plan-validate") {
     const planPath = requiredOption(args, "plan");
     const plan = loadPlan(planPath);
+    assertPlanCompatibleWithConfig(plan, config);
     output(args, { ok: true, planDigest: digestJson(plan), plan });
     return;
   }
+
+  if (args.command === "start") {
+    const planPath = requiredOption(args, "plan");
+    const plan = loadPlan(planPath);
+    assertPlanCompatibleWithConfig(plan, config);
+    assertExpectedConfigDigest(args, plan, configDigest);
+    if (plan.issues.length > config.policy.maxIssues) {
+      throw new Error(`plan has ${plan.issues.length} issues; configured maximum is ${config.policy.maxIssues}`);
+    }
+    const store = new JobStore(config);
+    const job = await withControllerLock(store.repositoryLockPath(), async () => {
+      const active = store.active();
+      if (active.length > 0) {
+        throw new Error(`repository already has an active release job: ${active.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
+      }
+      return store.create({
+        configPath: resolve(configPath),
+        planPath: resolve(planPath),
+        plan,
+        configDigest,
+        planDigest: digestJson(plan),
+      });
+    });
+    output(args, summarizeJob(job));
+    return;
+  }
+
+  const store = new JobStore(config);
 
   const git = new GitClient(config);
   const github = new GitHubClient(config);
@@ -44,30 +74,7 @@ async function main(): Promise<void> {
     await git.preflight();
     await github.preflight();
     await codex.preflight();
-    output(args, { ok: true, checkedAt: nowIso(), configDigest: digestJson(config) });
-    return;
-  }
-
-  if (args.command === "start") {
-    const planPath = requiredOption(args, "plan");
-    const plan = loadPlan(planPath);
-    if (plan.issues.length > config.policy.maxIssues) {
-      throw new Error(`plan has ${plan.issues.length} issues; configured maximum is ${config.policy.maxIssues}`);
-    }
-    const job = await withControllerLock(store.repositoryLockPath(), async () => {
-      const active = store.active();
-      if (active.length > 0) {
-        throw new Error(`repository already has an active release job: ${active.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
-      }
-      return store.create({
-        configPath: resolve(configPath),
-        planPath: resolve(planPath),
-        plan,
-        configDigest: digestJson(config),
-        planDigest: digestJson(plan),
-      });
-    });
-    output(args, summarizeJob(job));
+    output(args, { ok: true, checkedAt: nowIso(), configDigest });
     return;
   }
 
@@ -167,12 +174,42 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     const value = argv[index + 1];
-    if (!value || value.startsWith("--")) throw new Error(`option --${key} requires a value`);
-    if (key in options) throw new Error(`duplicate option --${key}`);
+    if (value === undefined || value.startsWith("--")) throw new Error(`option --${key} requires a value`);
+    if (key in options) {
+      if (key === "expected-config-digest") {
+        throw new ControllerError("expected_config_digest_invalid", "--expected-config-digest may be supplied only once.");
+      }
+      throw new Error(`duplicate option --${key}`);
+    }
     options[key] = value;
     index += 1;
   }
   return { command, options };
+}
+
+function assertExpectedConfigDigest(args: ParsedArgs, plan: ReleasePlan, configDigest: string): void {
+  const expected = args.options["expected-config-digest"];
+  if (expected === undefined) {
+    if (isReleasePlanV2(plan)) {
+      throw new ControllerError(
+        "expected_config_digest_required",
+        "Release Plan v2 start requires --expected-config-digest.",
+      );
+    }
+    return;
+  }
+  if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) {
+    throw new ControllerError(
+      "expected_config_digest_invalid",
+      "--expected-config-digest must be exactly 64 lowercase hexadecimal characters without a prefix.",
+    );
+  }
+  if (expected !== configDigest) {
+    throw new ControllerError(
+      "expected_config_digest_mismatch",
+      "--expected-config-digest does not match the current validated Controller config.",
+    );
+  }
 }
 
 function requiredOption(args: ParsedArgs, key: string): string {
@@ -236,10 +273,13 @@ function nextAction(job: JobState): string {
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate --config PATH [--json]\n  plan validate   --config PATH --plan PATH [--json]\n  doctor          --config PATH [--json]\n  start           --config PATH --plan PATH [--json]\n  status          --config PATH --job ID [--operator] [--json]\n  step            --config PATH --job ID [--json]\n  run             --config PATH --job ID [--max-steps N] [--json]\n  retry           --config PATH --job ID --reason TEXT [--json]\n  abort           --config PATH --job ID --reason TEXT [--json]\n  cleanup         --config PATH --job ID [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate --config PATH [--json]\n  plan validate   --config PATH --plan PATH [--json]\n  doctor          --config PATH [--json]\n  start           --config PATH --plan PATH [--expected-config-digest 64HEX] [--json]\n  status          --config PATH --job ID [--operator] [--json]\n  step            --config PATH --job ID [--json]\n  run             --config PATH --job ID [--max-steps N] [--json]\n  retry           --config PATH --job ID --reason TEXT [--json]\n  abort           --config PATH --job ID --reason TEXT [--json]\n  cleanup         --config PATH --job ID [--json]\n`);
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  const message = error instanceof ControllerError
+    ? `${error.code}: ${error.message}`
+    : error instanceof Error ? error.message : String(error);
+  process.stderr.write(`${message}\n`);
   process.exitCode = 1;
 });

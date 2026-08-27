@@ -7,3 +7,4 @@ export * from "./git.js";
 export * from "./github.js";
 export * from "./codex.js";
 export * from "./validator.js";
+export { digestJson, sha256PrefixedUtf8, stableStringify } from "./util.js";

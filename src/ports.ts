@@ -34,7 +34,7 @@ export interface GitPort {
 
 export interface GitHubPort {
   preflight(): Promise<void>;
-  fetchIssue(number: number): Promise<IssueSnapshot>;
+  fetchIssue(number: number, options?: { allowClosed?: boolean }): Promise<IssueSnapshot>;
   findPullRequest(job: JobState): Promise<PullRequestState | null>;
   createPullRequest(job: JobState, deliveryRoot: string): Promise<PullRequestState>;
   inspectPullRequest(number: number): Promise<{

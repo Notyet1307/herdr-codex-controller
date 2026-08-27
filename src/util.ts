@@ -11,6 +11,10 @@ export function sha256(value: string | Uint8Array): string {
   return hash.digest("hex");
 }
 
+export function sha256PrefixedUtf8(text: string): `sha256:${string}` {
+  return `sha256:${sha256(text)}`;
+}
+
 export function stableStringify(value: unknown): string {
   return JSON.stringify(sortJson(value));
 }
@@ -57,6 +61,13 @@ export function boundedText(value: unknown, label: string, maximumBytes: number,
   if (!allowEmpty && !text) throw new Error(`${label} cannot be empty`);
   if (Buffer.byteLength(text, "utf8") > maximumBytes) throw new Error(`${label} exceeds ${maximumBytes} bytes`);
   return text;
+}
+
+export function boundedExactText(value: unknown, label: string, maximumBytes: number): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  if (!value.trim()) throw new Error(`${label} cannot be empty`);
+  if (Buffer.byteLength(value, "utf8") > maximumBytes) throw new Error(`${label} exceeds ${maximumBytes} bytes`);
+  return value;
 }
 
 export function boundedStringArray(value: unknown, label: string, maximumItems: number, maximumItemBytes: number): string[] {

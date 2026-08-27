@@ -16,7 +16,31 @@ Codex CLI     → 决定如何探索、实现、自测和自我 Review
 Controller    → Worktree、状态、验证、commit、PR、CI、人工 gate
 ```
 
-## 3. 状态机
+## 3. Release Plan 与来源绑定
+
+`ReleasePlan = ReleasePlanV1 | ReleasePlanV2`。
+
+- v1 保持手工/旧集成语义，不要求 Parent 或 Planner source binding。
+- v2 是 `pi-ticket-planning` 的公开 handoff；Plan 自身携带 repo/baseRef/baseSha、Parent binding 和每个 Child 的 title/body binding。Controller 不依赖 Planner package/runtime，也不读取 Planning Case、Handoff 私有 artifact 或 Delivery Graph。
+
+v2 有两个相互独立的批准 gate：
+
+1. `start` 的 `--expected-config-digest` 必须等于当前 validated config 的无前缀 64 位小写 SHA-256；因此批准后修改 config 不能静默改变执行策略。
+2. `prepare` 重新读取 Git/GitHub 当前事实，只有 base、Parent、全部 Child 与 Plan exact 相等才可创建 Worktree。
+
+```text
+preflight(git → github → codex)
+→ fetch remote base and compare exact SHA
+→ fetch Parent and compare OPEN/number/title/raw-body-hash
+→ fetch every Child and compare OPEN/number/title/raw-body-hash
+→ ensureWorktree
+→ persist snapshots
+→ setup validation
+```
+
+任何 source drift 都 fail closed，不调用 Worktree 创建、setup validator 或 `codex.run`。模型不参与 drift 判断，Controller 也不自动修复 Plan。
+
+## 4. 状态机
 
 ```text
 prepare
@@ -33,7 +57,7 @@ complete
 
 `harden` 不是常规阶段。只有 full validation、aggregate review 或 CI 给出精确阻断证据时才进入，并受统一次数上限约束。
 
-## 4. Issue 边界
+## 5. Issue 边界
 
 每个 Issue：
 
@@ -46,7 +70,7 @@ fresh Codex Worker
 
 Issue 之间共享代码 Worktree，但不共享 Codex Session。前一个 Issue 的 commit 是后一个 Issue 的可靠上下文和恢复点。
 
-## 5. Release 边界
+## 6. Release 边界
 
 所有 Issue commit 后：
 
@@ -60,7 +84,7 @@ clean exact HEAD
 
 Review 只对一个精确 candidate SHA 有效。任何 hardening commit 都会生成新 candidate，并要求重新执行 full validation 和 aggregate review。
 
-## 6. 恢复
+## 7. 恢复
 
 Controller 在启动 Codex 前持久化 `activeRun`。若进程中断：
 
@@ -80,7 +104,7 @@ Herdr-Issue
 Herdr-Plan-Digest
 ```
 
-## 7. 权限
+## 8. 权限
 
 ### Codex Worker / Hardening
 
@@ -103,7 +127,7 @@ Herdr-Plan-Digest
 - CI/merge observation
 - workflow state write
 
-## 8. 为什么没有每 Issue Reviewer
+## 9. 为什么没有每 Issue Reviewer
 
 每个 Worker 被要求在退出前检查完整本次 diff，并修复自查问题。独立 Reviewer 的成本只在 aggregate boundary 支付一次，因为真正高价值的缺陷通常是：
 
@@ -112,7 +136,7 @@ Herdr-Plan-Digest
 - 状态、错误处理、安全和兼容边界跨模块失配；
 - 局部测试通过但完整流程失败。
 
-## 9. 为什么不持久化 Agent 内部状态
+## 10. 为什么不持久化 Agent 内部状态
 
 以下状态由 Codex 自己拥有：
 
@@ -122,7 +146,7 @@ thread / turn / tool call / subagent / context / compaction / internal plan
 
 Controller 无法从这些状态得到比 Git diff、命令 exit code、PR/CI 更可靠的交付事实。持久化它们只会增加兼容矩阵和恢复分支。
 
-## 10. 扩展边界
+## 11. 扩展边界
 
 V1 可安全增加：
 
