@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { GitClient } from "../src/git.js";
 import { Validator } from "../src/validator.js";
-import { JobStore } from "../src/state.js";
+import { blockJob, JobStore, retryBlockedJob } from "../src/state.js";
 import { ReleaseController } from "../src/controller.js";
 import { digestJson } from "../src/util.js";
 import {
@@ -135,6 +135,43 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     assert.equal(codex.calls.filter((call) => call.kind === "release-harden").length, 1);
     assert.equal(git(final.worktreePath, ["rev-list", "--count", "HEAD"]), "3");
   } finally { repo.cleanup(); }
+});
+
+test("operator retry after hardening exhaustion authorizes exactly one additional hardening round", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      policy: { ...testConfig(repo).policy, maxReleaseHardeningRounds: 1 },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    job.phase = "review";
+    job.hardeningRounds = 1;
+    job = blockJob(
+      job,
+      "release_hardening_exhausted",
+      "another round requires operator authority",
+      join(store.root(job.id), "review-02.json"),
+    );
+
+    const retried = retryBlockedJob(job);
+
+    assert.equal(retried.status, "running");
+    assert.equal(retried.phase, "harden");
+    assert.equal(retried.hardeningRounds, 2);
+    assert.equal(retried.hardeningReasonPath, job.blocked?.detailsPath);
+    assert.equal(retried.blocked, null);
+  } finally {
+    repo.cleanup();
+  }
 });
 
 test("an interrupted Worker run is reconciled as a fresh recovery run without session resume", async () => {
