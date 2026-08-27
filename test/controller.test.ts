@@ -162,12 +162,13 @@ test("operator retry after hardening exhaustion authorizes exactly one additiona
       join(store.root(job.id), "review-02.json"),
     );
 
-    const retried = retryBlockedJob(job);
+    const authorizationPath = join(store.root(job.id), "operator-retry.md");
+    const retried = retryBlockedJob(job, authorizationPath);
 
     assert.equal(retried.status, "running");
     assert.equal(retried.phase, "harden");
     assert.equal(retried.hardeningRounds, 2);
-    assert.equal(retried.hardeningReasonPath, job.blocked?.detailsPath);
+    assert.equal(retried.hardeningReasonPath, authorizationPath);
     assert.equal(retried.blocked, null);
   } finally {
     repo.cleanup();
