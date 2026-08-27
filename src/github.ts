@@ -39,8 +39,8 @@ export class GitHubClient {
       title: expectString(value.title, "issue.title", false, 500),
       body: expectString(value.body, "issue.body", true, 64 * 1024),
       state: expectState(value.state),
-      labels: expectNames(value.labels, "issue.labels"),
-      assignees: expectNames(value.assignees, "issue.assignees"),
+      labels: expectNames(value.labels, "issue.labels", "name"),
+      assignees: expectNames(value.assignees, "issue.assignees", "login"),
       url: expectString(value.url, "issue.url", false, 2_000),
       fetchedAt: nowIso(),
     };
@@ -251,8 +251,8 @@ function parseQueueIssue(value: unknown, label: string): QueueIssue {
     title: expectString(issue.title, `${label}.title`, false, 500),
     body: expectString(issue.body ?? "", `${label}.body`, true, 64 * 1024),
     state: rawState,
-    labels: expectNames(issue.labels, `${label}.labels`),
-    assignees: expectNames(issue.assignees, `${label}.assignees`),
+    labels: expectNames(issue.labels, `${label}.labels`, "name"),
+    assignees: expectNames(issue.assignees, `${label}.assignees`, "login"),
     url: expectString(issue.html_url ?? issue.url, `${label}.url`, false, 2_000),
     openBlockers,
   };
@@ -348,12 +348,12 @@ function expectState(value: unknown): "OPEN" | "CLOSED" {
   return value;
 }
 
-function expectNames(value: unknown, label: string): string[] {
+function expectNames(value: unknown, label: string, identityKey: "name" | "login"): string[] {
   if (!Array.isArray(value) || value.length > 100) throw new Error(`${label} must be an array with at most 100 entries`);
   return value.map((entry, index) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`${label}[${index}] is invalid`);
-    const name = (entry as Record<string, unknown>).name ?? (entry as Record<string, unknown>).login;
-    return expectString(name, `${label}[${index}].name`, false, 300);
+    const identity = (entry as Record<string, unknown>)[identityKey];
+    return expectString(identity, `${label}[${index}].${identityKey}`, false, 300);
   });
 }
 
