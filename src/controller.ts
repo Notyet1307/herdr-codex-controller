@@ -573,7 +573,7 @@ export class ReleaseController {
       return stepResult("ci_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, "Waiting for GitHub checks.");
     }
     if (this.deps.store.config.delivery.autoMerge) {
-      await this.deps.github.enableAutoMerge(job.pullRequest.number);
+      await this.deps.github.enableAutoMerge(job.pullRequest.number, job.candidateSha);
       job.status = "running";
     } else {
       job.status = "ready_to_merge";

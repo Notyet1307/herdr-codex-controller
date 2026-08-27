@@ -8,11 +8,13 @@ import type {
   IssueSnapshot,
   JobState,
   PullRequestState,
+  QueueIssue,
   ReleasePlan,
   ReleasePlanV2,
   ReviewResult,
   RunKind,
   WorkerResult,
+  WorkflowGateSummary,
 } from "../src/types.js";
 import type { CodexPort, GitHubPort } from "../src/ports.js";
 import { digestJson, nowIso, sha256PrefixedUtf8 } from "../src/util.js";
@@ -192,7 +194,14 @@ export class FakeGitHub implements GitHubPort {
   async findPullRequest(_job: JobState): Promise<PullRequestState | null> { return null; }
   async createPullRequest(_job: JobState, _deliveryRoot: string): Promise<PullRequestState> { throw new Error("not used"); }
   async inspectPullRequest(_number: number): Promise<{ pullRequest: PullRequestState; checks: any; mergedAt: string | null }> { throw new Error("not used"); }
-  async enableAutoMerge(_number: number): Promise<void> { throw new Error("not used"); }
+  async enableAutoMerge(_number: number, _candidateSha: string): Promise<void> { throw new Error("not used"); }
+  async currentLogin(): Promise<string> { return "test-user"; }
+  async listSubIssues(_parentIssue: number): Promise<QueueIssue[]> { return []; }
+  async fetchQueueIssue(_number: number): Promise<QueueIssue> { throw new Error("not used"); }
+  async claimIssue(_number: number, _login: string): Promise<void> { throw new Error("not used"); }
+  async inspectWorkflowGate(_sha: string, _requiredWorkflows: string[]): Promise<WorkflowGateSummary> {
+    throw new Error("not used");
+  }
 }
 
 export type FakeCodexBehavior = (input: {

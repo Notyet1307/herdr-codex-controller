@@ -190,11 +190,12 @@ test("delivery binds one exact PR candidate and stops at a manual merge gate", a
           headRef: job.branch,
           baseRef: job.baseRef,
           headSha: job.candidateSha,
+          mergeSha: null,
         };
         return this.pr;
       }
       override async inspectPullRequest(_number: number) {
-        const pullRequest = { ...this.pr, state: this.merged ? "MERGED" : "OPEN" };
+        const pullRequest = { ...this.pr, state: this.merged ? "MERGED" : "OPEN", mergeSha: this.merged ? "f".repeat(40) : null };
         return { pullRequest, checks: { state: "success" as const, failures: [], pending: [] }, mergedAt: this.merged ? new Date().toISOString() : null };
       }
     }
@@ -214,6 +215,85 @@ test("delivery binds one exact PR candidate and stops at a manual merge gate", a
     const result = await controller.step(job.id);
     assert.equal(result.action, "release_merged");
     assert.equal(store.load(job.id).status, "completed");
+  } finally { repo.cleanup(); }
+});
+
+test("auto-merge receives the exact reviewed candidate identity", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [],
+        issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
+        release: [{ command: "test -f issue-1.txt" }],
+        maxOutputBytes: 64 * 1024,
+      },
+      delivery: {
+        createPullRequest: true,
+        draft: false,
+        autoMerge: true,
+        mergeMethod: "squash",
+        allowNoChecks: false,
+        pollIntervalMs: 1_000,
+      },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new GitClient(config);
+    class AutoMergeGitHub extends FakeGitHub {
+      pr: any = null;
+      enabled: { number: number; candidateSha: string } | null = null;
+      merged = false;
+      override async createPullRequest(job: any) {
+        this.pr = {
+          number: 8,
+          url: "https://github.com/example/project/pull/8",
+          state: "OPEN",
+          headRef: job.branch,
+          baseRef: job.baseRef,
+          headSha: job.candidateSha,
+          mergeSha: null,
+        };
+        return this.pr;
+      }
+      override async inspectPullRequest(_number: number) {
+        const pullRequest = {
+          ...this.pr,
+          state: this.merged ? "MERGED" : "OPEN",
+          mergeSha: this.merged ? "e".repeat(40) : null,
+        };
+        return {
+          pullRequest,
+          checks: { state: "success" as const, failures: [], pending: [] },
+          mergedAt: this.merged ? new Date().toISOString() : null,
+        };
+      }
+      override async enableAutoMerge(number: number, candidateSha: string) {
+        this.enabled = { number, candidateSha };
+      }
+    }
+    const github = new AutoMergeGitHub();
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github,
+      codex: new FakeCodex(gitClient),
+      validator: new Validator(config),
+    });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    let observed = store.load(created.id);
+    for (let index = 0; index < 100 && github.enabled === null; index += 1) {
+      await controller.step(created.id);
+      observed = store.load(created.id);
+      if (observed.status === "blocked") throw new Error(observed.blocked?.message);
+    }
+    assert.deepEqual(github.enabled, { number: 8, candidateSha: observed.candidateSha });
+    assert.equal(observed.phase, "awaiting_merge");
+    github.merged = true;
+    const result = await controller.step(created.id);
+    assert.equal(result.action, "release_merged");
+    assert.equal(store.load(created.id).status, "completed");
   } finally { repo.cleanup(); }
 });
 
@@ -241,6 +321,7 @@ test("delivery rejects an existing PR that targets the wrong base branch", async
           headRef: job.branch,
           baseRef: "wrong-base",
           headSha: job.candidateSha,
+          mergeSha: null,
         };
       }
     }

@@ -244,6 +244,94 @@ export type PullRequestState = {
   headRef: string;
   baseRef: string;
   headSha: string;
+  mergeSha: string | null;
+};
+
+export type QueueIssue = {
+  number: number;
+  title: string;
+  body: string;
+  state: "OPEN" | "CLOSED";
+  labels: string[];
+  assignees: string[];
+  url: string;
+  openBlockers: number;
+};
+
+export type WorkflowGateSummary = {
+  state: "pending" | "success" | "failure";
+  sha: string;
+  missing: string[];
+  pending: Array<{ name: string; status: string; url: string | null }>;
+  failures: Array<{ name: string; conclusion: string; url: string | null }>;
+  successes: Array<{ name: string; url: string | null }>;
+  observedAt: string;
+};
+
+export type DispatcherConfig = {
+  version: 1;
+  parentIssue: number;
+  readyLabel: string;
+  releaseAcceptanceCriteria: string[];
+  reviewFocus: string[];
+  postMerge: {
+    requiredWorkflows: string[];
+    pollIntervalMs: number;
+    timeoutMs: number;
+  };
+};
+
+export type DispatcherCurrent = {
+  issueNumber: number;
+  issueTitle: string;
+  issueBodyHash: string;
+  issueUrl: string;
+  login: string;
+  selectedAt: string;
+  phase: "selected" | "claimed" | "plan_ready" | "job_running" | "post_merge";
+  planId: string | null;
+  planPath: string | null;
+  jobId: string | null;
+  sourceVerifiedAt: string | null;
+  postMergeStartedAt: string | null;
+};
+
+export type DispatcherState = {
+  version: 1;
+  repo: string;
+  parentIssue: number;
+  controllerConfigPath: string;
+  controllerConfigDigest: string;
+  dispatcherConfigPath: string;
+  dispatcherConfigDigest: string;
+  current: DispatcherCurrent | null;
+  blocked: {
+    code: string;
+    message: string;
+    createdAt: string;
+    detailsPath: string | null;
+  } | null;
+  history: Array<{
+    issueNumber: number;
+    jobId: string;
+    pullRequestNumber: number;
+    candidateSha: string;
+    mergeSha: string;
+    workflowGate: WorkflowGateSummary;
+    verifiedAt: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DispatcherStepResult = {
+  action: string;
+  progressed: boolean;
+  terminal: boolean;
+  retryAfterMs: number | null;
+  message: string;
+  issueNumber: number | null;
+  jobId: string | null;
 };
 
 export type JobState = {

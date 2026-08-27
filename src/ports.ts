@@ -4,16 +4,19 @@ import type {
   IssueSnapshot,
   JobState,
   PullRequestState,
+  QueueIssue,
   ReviewResult,
   RunKind,
   ValidationReceipt,
   WorkerResult,
+  WorkflowGateSummary,
   CommandConfig,
 } from "./types.js";
 
 export interface GitPort {
   preflight(): Promise<void>;
   fetchBase(): Promise<string>;
+  isAncestorOfRemoteBase(sha: string): Promise<boolean>;
   ensureWorktree(job: JobState): Promise<void>;
   verifyWorktree(job: JobState): Promise<void>;
   head(cwd: string): Promise<string>;
@@ -42,7 +45,12 @@ export interface GitHubPort {
     checks: GhCheckSummary;
     mergedAt: string | null;
   }>;
-  enableAutoMerge(number: number): Promise<void>;
+  enableAutoMerge(number: number, candidateSha: string): Promise<void>;
+  currentLogin(): Promise<string>;
+  listSubIssues(parentIssue: number): Promise<QueueIssue[]>;
+  fetchQueueIssue(number: number): Promise<QueueIssue>;
+  claimIssue(number: number, login: string): Promise<void>;
+  inspectWorkflowGate(sha: string, requiredWorkflows: string[]): Promise<WorkflowGateSummary>;
 }
 
 export interface CodexPort {
