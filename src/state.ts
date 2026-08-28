@@ -155,12 +155,22 @@ export function blockJob(job: JobState, code: string, message: string, detailsPa
   };
 }
 
-export function retryBlockedJob(job: JobState): JobState {
+export function retryBlockedJob(job: JobState, authorizationPath?: string): JobState {
   if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
+  const explicitlyAuthorizedCiRepair = job.blocked.code === "ci_failed";
+  const explicitlyAuthorizedHardening =
+    job.blocked.code === "release_hardening_exhausted"
+    || job.blocked.code === "release_diff_too_large"
+    || explicitlyAuthorizedCiRepair;
   return {
     ...job,
     status: "running",
-    phase: job.blocked.fromPhase,
+    phase: explicitlyAuthorizedHardening ? "harden" : job.blocked.fromPhase,
+    hardeningRounds: explicitlyAuthorizedHardening ? job.hardeningRounds + 1 : job.hardeningRounds,
+    ciRepairRounds: explicitlyAuthorizedCiRepair ? job.ciRepairRounds + 1 : job.ciRepairRounds,
+    hardeningReasonPath: explicitlyAuthorizedHardening
+      ? authorizationPath ?? job.blocked.detailsPath ?? job.hardeningReasonPath
+      : job.hardeningReasonPath,
     blocked: null,
     activeRun: null,
   };

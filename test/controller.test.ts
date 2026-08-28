@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { GitClient } from "../src/git.js";
 import { Validator } from "../src/validator.js";
-import { JobStore } from "../src/state.js";
+import { blockJob, JobStore, retryBlockedJob } from "../src/state.js";
 import { ReleaseController } from "../src/controller.js";
 import { digestJson } from "../src/util.js";
 import {
@@ -107,10 +107,22 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     let reviews = 0;
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind === "review") {
+        assert.match(input.prompt, /# Included Issue scope/);
+        assert.match(input.prompt, /BEGIN HERDR_ISSUE_[0-9A-F]{20}/);
+        assert.match(input.prompt, /Create issue-1\.txt\./);
+        assert.match(input.prompt, /explicitly listed as out of scope/);
+        assert.match(input.prompt, /assigned to a downstream Issue/);
         reviews += 1;
         return reviews === 1
           ? { review: { status: "changes", summary: "Needs hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "Missing hardening evidence", rationale: "Fixture", recommendation: "Add hardening.txt", relatedIssues: [1] }] } }
           : { review: { status: "pass", summary: "Hardened candidate passes", findings: [] } };
+      }
+      if (input.kind === "release-harden") {
+        assert.match(input.prompt, /# Included Issue scope/);
+        assert.match(input.prompt, /BEGIN HERDR_ISSUE_[0-9A-F]{20}/);
+        assert.match(input.prompt, /Create issue-1\.txt\./);
+        assert.match(input.prompt, /reject that finding in your self-review/);
+        assert.match(input.prompt, /valid in-scope defect/);
       }
       return {};
     });
@@ -123,6 +135,119 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     assert.equal(codex.calls.filter((call) => call.kind === "release-harden").length, 1);
     assert.equal(git(final.worktreePath, ["rev-list", "--count", "HEAD"]), "3");
   } finally { repo.cleanup(); }
+});
+
+test("operator retry after hardening exhaustion authorizes exactly one additional hardening round", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      policy: { ...testConfig(repo).policy, maxReleaseHardeningRounds: 1 },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    job.phase = "review";
+    job.hardeningRounds = 1;
+    job = blockJob(
+      job,
+      "release_hardening_exhausted",
+      "another round requires operator authority",
+      join(store.root(job.id), "review-02.json"),
+    );
+
+    const authorizationPath = join(store.root(job.id), "operator-retry.md");
+    const retried = retryBlockedJob(job, authorizationPath);
+
+    assert.equal(retried.status, "running");
+    assert.equal(retried.phase, "harden");
+    assert.equal(retried.hardeningRounds, 2);
+    assert.equal(retried.hardeningReasonPath, authorizationPath);
+    assert.equal(retried.blocked, null);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("operator retry after an oversized release diff authorizes one shrinking hardening round", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    job.phase = "release_validate";
+    job.hardeningRounds = 3;
+    job = blockJob(
+      job,
+      "release_diff_too_large",
+      "the release diff exceeds the configured changed-line limit",
+      join(store.root(job.id), "release-validation.json"),
+    );
+
+    const authorizationPath = join(store.root(job.id), "operator-retry.md");
+    const retried = retryBlockedJob(job, authorizationPath);
+
+    assert.equal(retried.status, "running");
+    assert.equal(retried.phase, "harden");
+    assert.equal(retried.hardeningRounds, 4);
+    assert.equal(retried.hardeningReasonPath, authorizationPath);
+    assert.equal(retried.blocked, null);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("operator retry after CI exhaustion authorizes exactly one CI hardening round", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      policy: { ...testConfig(repo).policy, maxCiRepairRounds: 0 },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    job.phase = "ci";
+    job.hardeningRounds = 2;
+    job.ciRepairRounds = 0;
+    job = blockJob(
+      job,
+      "ci_failed",
+      "CI repair requires operator authority",
+      join(store.root(job.id), "hardening-02-ci-failure.md"),
+    );
+
+    const retried = retryBlockedJob(job);
+
+    assert.equal(retried.status, "running");
+    assert.equal(retried.phase, "harden");
+    assert.equal(retried.hardeningRounds, 3);
+    assert.equal(retried.ciRepairRounds, 1);
+    assert.equal(retried.hardeningReasonPath, job.blocked?.detailsPath);
+    assert.equal(retried.blocked, null);
+  } finally {
+    repo.cleanup();
+  }
 });
 
 test("an interrupted Worker run is reconciled as a fresh recovery run without session resume", async () => {

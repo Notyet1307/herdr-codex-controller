@@ -156,9 +156,9 @@ async function main(): Promise<void> {
       let job = store.load(jobId);
       if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
       const notePath = join(store.root(job.id), `operator-retry-${Date.now()}.md`);
-      writeTextAtomic(notePath, `# Operator retry\n\nTime: ${nowIso()}\nPrevious code: ${job.blocked.code}\nPrevious phase: ${job.blocked.fromPhase}\n\n${reason.trim()}\n`);
+      writeTextAtomic(notePath, `# Operator retry\n\nTime: ${nowIso()}\nPrevious code: ${job.blocked.code}\nPrevious phase: ${job.blocked.fromPhase}\nPrevious details: ${job.blocked.detailsPath ?? "None"}\n\n${reason.trim()}\n`);
       const fromPhase = job.blocked.fromPhase;
-      job = retryBlockedJob(job);
+      job = retryBlockedJob(job, notePath);
       const issue = job.currentIssueNumber === null ? null : job.issues.find((entry) => entry.number === job.currentIssueNumber) ?? null;
       if (issue && (fromPhase === "implement" || fromPhase === "issue_validate")) {
         issue.status = "running";
