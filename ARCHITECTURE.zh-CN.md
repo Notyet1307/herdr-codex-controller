@@ -105,6 +105,26 @@ Herdr-Issue
 Herdr-Plan-Digest
 ```
 
+### Evidence checkpoint 顺序
+
+Release validation 与 Codex run 的 durable artifact 先完整形成并通过 receipt self-digest 或 result schema 验证，Controller 随后把完整 binding 作为一个 `job.json` checkpoint 保存，最后才执行安全 gate、预算判断或 phase 转移：
+
+```text
+release receipt(path + digest + candidate SHA)
+→ job.validations + job.candidateSha
+→ JobStore.save
+→ Worktree/diff/hardening policy
+
+schema-valid review result + Codex run record(path + digest + base/final HEAD)
+→ job.runs + job.reviewRound + job.lastReviewPath + job.candidateSha
+→ JobStore.save
+→ Git/Worktree gate + review status + hardening policy
+```
+
+`JobStore.save` 原子替换完整 `job.json`。因此在 checkpoint 后退出并重启时，已完成的 receipt/result 不会成为 orphan，`reviewRound` 不会回退；同一 phase 即使需要重新判断或 fresh 执行，也从已绑定 evidence 的状态开始。
+
+hardening budget 已用尽是正常的 durable 状态转移，不通过异常触发恢复：`scheduleHardening` 直接保存 `status=blocked`、`code=release_hardening_exhausted`，并让 `blocked.detailsPath` 指向本轮导致阻断的 exact receipt/result。该 binding 的 digest、candidate SHA 和 round 分别保留在对应 validation/run record 与 Job 字段中。外层 step catch 的 reload 仅用于保护此前 checkpoint，不负责形成预算耗尽状态。
+
 ## 8. 权限
 
 ### Codex Worker / Hardening
