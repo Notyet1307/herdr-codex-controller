@@ -40,13 +40,17 @@ export function writeTextAtomic(path: string, value: string, mode = 0o600): void
   writeFileAtomic(path, value, mode);
 }
 
-function writeFileAtomic(path: string, value: string, mode: number): void {
+export function writeBytesAtomic(path: string, value: Uint8Array, mode = 0o600): void {
+  writeFileAtomic(path, value, mode);
+}
+
+function writeFileAtomic(path: string, value: string | Uint8Array, mode: number): void {
   const absolute = resolve(path);
   const parent = ensurePrivateDir(dirname(absolute));
   const temporary = resolve(parent, `.${newId("tmp")}`);
   const fd = openSync(temporary, "wx", mode);
   try {
-    writeFileSync(fd, value, "utf8");
+    writeFileSync(fd, value);
     fsyncSync(fd);
   } finally {
     closeSync(fd);

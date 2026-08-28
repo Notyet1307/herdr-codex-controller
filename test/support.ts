@@ -282,6 +282,7 @@ export function completedWorker(summary: string): WorkerResult {
     testsRun: [],
     residualRisks: [],
     blockedReason: null,
+    blockedKind: null,
   };
 }
 

@@ -135,8 +135,11 @@ export class CodexRunner {
 }
 
 export function validateWorkerResult(value: unknown): WorkerResult {
-  const object = exactObject(value, ["blockedReason", "residualRisks", "selfReview", "status", "summary", "testsRun"], "worker result");
+  const object = exactObject(value, ["blockedKind", "blockedReason", "residualRisks", "selfReview", "status", "summary", "testsRun"], "worker result");
   if (object.status !== "completed" && object.status !== "blocked") throw new Error("worker result status is invalid");
+  if (object.blockedKind !== null && object.blockedKind !== "recoverable" && object.blockedKind !== "replan_required") {
+    throw new Error("worker blockedKind is invalid");
+  }
   const selfReview = exactObject(object.selfReview, ["findingsFixed", "performed", "remainingConcerns"], "worker selfReview");
   if (typeof selfReview.performed !== "boolean") throw new Error("worker selfReview.performed is invalid");
   const tests = array(object.testsRun, "worker testsRun", 30).map((entry, index) => {
@@ -160,9 +163,14 @@ export function validateWorkerResult(value: unknown): WorkerResult {
     testsRun: tests,
     residualRisks: stringArray(object.residualRisks, "worker residualRisks", 20, 500),
     blockedReason: object.blockedReason === null ? null : text(object.blockedReason, "worker blockedReason", 2000),
+    blockedKind: object.blockedKind,
   };
-  if (result.status === "blocked" && !result.blockedReason) throw new Error("blocked worker result requires blockedReason");
-  if (result.status === "completed" && result.blockedReason !== null) throw new Error("completed worker result cannot include blockedReason");
+  if (result.status === "blocked" && (!result.blockedReason || result.blockedKind === null)) {
+    throw new Error("blocked worker result requires blockedReason and blockedKind");
+  }
+  if (result.status === "completed" && (result.blockedReason !== null || result.blockedKind !== null)) {
+    throw new Error("completed worker result cannot include blockedReason or blockedKind");
+  }
   return result;
 }
 

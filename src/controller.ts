@@ -70,7 +70,7 @@ export class ReleaseController {
       try { job = this.deps.store.load(jobId); } catch {}
       job = blockJob(job, classified.code, classified.message, classified.detailsPath);
       this.deps.store.save(job);
-      return stepResult("blocked", true, true, null, `${classified.code}: ${classified.message}`);
+      return stepResult("blocked", true, true, null, `${job.blocked!.code}: ${job.blocked!.message}`);
     }
   }
 
@@ -324,7 +324,8 @@ export class ReleaseController {
     if (result.status === "blocked") {
       issue.status = "blocked";
       this.deps.store.save(job);
-      throw new ControllerError("codex_worker_blocked", result.blockedReason ?? result.summary, execution.record.resultPath);
+      const code = result.blockedKind === "replan_required" ? "codex_worker_replan_required" : "codex_worker_recoverable";
+      throw new ControllerError(code, result.blockedReason ?? result.summary, execution.record.resultPath);
     }
     if (!result.selfReview.performed) {
       this.deps.store.save(job);
@@ -507,7 +508,10 @@ export class ReleaseController {
     }
     if (execution.workerResult.status === "blocked") {
       this.deps.store.save(job);
-      throw new ControllerError("codex_hardening_blocked", execution.workerResult.blockedReason ?? execution.workerResult.summary, execution.record.resultPath);
+      const code = execution.workerResult.blockedKind === "replan_required"
+        ? "codex_hardening_replan_required"
+        : "codex_hardening_recoverable";
+      throw new ControllerError(code, execution.workerResult.blockedReason ?? execution.workerResult.summary, execution.record.resultPath);
     }
     if (!execution.workerResult.selfReview.performed) {
       this.deps.store.save(job);
@@ -628,7 +632,7 @@ export class ReleaseController {
       const message = "Release requires another hardening round beyond the configured limit.";
       const blocked = blockJob(job, code, message, detailsPath);
       this.deps.store.save(blocked);
-      return stepResult("blocked", true, true, null, `${code}: ${message}`);
+      return stepResult("blocked", true, true, null, `${blocked.blocked!.code}: ${blocked.blocked!.message}`);
     }
     job.hardeningRounds += 1;
     job.hardeningReasonPath = this.writeReason(job, kind, evidence);

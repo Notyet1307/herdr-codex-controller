@@ -123,7 +123,7 @@ schema-valid review result + Codex run record(path + digest + base/final HEAD)
 
 `JobStore.save` 原子替换完整 `job.json`。因此在 checkpoint 后退出并重启时，已完成的 receipt/result 不会成为 orphan，`reviewRound` 不会回退；同一 phase 即使需要重新判断或 fresh 执行，也从已绑定 evidence 的状态开始。
 
-hardening budget 已用尽是正常的 durable 状态转移，不通过异常触发恢复：`scheduleHardening` 直接保存 `status=blocked`、`code=release_hardening_exhausted`，并让 `blocked.detailsPath` 指向本轮导致阻断的 exact receipt/result。该 binding 的 digest、candidate SHA 和 round 分别保留在对应 validation/run record 与 Job 字段中。外层 step catch 的 reload 仅用于保护此前 checkpoint，不负责形成预算耗尽状态。
+hardening budget 已用尽是正常的 durable 状态转移，不通过异常触发恢复：`scheduleHardening` 直接保存 `status=blocked`、`code=replan_required`，并在 message 中保留 cause `release_hardening_exhausted`，让 `blocked.detailsPath` 指向本轮导致阻断的 exact receipt/result。该 binding 的 digest、candidate SHA 和 round 分别保留在对应 validation/run record 与 Job 字段中。外层 step catch 的 reload 仅用于保护此前 checkpoint，不负责形成预算耗尽状态。
 
 ## 8. 权限
 

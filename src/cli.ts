@@ -1,17 +1,18 @@
 #!/usr/bin/env node
+import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { assertPlanCompatibleWithConfig, isReleasePlanV2, loadPlan } from "./plan.js";
-import { JobStore, retryBlockedJob } from "./state.js";
+import { JobStore, REPLAN_REQUIRED_CODE, retryBlockedJob } from "./state.js";
 import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
 import { CodexRunner } from "./codex.js";
 import { Validator } from "./validator.js";
 import { ReleaseController } from "./controller.js";
 import { withControllerLock } from "./lock.js";
-import { digestJson, nowIso, sleep } from "./util.js";
-import { writeTextAtomic } from "./fs-atomic.js";
-import type { JobState, ReleasePlan, StepResult } from "./types.js";
+import { digestJson, newId, nowIso, sha256, sleep } from "./util.js";
+import { writeBytesAtomic, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
+import type { JobState, ReleasePlan, RetryAuthorization, StepResult } from "./types.js";
 import { ControllerError } from "./errors.js";
 import { assertDispatcherCompatible, loadDispatcherConfig } from "./dispatcher-config.js";
 import { IssueDispatcher } from "./dispatcher.js";
@@ -155,18 +156,33 @@ async function main(): Promise<void> {
       const reason = requiredOption(args, "reason");
       let job = store.load(jobId);
       if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
-      const notePath = join(store.root(job.id), `operator-retry-${Date.now()}.md`);
-      writeTextAtomic(notePath, `# Operator retry\n\nTime: ${nowIso()}\nPrevious code: ${job.blocked.code}\nPrevious phase: ${job.blocked.fromPhase}\nPrevious details: ${job.blocked.detailsPath ?? "None"}\n\n${reason.trim()}\n`);
+      if (job.blocked.code === REPLAN_REQUIRED_CODE) retryBlockedJob(job);
+      const evidence = readRecoveryEvidence(requiredOption(args, "evidence"));
+      const evidenceDigest = sha256(evidence);
+      const authorizationId = newId("operator-retry");
+      const evidencePath = join(store.root(job.id), `retry-evidence-${evidenceDigest}.bin`);
+      const notePath = join(store.root(job.id), `${authorizationId}.json`);
+      const authorization: RetryAuthorization = {
+        previousBlockedCode: job.blocked.code,
+        previousBlockedPhase: job.blocked.fromPhase,
+        previousDetailsPath: job.blocked.detailsPath,
+        operatorReason: reason.trim(),
+        recoveryEvidencePath: evidencePath,
+        evidenceDigest,
+        authorizedAt: nowIso(),
+      };
       const fromPhase = job.blocked.fromPhase;
-      job = retryBlockedJob(job, notePath);
+      writeBytesAtomic(evidencePath, evidence);
+      job = retryBlockedJob(job, authorization, store.root(job.id));
       const issue = job.currentIssueNumber === null ? null : job.issues.find((entry) => entry.number === job.currentIssueNumber) ?? null;
       if (issue && (fromPhase === "implement" || fromPhase === "issue_validate")) {
         issue.status = "running";
         issue.nextRunKind = "recovery";
         job.phase = "implement";
       }
+      writeJsonAtomic(notePath, authorization);
       store.save(job);
-      output(args, { action: "retry_authorized", notePath, job: summarizeJob(job) });
+      output(args, { action: "retry_authorized", notePath, evidencePath, evidenceDigest, job: summarizeJob(job) });
       return;
     }
     if (args.command === "abort") {
@@ -272,6 +288,17 @@ function optionalInteger(args: ParsedArgs, key: string, minimum: number, maximum
   return number;
 }
 
+function readRecoveryEvidence(path: string): Uint8Array {
+  const absolute = resolve(path);
+  let stat;
+  try { stat = lstatSync(absolute); }
+  catch { throw new ControllerError("recovery_evidence_invalid", "Recovery evidence does not exist."); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 1024 * 1024) {
+    throw new ControllerError("recovery_evidence_invalid", "Recovery evidence must be a non-empty regular file no larger than 1 MiB.");
+  }
+  return readFileSync(absolute);
+}
+
 function output(args: ParsedArgs, value: unknown): void {
   if (args.options.json) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
   else if (typeof value === "string") process.stdout.write(`${value}\n`);
@@ -311,14 +338,17 @@ function operatorStatus(job: JobState) {
 }
 
 function nextAction(job: JobState): string {
-  if (job.status === "blocked") return `Inspect blocked evidence and run retry --reason after resolving ${job.blocked?.code ?? "the blocker"}.`;
+  if (job.status === "blocked" && job.blocked?.code === REPLAN_REQUIRED_CODE) {
+    return "Run abort, return to Planner for a new Release Plan v2, then start a new Job.";
+  }
+  if (job.status === "blocked") return `Inspect blocked evidence and run retry --reason TEXT --evidence PATH after resolving ${job.blocked?.code ?? "the blocker"}.`;
   if (job.status === "ready_to_merge") return `Merge PR #${job.pullRequest?.number ?? "?"}, then run step to observe completion.`;
   if (job.status === "completed" || job.status === "failed") return "No workflow action remains; cleanup is optional.";
   return `Run step or run to continue phase ${job.phase}.`;
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate  --config PATH [--json]\n  plan validate    --config PATH --plan PATH [--json]\n  doctor           --config PATH [--json]\n  start            --config PATH --plan PATH [--expected-config-digest 64HEX] [--json]\n  status           --config PATH --job ID [--operator] [--json]\n  step             --config PATH --job ID [--json]\n  run              --config PATH --job ID [--max-steps N] [--json]\n  retry            --config PATH --job ID --reason TEXT [--json]\n  abort            --config PATH --job ID --reason TEXT [--json]\n  cleanup          --config PATH --job ID [--json]\n  dispatch         --config PATH --dispatcher PATH [--max-steps N] [--json]\n  dispatch status  --config PATH --dispatcher PATH [--json]\n  dispatch retry   --config PATH --dispatcher PATH --reason TEXT [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate  --config PATH [--json]\n  plan validate    --config PATH --plan PATH [--json]\n  doctor           --config PATH [--json]\n  start            --config PATH --plan PATH [--expected-config-digest 64HEX] [--json]\n  status           --config PATH --job ID [--operator] [--json]\n  step             --config PATH --job ID [--json]\n  run              --config PATH --job ID [--max-steps N] [--json]\n  retry            --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort            --config PATH --job ID --reason TEXT [--json]\n  cleanup          --config PATH --job ID [--json]\n  dispatch         --config PATH --dispatcher PATH [--max-steps N] [--json]\n  dispatch status  --config PATH --dispatcher PATH [--json]\n  dispatch retry   --config PATH --dispatcher PATH --reason TEXT [--json]\n`);
 }
 
 main().catch((error) => {

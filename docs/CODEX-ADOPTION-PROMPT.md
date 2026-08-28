@@ -292,16 +292,19 @@ node dist/src/cli.js status \
 
 读取 `job.json`、相关 run 的 `prompt.md/events.jsonl/stderr.log/result.json` 和 validation receipt。
 
-只有真实原因已处理后，才执行：
+先检查 `blocked.code`。若为 `replan_required`，不得 retry；执行 `abort`，回到 Planner 生成并批准新的公开 Release Plan v2，再以新 Release ID 启动新 Job。
+
+只有可恢复原因已处理且形成新的 recovery evidence file 后，才执行：
 
 ```bash
 node dist/src/cli.js retry \
   --config <PRIVATE_RUNTIME_ROOT>/controller.json \
   --job <JOB_ID> \
-  --reason "<具体、可审计的修复或新增事实>"
+  --reason "<具体、可审计的修复或新增事实>" \
+  --evidence <PRIVATE_RUNTIME_ROOT>/recovery-evidence.json
 ```
 
-不要恢复旧 Codex Session。Controller 会保留 Worktree，并让 fresh Codex 重新检查当前修改。
+不要使用 Planner 私有状态作为 recovery evidence，也不要恢复旧 Codex Session。Controller 会保存 evidence digest、保留 Worktree，并让 fresh Codex 重新检查当前修改；同一 blocked code + 同一 evidence digest 会以 `retry_without_new_evidence` 拒绝。
 
 ## 阶段 8：启用 PR
 

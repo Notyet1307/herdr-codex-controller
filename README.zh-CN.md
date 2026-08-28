@@ -117,7 +117,7 @@ node dist/src/cli.js dispatch retry \
   --reason "已检查并解决阻断原因"
 ```
 
-若内部 Controller Job blocked，仍使用标准 `retry --job ... --reason ...`，Dispatcher 不代替该授权。
+若内部 Controller Job 是可恢复 blocked，使用 `retry --job ... --reason ... --evidence ...`；若为 `replan_required`，必须 abort 后由 Planner 生成新的 Release Plan v2 和新 Job。Dispatcher 不代替这些授权。
 
 ## 环境要求
 
