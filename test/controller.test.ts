@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { GitClient } from "../src/git.js";
 import { Validator } from "../src/validator.js";
 import { blockJob, JobStore, retryBlockedJob } from "../src/state.js";
@@ -25,6 +25,14 @@ async function runToTerminal(controller: ReleaseController, store: JobStore, id:
     if (result.terminal || job.status === "blocked" || job.status === "completed" || job.status === "failed") return job;
   }
   throw new Error("controller did not settle");
+}
+
+function evidencePaths(root: string, name: string): string[] {
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry: { isDirectory(): boolean }) => entry.isDirectory())
+    .map((entry: { name: string }) => join(root, entry.name, name))
+    .filter((path: string) => existsSync(path))
+    .sort();
 }
 
 test("two ordered Issues use fresh Workers, one aggregate review, and Controller-owned commits", async () => {
@@ -134,6 +142,232 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     assert.equal(final.reviewRound, 2);
     assert.equal(codex.calls.filter((call) => call.kind === "release-harden").length, 1);
     assert.equal(git(final.worktreePath, ["rev-list", "--count", "HEAD"]), "3");
+  } finally { repo.cleanup(); }
+});
+
+test("release validation evidence remains exactly bound after hardening exhaustion and restart", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [],
+        issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
+        release: [{ command: "test -f missing-release-evidence.txt" }],
+        maxOutputBytes: 64 * 1024,
+      },
+      policy: { ...testConfig(repo).policy, maxReleaseHardeningRounds: 0 },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new GitClient(config);
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github: new FakeGitHub(),
+      codex: new FakeCodex(gitClient),
+      validator: new Validator(config),
+    });
+    const created = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+
+    const settled = await runToTerminal(controller, store, created.id);
+    assert.equal(settled.status, "blocked");
+    assert.equal(settled.blocked?.code, "release_hardening_exhausted");
+
+    const restarted = new JobStore(config).load(created.id);
+    const releaseBinding = restarted.validations.at(-1);
+    assert.equal(releaseBinding?.scope, "release");
+    assert.equal(releaseBinding?.passed, false);
+    assert.equal(restarted.blocked?.detailsPath, releaseBinding?.path);
+    assert.equal(restarted.hardeningRounds, 0);
+    assert.equal(restarted.reviewRound, 0);
+    assert.equal(restarted.activeRun, null);
+
+    const receipt = JSON.parse(readFileSync(releaseBinding!.path, "utf8"));
+    assert.equal(receipt.digest, releaseBinding?.digest);
+    assert.equal(receipt.candidateSha, await gitClient.head(restarted.worktreePath));
+    assert.equal(restarted.candidateSha, receipt.candidateSha);
+    assert.deepEqual(
+      evidencePaths(store.validationsRoot(created.id), "receipt.json"),
+      restarted.validations.map((entry) => entry.path).sort(),
+    );
+  } finally { repo.cleanup(); }
+});
+
+test("release validation evidence is checkpointed before post-run worktree policy", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [],
+        issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
+        release: [{ command: "printf 'unexpected write\\n' > validation-policy-violation.txt" }],
+        maxOutputBytes: 64 * 1024,
+      },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new GitClient(config);
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github: new FakeGitHub(),
+      codex: new FakeCodex(gitClient),
+      validator: new Validator(config),
+    });
+    const created = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+
+    const settled = await runToTerminal(controller, store, created.id);
+    assert.equal(settled.status, "blocked");
+    assert.equal(settled.blocked?.code, "validator_mutated_worktree");
+
+    const restarted = new JobStore(config).load(created.id);
+    const releaseBinding = restarted.validations.at(-1);
+    const receipt = JSON.parse(readFileSync(releaseBinding!.path, "utf8"));
+    assert.equal(releaseBinding?.scope, "release");
+    assert.equal(releaseBinding?.digest, receipt.digest);
+    assert.equal(restarted.candidateSha, receipt.candidateSha);
+    assert.deepEqual(
+      evidencePaths(store.validationsRoot(created.id), "receipt.json"),
+      restarted.validations.map((entry) => entry.path).sort(),
+    );
+  } finally { repo.cleanup(); }
+});
+
+test("latest blocking review and run remain exactly bound after hardening exhaustion and restart", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [],
+        issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
+        release: [{ command: "test -f issue-1.txt" }],
+        maxOutputBytes: 64 * 1024,
+      },
+      policy: { ...testConfig(repo).policy, maxReleaseHardeningRounds: 1 },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new GitClient(config);
+    const blockingReview = {
+      status: "changes" as const,
+      summary: "The exact candidate still needs hardening.",
+      findings: [{
+        severity: "major" as const,
+        path: "issue-1.txt",
+        line: 1,
+        summary: "Blocking fixture",
+        rationale: "The regression requires another bounded hardening round.",
+        recommendation: "Apply another repair.",
+        relatedIssues: [1],
+      }],
+    };
+    const codex = new FakeCodex(gitClient, async (input) => (
+      input.kind === "review" ? { review: blockingReview } : {}
+    ));
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github: new FakeGitHub(),
+      codex,
+      validator: new Validator(config),
+    });
+    const created = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+
+    const settled = await runToTerminal(controller, store, created.id);
+    assert.equal(settled.status, "blocked");
+    assert.equal(settled.blocked?.code, "release_hardening_exhausted");
+
+    const restarted = new JobStore(config).load(created.id);
+    const reviewRuns = restarted.runs.filter((run) => run.kind === "review");
+    const latestReview = reviewRuns.at(-1);
+    assert.equal(restarted.reviewRound, 2);
+    assert.equal(reviewRuns.length, restarted.reviewRound);
+    assert.equal(restarted.lastReviewPath, latestReview?.resultPath);
+    assert.equal(restarted.blocked?.detailsPath, latestReview?.resultPath);
+    assert.equal(latestReview?.resultDigest, digestJson(blockingReview));
+    assert.equal(latestReview?.baseHeadSha, restarted.candidateSha);
+    assert.equal(latestReview?.finalHeadSha, restarted.candidateSha);
+    assert.equal(restarted.hardeningRounds, 1);
+    assert.equal(restarted.activeRun, null);
+    assert.deepEqual(
+      evidencePaths(store.runsRoot(created.id), "result.json"),
+      restarted.runs.map((run) => run.resultPath).sort(),
+    );
+  } finally { repo.cleanup(); }
+});
+
+test("validated review evidence is checkpointed before post-run worktree policy", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [],
+        issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
+        release: [{ command: "test -f issue-1.txt" }],
+        maxOutputBytes: 64 * 1024,
+      },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new GitClient(config);
+    const passingReview = { status: "pass" as const, summary: "Schema-valid but policy-invalid run.", findings: [] };
+    const codex = new FakeCodex(gitClient, async (input) => {
+      if (input.kind !== "review") return {};
+      writeFileSync(join(input.job.worktreePath, "review-policy-violation.txt"), "unexpected write\n", "utf8");
+      return { review: passingReview };
+    });
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github: new FakeGitHub(),
+      codex,
+      validator: new Validator(config),
+    });
+    const created = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+
+    const settled = await runToTerminal(controller, store, created.id);
+    assert.equal(settled.status, "blocked");
+    assert.equal(settled.blocked?.code, "validator_mutated_worktree");
+
+    const restarted = new JobStore(config).load(created.id);
+    const reviewRun = restarted.runs.filter((run) => run.kind === "review").at(-1);
+    assert.equal(restarted.reviewRound, 1);
+    assert.equal(restarted.lastReviewPath, reviewRun?.resultPath);
+    assert.equal(reviewRun?.resultDigest, digestJson(passingReview));
+    assert.equal(reviewRun?.baseHeadSha, restarted.candidateSha);
+    assert.equal(restarted.activeRun, null);
+    assert.deepEqual(
+      evidencePaths(store.runsRoot(created.id), "result.json"),
+      restarted.runs.map((run) => run.resultPath).sort(),
+    );
   } finally { repo.cleanup(); }
 });
 

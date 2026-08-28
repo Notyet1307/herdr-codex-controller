@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  CodexRunRecord,
   CommandConfig,
   IssueSnapshot,
   IssueExecution,
@@ -309,9 +310,8 @@ export class ReleaseController {
       runsRoot: this.deps.store.runsRoot(job.id),
       runId,
     });
+    this.checkpointCodexRun(job, execution.record);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
-    job.activeRun = null;
-    job.runs.push(execution.record);
     if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut) {
       this.deps.store.save(job);
       throw new ControllerError("codex_worker_failed", `Codex Worker failed for Issue #${issue.number}.`, execution.record.stderrPath);
@@ -411,13 +411,14 @@ export class ReleaseController {
       sourceHeadSha: head,
       sourceWorktreeDigest: beforeDigest,
     });
-    await this.assertValidationDidNotMutate(job, beforeDigest);
     appendValidation(job, validation.receipt, validation.path);
+    job.candidateSha = head;
+    this.deps.store.save(job);
+    await this.assertValidationDidNotMutate(job, beforeDigest);
     if (!validation.receipt.passed) {
       return this.scheduleHardening(job, "release-validation", renderValidationFailure(validation.receipt), validation.path);
     }
 
-    job.candidateSha = head;
     const stats = await this.deps.git.diffStats(job);
     if (stats.files > this.deps.store.config.policy.maxChangedFiles
       || stats.changedLines > this.deps.store.config.policy.maxChangedLines) {
@@ -454,19 +455,14 @@ export class ReleaseController {
       runsRoot: this.deps.store.runsRoot(job.id),
       runId,
     });
+    this.checkpointCodexRun(job, execution.record, execution.reviewResult);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
     await this.assertValidationDidNotMutate(job, beforeDigest, "release review");
-    job.activeRun = null;
-    job.runs.push(execution.record);
-    job.reviewRound += 1;
-    job.lastReviewPath = execution.record.resultPath;
     if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut || !execution.reviewResult) {
-      this.deps.store.save(job);
       throw new ControllerError("codex_review_failed", "Fresh release review did not produce a valid result.", execution.record.stderrPath);
     }
     const review = execution.reviewResult;
     if (review.status === "blocked") {
-      this.deps.store.save(job);
       throw new ControllerError("release_review_blocked", review.summary, execution.record.resultPath);
     }
     const blocking = blockingFindings(review, this.deps.store.config.review.blockingSeverities);
@@ -503,10 +499,8 @@ export class ReleaseController {
       runsRoot: this.deps.store.runsRoot(job.id),
       runId,
     });
+    this.checkpointCodexRun(job, execution.record);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
-    job.activeRun = null;
-    job.runs.push(execution.record);
-    this.deps.store.save(job);
     if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut || !execution.workerResult) {
       this.deps.store.save(job);
       throw new ControllerError("codex_hardening_failed", "Release hardening Worker did not complete successfully.", execution.record.stderrPath);
@@ -609,6 +603,20 @@ export class ReleaseController {
     return stepResult("release_merged", true, true, null, `Release ${job.id} was merged.`);
   }
 
+  private checkpointCodexRun(
+    job: JobState,
+    record: CodexRunRecord,
+    reviewResult: ReviewResult | null = null,
+  ): void {
+    job.activeRun = null;
+    job.runs.push(record);
+    if (reviewResult) {
+      job.reviewRound += 1;
+      job.lastReviewPath = record.resultPath;
+    }
+    this.deps.store.save(job);
+  }
+
   private scheduleHardening(
     job: JobState,
     kind: string,
@@ -616,7 +624,11 @@ export class ReleaseController {
     detailsPath: string | null,
   ): StepResult {
     if (job.hardeningRounds >= this.deps.store.config.policy.maxReleaseHardeningRounds) {
-      throw new ControllerError("release_hardening_exhausted", "Release requires another hardening round beyond the configured limit.", detailsPath);
+      const code = "release_hardening_exhausted";
+      const message = "Release requires another hardening round beyond the configured limit.";
+      const blocked = blockJob(job, code, message, detailsPath);
+      this.deps.store.save(blocked);
+      return stepResult("blocked", true, true, null, `${code}: ${message}`);
     }
     job.hardeningRounds += 1;
     job.hardeningReasonPath = this.writeReason(job, kind, evidence);
