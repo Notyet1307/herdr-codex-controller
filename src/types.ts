@@ -1,5 +1,9 @@
 export type SandboxMode = "read-only" | "workspace-write";
 export type ApprovalPolicy = "never";
+export type ExecutionMode =
+  | "release-plan-v2-direct"
+  | "release-plan-v1-compatibility"
+  | "dispatcher-experimental";
 
 export type CommandConfig = {
   command: string;
@@ -8,6 +12,7 @@ export type CommandConfig = {
 
 export type ControllerConfig = {
   version: 1;
+  executionMode: ExecutionMode;
   repo: string;
   localPath: string;
   stateDir: string;
@@ -51,6 +56,26 @@ export type ControllerConfig = {
     allowNoChecks: boolean;
     pollIntervalMs: number;
   };
+};
+
+export type ControllerIdentity = {
+  version: 1;
+  sourceRevision: string;
+  sourceManifestDigest: string;
+  buildDigest: string;
+  digest: string;
+};
+
+export type ControllerProvenance = {
+  version: 1;
+  controller: ControllerIdentity;
+  executionMode: ExecutionMode;
+  configDigest: string;
+  releasePlan: {
+    version: 1 | 2;
+    digest: string;
+  };
+  digest: string;
 };
 
 export type ReleasePlanIssueV1 = {
@@ -346,8 +371,9 @@ export type DispatcherStepResult = {
 };
 
 export type JobState = {
-  version: 1;
+  version: 2;
   id: string;
+  provenance: ControllerProvenance;
   configPath: string;
   configDigest: string;
   planPath: string;

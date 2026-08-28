@@ -12,11 +12,19 @@ import { ReleaseController } from "./controller.js";
 import { withControllerLock } from "./lock.js";
 import { digestJson, newId, nowIso, sha256, sleep } from "./util.js";
 import { writeBytesAtomic, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
-import type { JobState, ReleasePlan, RetryAuthorization, StepResult } from "./types.js";
+import type {
+  ControllerConfig,
+  ControllerProvenance,
+  JobState,
+  ReleasePlan,
+  RetryAuthorization,
+  StepResult,
+} from "./types.js";
 import { ControllerError } from "./errors.js";
 import { assertDispatcherCompatible, loadDispatcherConfig } from "./dispatcher-config.js";
 import { IssueDispatcher } from "./dispatcher.js";
 import type { DispatcherStepResult } from "./types.js";
+import { createControllerProvenance, readControllerIdentity } from "./provenance.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -27,16 +35,18 @@ async function main(): Promise<void> {
   const configPath = requiredOption(args, "config");
   const config = loadConfig(configPath);
   const configDigest = digestJson(config);
+  const controllerIdentity = readControllerIdentity();
 
   if (args.command === "config-validate") {
-    output(args, { ok: true, configDigest, config });
+    output(args, { ok: true, configDigest, controller: controllerIdentity, config });
     return;
   }
   if (args.command === "plan-validate") {
     const planPath = requiredOption(args, "plan");
     const plan = loadPlan(planPath);
     assertPlanCompatibleWithConfig(plan, config);
-    output(args, { ok: true, planDigest: digestJson(plan), plan });
+    const provenance = createControllerProvenance(controllerIdentity, config.executionMode, configDigest, plan);
+    output(args, { ok: true, planDigest: digestJson(plan), provenance, plan });
     return;
   }
 
@@ -44,7 +54,10 @@ async function main(): Promise<void> {
     const planPath = requiredOption(args, "plan");
     const plan = loadPlan(planPath);
     assertPlanCompatibleWithConfig(plan, config);
+    assertStartAllowed(config, plan);
+    const provenance = createControllerProvenance(controllerIdentity, config.executionMode, configDigest, plan);
     assertExpectedConfigDigest(args, plan, configDigest);
+    assertExpectedControllerProvenance(args, plan, provenance);
     if (plan.issues.length > config.policy.maxIssues) {
       throw new Error(`plan has ${plan.issues.length} issues; configured maximum is ${config.policy.maxIssues}`);
     }
@@ -60,10 +73,20 @@ async function main(): Promise<void> {
         plan,
         configDigest,
         planDigest: digestJson(plan),
+        expectedControllerProvenanceDigest: provenance.digest,
       });
     });
-    output(args, summarizeJob(job));
+    output(args, summarizeJob(job, provenance));
     return;
+  }
+
+  if (args.command === "dispatch" || args.command === "dispatch-status" || args.command === "dispatch-retry") {
+    if (config.executionMode !== "dispatcher-experimental") {
+      throw new ControllerError(
+        "dispatcher_not_enabled",
+        "Dispatcher commands require executionMode=dispatcher-experimental and are not part of the qualified production path.",
+      );
+    }
   }
 
   const store = new JobStore(config);
@@ -78,7 +101,7 @@ async function main(): Promise<void> {
     await git.preflight();
     await github.preflight();
     await codex.preflight();
-    output(args, { ok: true, checkedAt: nowIso(), configDigest });
+    output(args, { ok: true, checkedAt: nowIso(), configDigest, controller: controllerIdentity, executionMode: config.executionMode });
     return;
   }
 
@@ -123,7 +146,11 @@ async function main(): Promise<void> {
 
   const jobId = requiredOption(args, "job");
   if (args.command === "status") {
-    output(args, args.options.operator ? operatorStatus(store.load(jobId)) : summarizeJob(store.load(jobId)));
+    const job = store.load(jobId);
+    const currentProvenance = store.currentProvenance(job.plan);
+    output(args, args.options.operator
+      ? operatorStatus(job, currentProvenance)
+      : summarizeJob(job, currentProvenance));
     return;
   }
 
@@ -149,7 +176,10 @@ async function main(): Promise<void> {
         if (result.terminal || job.status === "blocked" || job.status === "completed" || job.status === "failed" || job.status === "ready_to_merge") break;
         if (result.retryAfterMs) await sleep(result.retryAfterMs);
       }
-      if (args.options.json) output(args, { job: summarizeJob(store.load(jobId)), steps: history });
+      if (args.options.json) {
+        const job = store.load(jobId);
+        output(args, { job: summarizeJob(job, store.currentProvenance(job.plan)), steps: history });
+      }
       return;
     }
     if (args.command === "retry") {
@@ -182,7 +212,13 @@ async function main(): Promise<void> {
       }
       writeJsonAtomic(notePath, authorization);
       store.save(job);
-      output(args, { action: "retry_authorized", notePath, evidencePath, evidenceDigest, job: summarizeJob(job) });
+      output(args, {
+        action: "retry_authorized",
+        notePath,
+        evidencePath,
+        evidenceDigest,
+        job: summarizeJob(job, store.currentProvenance(job.plan)),
+      });
       return;
     }
     if (args.command === "abort") {
@@ -194,7 +230,7 @@ async function main(): Promise<void> {
       job.status = "failed";
       job.blocked = null;
       store.save(job);
-      output(args, { action: "job_aborted", notePath, job: summarizeJob(job) });
+      output(args, { action: "job_aborted", notePath, job: summarizeJob(job, store.currentProvenance(job.plan)) });
       return;
     }
     if (args.command === "cleanup") {
@@ -240,6 +276,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (key === "expected-config-digest") {
         throw new ControllerError("expected_config_digest_invalid", "--expected-config-digest may be supplied only once.");
       }
+      if (["expected-controller-revision", "expected-controller-provenance-digest"].includes(key)) {
+        throw new ControllerError(
+          "expected_controller_provenance_invalid",
+          `--${key} may be supplied only once.`,
+        );
+      }
       throw new Error(`duplicate option --${key}`);
     }
     options[key] = value;
@@ -269,6 +311,70 @@ function assertExpectedConfigDigest(args: ParsedArgs, plan: ReleasePlan, configD
     throw new ControllerError(
       "expected_config_digest_mismatch",
       "--expected-config-digest does not match the current validated Controller config.",
+    );
+  }
+}
+
+function assertExpectedControllerProvenance(
+  args: ParsedArgs,
+  plan: ReleasePlan,
+  provenance: ControllerProvenance,
+): void {
+  const expectedRevision = args.options["expected-controller-revision"];
+  const expectedDigest = args.options["expected-controller-provenance-digest"];
+  if (expectedRevision === undefined && isReleasePlanV2(plan)) {
+    throw new ControllerError(
+      "expected_controller_revision_required",
+      "Release Plan v2 start requires --expected-controller-revision.",
+    );
+  }
+  if (expectedDigest === undefined && isReleasePlanV2(plan)) {
+    throw new ControllerError(
+      "expected_controller_provenance_required",
+      "Release Plan v2 start requires --expected-controller-provenance-digest.",
+    );
+  }
+  if (expectedRevision !== undefined) {
+    if (typeof expectedRevision !== "string" || !/^[a-f0-9]{40}$/.test(expectedRevision)) {
+      throw new ControllerError(
+        "expected_controller_revision_invalid",
+        "--expected-controller-revision must be exactly 40 lowercase hexadecimal characters.",
+      );
+    }
+    if (expectedRevision !== provenance.controller.sourceRevision) {
+      throw new ControllerError(
+        "expected_controller_revision_mismatch",
+        "--expected-controller-revision does not match the running Controller source revision.",
+      );
+    }
+  }
+  if (expectedDigest !== undefined) {
+    if (typeof expectedDigest !== "string" || !/^[a-f0-9]{64}$/.test(expectedDigest)) {
+      throw new ControllerError(
+        "expected_controller_provenance_invalid",
+        "--expected-controller-provenance-digest must be exactly 64 lowercase hexadecimal characters.",
+      );
+    }
+    if (expectedDigest !== provenance.digest) {
+      throw new ControllerError(
+        "expected_controller_provenance_mismatch",
+        "--expected-controller-provenance-digest does not match the current Controller, config, and Release Plan.",
+      );
+    }
+  }
+}
+
+function assertStartAllowed(config: ControllerConfig, plan: ReleasePlan): void {
+  if (config.executionMode === "dispatcher-experimental") {
+    throw new ControllerError(
+      "direct_start_not_enabled",
+      "Direct start is disabled in dispatcher-experimental mode.",
+    );
+  }
+  if (!isReleasePlanV2(plan) && config.executionMode !== "release-plan-v1-compatibility") {
+    throw new ControllerError(
+      "production_plan_v1_rejected",
+      "Release Plan v1 start requires executionMode=release-plan-v1-compatibility.",
     );
   }
 }
@@ -305,7 +411,7 @@ function output(args: ParsedArgs, value: unknown): void {
   else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function summarizeJob(job: JobState) {
+function summarizeJob(job: JobState, currentProvenance: ControllerProvenance) {
   return {
     id: job.id,
     status: job.status,
@@ -321,13 +427,16 @@ function summarizeJob(job: JobState) {
     hardeningRounds: job.hardeningRounds,
     pullRequest: job.pullRequest,
     blocked: job.blocked,
+    provenance: job.provenance,
+    currentProvenance,
+    provenanceMatches: currentProvenance.digest === job.provenance.digest,
     updatedAt: job.updatedAt,
   };
 }
 
-function operatorStatus(job: JobState) {
+function operatorStatus(job: JobState, currentProvenance: ControllerProvenance) {
   return {
-    ...summarizeJob(job),
+    ...summarizeJob(job, currentProvenance),
     activeRun: job.activeRun,
     lastRun: job.runs.at(-1) ?? null,
     lastValidation: job.validations.at(-1) ?? null,
@@ -348,7 +457,7 @@ function nextAction(job: JobState): string {
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate  --config PATH [--json]\n  plan validate    --config PATH --plan PATH [--json]\n  doctor           --config PATH [--json]\n  start            --config PATH --plan PATH [--expected-config-digest 64HEX] [--json]\n  status           --config PATH --job ID [--operator] [--json]\n  step             --config PATH --job ID [--json]\n  run              --config PATH --job ID [--max-steps N] [--json]\n  retry            --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort            --config PATH --job ID --reason TEXT [--json]\n  cleanup          --config PATH --job ID [--json]\n  dispatch         --config PATH --dispatcher PATH [--max-steps N] [--json]\n  dispatch status  --config PATH --dispatcher PATH [--json]\n  dispatch retry   --config PATH --dispatcher PATH --reason TEXT [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate  --config PATH [--json]\n  plan validate    --config PATH --plan PATH [--json]\n  doctor           --config PATH [--json]\n  start            --config PATH --plan PATH [--json]\n                   v2 requires --expected-config-digest 64HEX --expected-controller-revision 40HEX --expected-controller-provenance-digest 64HEX\n  status           --config PATH --job ID [--operator] [--json]\n  step             --config PATH --job ID [--json]\n  run              --config PATH --job ID [--max-steps N] [--json]\n  retry            --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort            --config PATH --job ID --reason TEXT [--json]\n  cleanup          --config PATH --job ID [--json]\n  dispatch         --config PATH --dispatcher PATH [--max-steps N] [--json]\n  dispatch status  --config PATH --dispatcher PATH [--json]\n  dispatch retry   --config PATH --dispatcher PATH --reason TEXT [--json]\n`);
 }
 
 main().catch((error) => {

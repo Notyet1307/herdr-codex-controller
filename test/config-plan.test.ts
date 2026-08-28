@@ -30,6 +30,27 @@ test("config rejects overlapping source and state paths", () => {
   } finally { repo.cleanup(); }
 });
 
+test("execution mode defaults to v2 direct and legacy paths require explicit opt-in", () => {
+  const repo = createTestRepo();
+  try {
+    const raw: any = testConfig(repo);
+    delete raw.executionMode;
+    const direct = validateConfig(raw);
+    assert.equal(direct.executionMode, "release-plan-v2-direct");
+    assert.throws(
+      () => assertPlanCompatibleWithConfig(testPlan([1]), direct),
+      (error: any) => error?.code === "production_plan_v1_rejected",
+    );
+
+    const compatibility = validateConfig({ ...raw, executionMode: "release-plan-v1-compatibility" });
+    assert.doesNotThrow(() => assertPlanCompatibleWithConfig(testPlan([1]), compatibility));
+    assert.throws(
+      () => validateConfig({ ...raw, executionMode: "qualified-dispatcher" }),
+      /config\.executionMode/,
+    );
+  } finally { repo.cleanup(); }
+});
+
 test("Release Plan v1 keeps its existing nullable and operator-supplied fields", () => {
   const plan: any = testPlan([1]);
   plan.parentIssue = null;

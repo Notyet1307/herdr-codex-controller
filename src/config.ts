@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { CommandConfig, ControllerConfig } from "./types.js";
+import type { CommandConfig, ControllerConfig, ExecutionMode } from "./types.js";
 import {
   assertAbsolutePath,
   boundedText,
@@ -17,9 +17,9 @@ export function loadConfig(path: string): ControllerConfig {
 export function validateConfig(value: unknown, sourcePath = "config.json"): ControllerConfig {
   const root = expectObject(value, "config");
   expectExactKeys(root, [
-    "baseRef", "branchPrefix", "codex", "delivery", "localPath", "policy", "remote", "repo",
+    "baseRef", "branchPrefix", "codex", "delivery", "executionMode", "localPath", "policy", "remote", "repo",
     "review", "shell", "stateDir", "validation", "version", "worktreeRoot",
-  ], "config");
+  ], "config", ["executionMode"]);
   if (root.version !== 1) throw new Error("config.version must be 1");
   const repo = boundedText(root.repo, "config.repo", 300);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("config.repo must be OWNER/REPO");
@@ -52,6 +52,7 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
   }
   return {
     version: 1,
+    executionMode: validateExecutionMode(root.executionMode),
     repo,
     localPath,
     stateDir,
@@ -66,6 +67,16 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
     review,
     delivery,
   };
+}
+
+function validateExecutionMode(value: unknown): ExecutionMode {
+  if (value === undefined) return "release-plan-v2-direct";
+  if (value !== "release-plan-v2-direct"
+    && value !== "release-plan-v1-compatibility"
+    && value !== "dispatcher-experimental") {
+    throw new Error("config.executionMode must be release-plan-v2-direct, release-plan-v1-compatibility, or dispatcher-experimental");
+  }
+  return value;
 }
 
 function validateCodex(value: unknown): ControllerConfig["codex"] {

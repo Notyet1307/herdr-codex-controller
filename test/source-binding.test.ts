@@ -6,7 +6,7 @@ import { ReleaseController } from "../src/controller.js";
 import { GitClient } from "../src/git.js";
 import { JobStore } from "../src/state.js";
 import { Validator } from "../src/validator.js";
-import type { ControllerConfig, IssueSnapshot, JobState } from "../src/types.js";
+import type { ControllerConfig, ControllerIdentity, IssueSnapshot, JobState } from "../src/types.js";
 import { digestJson } from "../src/util.js";
 import {
   FakeCodex,
@@ -16,6 +16,7 @@ import {
   testPlanV2,
   writeInputs,
 } from "./support.js";
+import { readControllerIdentity } from "../src/provenance.js";
 
 class CountingGit extends GitClient {
   ensureCalls = 0;
@@ -248,4 +249,45 @@ test("v2 config drift blocks before source verification side effects", async () 
     assert.equal(validator.calls, 0);
     assert.equal(codex.calls.length, 0);
   } finally { repo.cleanup(); }
+});
+
+test("Controller source or build provenance drift blocks before source verification side effects", async () => {
+  for (const field of ["sourceManifestDigest", "buildDigest"] as const) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const plan = testPlanV2(repo, [1]);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      let identity = readControllerIdentity();
+      const store = new JobStore(config, () => identity);
+      const git = new CountingGit(config);
+      const codex = new FakeCodex(git);
+      const validator = new CountingValidator(config);
+      const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator });
+      const created = store.create({
+        configPath,
+        planPath,
+        plan,
+        configDigest: digestJson(config),
+        planDigest: digestJson(plan),
+      });
+
+      const changed = {
+        version: 1 as const,
+        sourceRevision: identity.sourceRevision,
+        sourceManifestDigest: identity.sourceManifestDigest,
+        buildDigest: identity.buildDigest,
+        [field]: identity[field] === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64),
+      };
+      identity = { ...changed, digest: digestJson(changed) } satisfies ControllerIdentity;
+      const result = await controller.step(created.id);
+      const job = store.load(created.id);
+
+      assert.equal(result.action, "blocked", field);
+      assert.equal(job.blocked?.code, "controller_provenance_drift", field);
+      assert.equal(git.ensureCalls, 0, field);
+      assert.equal(validator.calls, 0, field);
+      assert.equal(codex.calls.length, 0, field);
+    } finally { repo.cleanup(); }
+  }
 });

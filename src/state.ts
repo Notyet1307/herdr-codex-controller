@@ -1,10 +1,22 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import type { ControllerConfig, JobState, ReleasePlan, RetryAuthorization } from "./types.js";
+import type {
+  ControllerConfig,
+  ControllerIdentity,
+  ControllerProvenance,
+  JobState,
+  ReleasePlan,
+  RetryAuthorization,
+} from "./types.js";
 import { copyJsonSnapshot, ensurePrivateDir, readJsonFile, writeJsonAtomic } from "./fs-atomic.js";
 import { digestJson, nowIso, pathWithin, safeToken, sha256 } from "./util.js";
 import { assertPlanCompatibleWithConfig, isReleasePlanV2 } from "./plan.js";
 import { ControllerError } from "./errors.js";
+import {
+  assertControllerProvenance,
+  createControllerProvenance,
+  readControllerIdentity,
+} from "./provenance.js";
 
 export const REPLAN_REQUIRED_CODE = "replan_required";
 
@@ -31,14 +43,41 @@ const REPLAN_CAUSES = new Set([
 export class JobStore {
   readonly jobsRoot: string;
 
-  constructor(readonly config: ControllerConfig) {
+  constructor(
+    readonly config: ControllerConfig,
+    private readonly identityProvider: () => ControllerIdentity = readControllerIdentity,
+  ) {
     this.jobsRoot = ensurePrivateDir(join(config.stateDir, "jobs"));
   }
 
-  create(input: { configPath: string; planPath: string; plan: ReleasePlan; configDigest: string; planDigest: string }): JobState {
+  currentProvenance(plan: ReleasePlan): ControllerProvenance {
+    return createControllerProvenance(
+      this.identityProvider(),
+      this.config.executionMode,
+      digestJson(this.config),
+      plan,
+    );
+  }
+
+  create(input: {
+    configPath: string;
+    planPath: string;
+    plan: ReleasePlan;
+    configDigest: string;
+    planDigest: string;
+    expectedControllerProvenanceDigest?: string;
+  }): JobState {
     assertPlanCompatibleWithConfig(input.plan, this.config);
     if (input.configDigest !== digestJson(this.config)) throw new Error("job configDigest is not the current validated config digest");
     if (input.planDigest !== digestJson(input.plan)) throw new Error("job planDigest is not the current validated plan digest");
+    const provenance = this.currentProvenance(input.plan);
+    if (input.expectedControllerProvenanceDigest !== undefined
+      && provenance.digest !== input.expectedControllerProvenanceDigest) {
+      throw new ControllerError(
+        "controller_provenance_drift",
+        "Controller provenance changed between the start gate and Job creation.",
+      );
+    }
     const id = safeToken(input.plan.id);
     const root = this.root(id);
     if (existsSync(root)) throw new Error(`job already exists: ${id}`);
@@ -49,8 +88,9 @@ export class JobStore {
     const worktreePath = resolve(this.config.worktreeRoot, id);
     const now = nowIso();
     const job: JobState = {
-      version: 1,
+      version: 2,
       id,
+      provenance,
       configPath: resolve(input.configPath),
       configDigest: input.configDigest,
       planPath: resolve(input.planPath),
@@ -218,8 +258,14 @@ export function retryBlockedJob(job: JobState, authorization?: RetryAuthorizatio
 }
 
 export function assertJob(job: JobState): void {
-  if (!job || job.version !== 1 || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
+  if (!job || job.version !== 2 || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
     throw new Error("job state is invalid or its plan digest drifted");
+  }
+  assertControllerProvenance(job.provenance);
+  if (job.provenance.configDigest !== job.configDigest
+    || job.provenance.releasePlan.version !== job.plan.version
+    || job.provenance.releasePlan.digest !== job.planDigest) {
+    throw new Error("job Controller provenance does not bind its config and Release Plan");
   }
   if (isReleasePlanV2(job.plan) && job.baseSha !== null && job.baseSha !== job.plan.source.baseSha) {
     throw new Error("job base SHA differs from its Release Plan v2 source binding");

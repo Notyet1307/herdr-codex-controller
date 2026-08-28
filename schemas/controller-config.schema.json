@@ -6,6 +6,11 @@
   "required": ["version", "repo", "localPath", "stateDir", "worktreeRoot", "baseRef", "remote", "branchPrefix", "shell", "codex", "validation", "policy", "review", "delivery"],
   "properties": {
     "version": { "const": 1 },
+    "executionMode": {
+      "enum": ["release-plan-v2-direct", "release-plan-v1-compatibility", "dispatcher-experimental"],
+      "default": "release-plan-v2-direct",
+      "description": "Qualified production uses release-plan-v2-direct. Release Plan v1 and Dispatcher require explicit non-production modes."
+    },
     "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
     "localPath": { "type": "string", "minLength": 1 },
     "stateDir": { "type": "string", "minLength": 1 },

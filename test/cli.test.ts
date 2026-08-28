@@ -9,8 +9,10 @@ import { ReleaseController } from "../src/controller.js";
 import { GitClient } from "../src/git.js";
 import { Validator } from "../src/validator.js";
 import { createTestRepo, FakeCodex, FakeGitHub, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
+import { createControllerProvenance, readControllerIdentity } from "../src/provenance.js";
+import type { ControllerConfig, ReleasePlan } from "../src/types.js";
 
-test("CLI starts and completes a local no-PR release with fake gh and Codex executables", () => {
+test("CLI starts and completes a release-plan-v2-direct Job with fake gh and Codex executables", () => {
   const repo = createTestRepo();
   const bin = join(repo.root, "bin");
   mkdirSync(bin, { mode: 0o700 });
@@ -21,14 +23,32 @@ test("CLI starts and completes a local no-PR release with fake gh and Codex exec
     const fakeCodex = join(bin, "codex");
     writeFileSync(fakeCodex, `#!/usr/bin/env node\nimport fs from 'node:fs';import path from 'node:path';\nconst a=process.argv.slice(2);\nif(a[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(a[0]==='login'&&a[1]==='status'){console.log('logged in');process.exit(0)}\nlet prompt='';for await(const c of process.stdin)prompt+=c;\nconst out=a[a.indexOf('--output-last-message')+1];const review=a.includes('read-only');\nif(!review){const m=prompt.match(/Issue #(\\d+)/);if(m)fs.writeFileSync(path.join(process.cwd(),'issue-'+m[1]+'.txt'),'implemented\\n')}\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],blockedReason:null,blockedKind:null};\nfs.writeFileSync(out,JSON.stringify(result));console.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
     chmodSync(fakeCodex, 0o700);
-    const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fakeCodex } } as any);
-    const plan = testPlan([1, 2]);
+    const config = testConfig(repo, {
+      executionMode: "release-plan-v2-direct",
+      codex: { ...testConfig(repo).codex, bin: fakeCodex },
+    } as any);
+    const plan = testPlanV2(repo, [1, 2]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
     const cli = resolve("dist/src/cli.js");
-    const start = spawnSync("node", [cli, "start", "--config", configPath, "--plan", planPath, "--json"], { cwd: resolve("."), env, encoding: "utf8" });
+    const configValidation = spawnSync("node", [cli, "config", "validate", "--config", configPath, "--json"], {
+      cwd: resolve("."), env, encoding: "utf8",
+    });
+    assert.equal(configValidation.status, 0, configValidation.stderr);
+    assert.match(JSON.parse(String(configValidation.stdout)).controller.digest, /^[a-f0-9]{64}$/);
+    const doctor = spawnSync("node", [cli, "doctor", "--config", configPath, "--json"], {
+      cwd: resolve("."), env, encoding: "utf8",
+    });
+    assert.equal(doctor.status, 0, doctor.stderr);
+    assert.equal(JSON.parse(String(doctor.stdout)).executionMode, "release-plan-v2-direct");
+    const start = spawnSync("node", [
+      cli, "start", "--config", configPath, "--plan", planPath,
+      ...expectedProvenanceArgs(config, plan), "--json",
+    ], { cwd: resolve("."), env, encoding: "utf8" });
     assert.equal(start.status, 0, start.stderr);
-    const jobId = JSON.parse(String(start.stdout)).id as string;
+    const startedJob = JSON.parse(String(start.stdout));
+    assert.equal(startedJob.provenanceMatches, true);
+    const jobId = startedJob.id as string;
     const run = spawnSync("node", [cli, "run", "--config", configPath, "--job", jobId, "--max-steps", "100", "--json"], { cwd: resolve("."), env, encoding: "utf8", timeout: 60_000 });
     assert.equal(run.status, 0, run.stderr);
     const status = spawnSync("node", [cli, "status", "--config", configPath, "--job", jobId, "--json"], { cwd: resolve("."), env, encoding: "utf8" });
@@ -36,6 +56,8 @@ test("CLI starts and completes a local no-PR release with fake gh and Codex exec
     const job = JSON.parse(String(status.stdout));
     assert.equal(job.status, "completed");
     assert.deepEqual(job.issues.map((issue: any) => issue.status), ["committed", "committed"]);
+    assert.equal(job.provenanceMatches, true);
+    assert.deepEqual(job.provenance, job.currentProvenance);
   } finally { repo.cleanup(); }
 });
 
@@ -67,7 +89,7 @@ test("CLI enforces one active release per repository state root", () => {
 test("CLI plan validate accepts v2 and rejects config source mismatches", () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo);
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const cli = resolve("dist/src/cli.js");
@@ -79,6 +101,8 @@ test("CLI plan validate accepts v2 and rejects config source mismatches", () => 
     assert.equal(output.ok, true);
     assert.equal(output.plan.version, 2);
     assert.match(output.planDigest, /^[a-f0-9]{64}$/);
+    assert.match(output.provenance.controller.sourceRevision, /^[a-f0-9]{40}$/);
+    assert.match(output.provenance.digest, /^[a-f0-9]{64}$/);
 
     writeFileSync(planPath, `${JSON.stringify({ ...plan, source: { ...plan.source, repo: "other/project" } })}\n`, "utf8");
     const repoMismatch = spawnSync("node", [cli, "plan", "validate", "--config", configPath, "--plan", planPath], {
@@ -99,7 +123,7 @@ test("CLI plan validate accepts v2 and rejects config source mismatches", () => 
 test("CLI v2 start requires the exact approved config digest before Job creation", () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo);
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const cli = resolve("dist/src/cli.js");
@@ -137,7 +161,64 @@ test("CLI v2 start requires the exact approved config digest before Job creation
     assert.match(String(duplicate.stderr), /expected_config_digest_invalid/);
     assert.equal(existsSync(jobPath), false);
 
-    const exact = spawnSync("node", [...baseArgs, "--expected-config-digest", approvedDigest], {
+    const controller = readControllerIdentity();
+    const provenance = createControllerProvenance(controller, config.executionMode, approvedDigest, plan);
+    const revisionOnly = [...baseArgs, "--expected-config-digest", approvedDigest];
+    const missingRevision = spawnSync("node", revisionOnly, { cwd: resolve("."), encoding: "utf8" });
+    assert.notEqual(missingRevision.status, 0);
+    assert.match(String(missingRevision.stderr), /expected_controller_revision_required/);
+    assert.equal(existsSync(jobPath), false);
+
+    for (const invalidRevision of ["A".repeat(40), "0".repeat(39), `sha:${"0".repeat(40)}`]) {
+      const invalid = spawnSync("node", [
+        ...revisionOnly,
+        "--expected-controller-revision", invalidRevision,
+        "--expected-controller-provenance-digest", provenance.digest,
+      ], { cwd: resolve("."), encoding: "utf8" });
+      assert.notEqual(invalid.status, 0);
+      assert.match(String(invalid.stderr), /expected_controller_revision_invalid/);
+      assert.equal(existsSync(jobPath), false);
+    }
+
+    const wrongRevision = controller.sourceRevision === "0".repeat(40) ? "1".repeat(40) : "0".repeat(40);
+    const mismatchRevision = spawnSync("node", [
+      ...revisionOnly,
+      "--expected-controller-revision", wrongRevision,
+      "--expected-controller-provenance-digest", provenance.digest,
+    ], { cwd: resolve("."), encoding: "utf8" });
+    assert.notEqual(mismatchRevision.status, 0);
+    assert.match(String(mismatchRevision.stderr), /expected_controller_revision_mismatch/);
+    assert.equal(existsSync(jobPath), false);
+
+    const missingProvenance = spawnSync("node", [
+      ...revisionOnly, "--expected-controller-revision", controller.sourceRevision,
+    ], { cwd: resolve("."), encoding: "utf8" });
+    assert.notEqual(missingProvenance.status, 0);
+    assert.match(String(missingProvenance.stderr), /expected_controller_provenance_required/);
+    assert.equal(existsSync(jobPath), false);
+
+    for (const invalidDigest of [`sha256:${"0".repeat(64)}`, "A".repeat(64), "0".repeat(63)]) {
+      const invalid = spawnSync("node", [
+        ...revisionOnly,
+        "--expected-controller-revision", controller.sourceRevision,
+        "--expected-controller-provenance-digest", invalidDigest,
+      ], { cwd: resolve("."), encoding: "utf8" });
+      assert.notEqual(invalid.status, 0);
+      assert.match(String(invalid.stderr), /expected_controller_provenance_invalid/);
+      assert.equal(existsSync(jobPath), false);
+    }
+
+    const wrongProvenance = provenance.digest === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64);
+    const mismatchProvenance = spawnSync("node", [
+      ...revisionOnly,
+      "--expected-controller-revision", controller.sourceRevision,
+      "--expected-controller-provenance-digest", wrongProvenance,
+    ], { cwd: resolve("."), encoding: "utf8" });
+    assert.notEqual(mismatchProvenance.status, 0);
+    assert.match(String(mismatchProvenance.stderr), /expected_controller_provenance_mismatch/);
+    assert.equal(existsSync(jobPath), false);
+
+    const exact = spawnSync("node", [...baseArgs, ...expectedProvenanceArgs(config, plan)], {
       cwd: resolve("."), encoding: "utf8",
     });
     assert.equal(exact.status, 0, exact.stderr);
@@ -148,6 +229,30 @@ test("CLI v2 start requires the exact approved config digest before Job creation
     assert.equal(persisted.configDigest, approvedDigest);
     assert.equal(persisted.planDigest, digestJson(plan));
     assert.equal(persisted.baseSha, null);
+    assert.deepEqual(persisted.provenance, provenance);
+  } finally { repo.cleanup(); }
+});
+
+test("production direct mode rejects Release Plan v1 and Dispatcher before Job or queue access", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const cli = resolve("dist/src/cli.js");
+    const start = spawnSync("node", [cli, "start", "--config", configPath, "--plan", planPath, "--json"], {
+      cwd: resolve("."), encoding: "utf8",
+    });
+    assert.notEqual(start.status, 0);
+    assert.match(String(start.stderr), /production_plan_v1_rejected/);
+    assert.equal(existsSync(join(config.stateDir, "jobs", plan.id, "job.json")), false);
+
+    const dispatch = spawnSync("node", [
+      cli, "dispatch", "--config", configPath, "--dispatcher", join(repo.root, "must-not-be-read.json"), "--json",
+    ], { cwd: resolve("."), encoding: "utf8" });
+    assert.notEqual(dispatch.status, 0);
+    assert.match(String(dispatch.stderr), /dispatcher_not_enabled/);
+    assert.equal(existsSync(join(config.stateDir, "dispatcher")), false);
   } finally { repo.cleanup(); }
 });
 
@@ -224,7 +329,7 @@ test("CLI snapshots recovery evidence and the next failure stays fail closed", a
 test("abort followed by a new Release Plan v2 Job is the only replan recovery path", () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo);
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
@@ -252,7 +357,7 @@ test("abort followed by a new Release Plan v2 Job is the only replan recovery pa
     writeFileSync(nextPlanPath, `${JSON.stringify(nextPlan, null, 2)}\n`, "utf8");
     const startArgs = [
       cli, "start", "--config", configPath, "--plan", nextPlanPath,
-      "--expected-config-digest", digestJson(config), "--json",
+      ...expectedProvenanceArgs(config, nextPlan), "--json",
     ];
     const beforeAbort = spawnSync("node", startArgs, { cwd: resolve("."), encoding: "utf8" });
     assert.notEqual(beforeAbort.status, 0);
@@ -280,3 +385,18 @@ test("abort followed by a new Release Plan v2 Job is the only replan recovery pa
     assert.equal(newJob.planDigest, digestJson(nextPlan));
   } finally { repo.cleanup(); }
 });
+
+function expectedProvenanceArgs(config: ControllerConfig, plan: ReleasePlan): string[] {
+  const configDigest = digestJson(config);
+  const provenance = createControllerProvenance(
+    readControllerIdentity(),
+    config.executionMode,
+    configDigest,
+    plan,
+  );
+  return [
+    "--expected-config-digest", configDigest,
+    "--expected-controller-revision", provenance.controller.sourceRevision,
+    "--expected-controller-provenance-digest", provenance.digest,
+  ];
+}

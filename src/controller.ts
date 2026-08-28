@@ -82,6 +82,13 @@ export class ReleaseController {
     if (digestJson(job.plan) !== job.planDigest) {
       throw new ControllerError("plan_drift", "The job-bound release plan digest changed.");
     }
+    const currentProvenance = this.deps.store.currentProvenance(job.plan);
+    if (currentProvenance.digest !== job.provenance.digest) {
+      throw new ControllerError(
+        "controller_provenance_drift",
+        "The current Controller source or build provenance differs from the Job snapshot.",
+      );
+    }
   }
 
   private async reconcileInterruptedRun(job: JobState): Promise<StepResult> {

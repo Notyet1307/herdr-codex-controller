@@ -15,6 +15,7 @@ This repository is a thin Codex-first release delivery controller. It executes a
 - Validation commands are trusted operator configuration and must remain observational: they may not change the Git-visible worktree.
 - Worker and hardening Codex runs may not commit, push, invoke `gh`, change branches/remotes, or modify GitHub state.
 - The release reviewer is read-only and reviews one exact `baseSha...candidateSha` aggregate candidate.
+- Qualified production uses `release-plan-v2-direct`; Release Plan v1 and Dispatcher remain explicit compatibility/experimental paths only.
 
 ## Build and verification
 
@@ -36,6 +37,7 @@ Do not weaken tests, enlarge retry loops, or hide command failures to make a gat
 - `src/github.ts`: Issue/PR/check observation and PR delivery.
 - `src/validator.ts`: deterministic command execution and receipts.
 - `src/state.ts`: atomic job state and paths.
+- `src/provenance.ts`: Controller source/build identity and Job provenance binding.
 - `src/prompts.ts`: Issue Worker, release hardening, and aggregate review prompts.
 - `src/cli.ts`: operator commands.
 
