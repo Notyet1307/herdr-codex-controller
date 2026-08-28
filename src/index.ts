@@ -9,4 +9,5 @@ export * from "./codex.js";
 export * from "./validator.js";
 export * from "./dispatcher-config.js";
 export * from "./dispatcher.js";
+export * from "./provenance.js";
 export { digestJson, sha256PrefixedUtf8, stableStringify } from "./util.js";

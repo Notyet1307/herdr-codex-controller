@@ -28,6 +28,7 @@ Codex 可以在 Worker 内部自行规划、自我 Review，并使用原生 suba
 | Release 是否通过 Review | 绑定 exact candidate SHA 的 fresh read-only Codex 结果 |
 | PR、Checks、Merge | GitHub |
 | 当前流程阶段 | 原子写入的 `job.json` |
+| 执行本 Job 的 Controller | `job.json.provenance` 与当前 runtime readback |
 | Codex 内部怎么工作 | Codex 自己，不进入 Controller truth |
 
 ## 明确不包含
@@ -65,6 +66,7 @@ complete 或人工 gate
 
 默认策略：
 
+- `executionMode` 缺省为 `release-plan-v2-direct`：只允许 source-bound Release Plan v2 direct；
 - 一个 Release 共用一个 branch/worktree；
 - 每个 Issue 一个 commit；
 - Issue 验证失败最多一次 fresh repair；
@@ -72,9 +74,9 @@ complete 或人工 gate
 - 不恢复 Codex Session；中断后保留 Worktree，并由 fresh Codex 重新检查；
 - 单仓库串行：同一 `stateDir` 只允许一个非终态 Release Job；多仓库并发应使用独立进程、独立 `stateDir` 和 `worktreeRoot`。
 
-## 可选的连续 Issue Dispatcher
+## 实验性的连续 Issue Dispatcher
 
-Dispatcher 是 Controller 上方的薄 admission/串行调度层，不是 Agent Runtime，也不会做开放式规划。每次只处理一个 Parent 的一个 Child：
+Dispatcher 代码保留为 Controller 上方的薄 admission/串行调度层，但不属于 qualified production path。只有 Controller 配置显式设置 `"executionMode": "dispatcher-experimental"` 才能调用 `dispatch*`；默认 production direct 会在读取 Dispatcher 配置或 `ready-for-agent` 前拒绝。每次只处理一个 Parent 的一个 Child：
 
 ```text
 读取 Parent 的原生 sub-issue 顺序
@@ -144,20 +146,23 @@ npm run verify
 
 ```bash
 cp examples/controller.config.example.json /PRIVATE/PATH/controller.json
-cp examples/release-plan.example.json /PRIVATE/PATH/release-plan.json
-```
-
-上面的 Release Plan 示例是 v1（手工/旧集成）。只有接收 `pi-ticket-planning` 的精确 source-bound handoff 时，才使用：
-
-```bash
 cp examples/release-plan-v2.example.json /PRIVATE/PATH/release-plan.json
 ```
 
-v2 示例中的 SHA/hash 只是满足格式的占位值，不能直接启动；所有 source/expected 字段必须来自 Planner 批准的真实 handoff。
+生产默认只接受 `pi-ticket-planning` 的精确 source-bound v2 handoff。v2 示例中的 SHA/hash 只是满足格式的占位值，不能直接启动；所有 source/expected 字段必须来自 Planner 批准的真实 handoff。
+
+手工/旧集成如需 v1，必须同时显式设置非生产兼容模式：
+
+```json
+{ "executionMode": "release-plan-v1-compatibility" }
+```
+
+Dispatcher 则只能使用 `dispatcher-experimental`；两种 opt-in 都不会自动升级为 qualified。
 
 必须修改：
 
 - `repo`
+- `executionMode`（生产保持 `release-plan-v2-direct`）
 - `localPath`
 - `stateDir`
 - `worktreeRoot`
@@ -170,6 +175,7 @@ v2 示例中的 SHA/hash 只是满足格式的占位值，不能直接启动；�
 
 - v1 是手工计划和旧集成的兼容格式；`parentIssue` 可为 `null`，Issue `objective` 可为 `null`，并保留既有 `suggestedValidation`、`allowNoop` 语义。
 - v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent Issue 的精确 title/body hash，以及每个 Child Issue 的精确 title/body hash。
+- `release-plan-v2-direct` 拒绝 v1；v1 只有在 `release-plan-v1-compatibility` 或 Dispatcher 内部的 `dispatcher-experimental` 路径才可创建 Job。
 - Controller 不读取 Planner 的 Planning Case、Handoff 私有 artifact 或 Delivery Graph；v2 文件本身就是完整公开契约。
 
 公开 schema：
@@ -178,12 +184,14 @@ v2 示例中的 SHA/hash 只是满足格式的占位值，不能直接启动；�
 schemas/release-plan-v1.schema.json
 schemas/release-plan-v2.schema.json
 schemas/release-plan.schema.json       # oneOf(v1, v2)
-schemas/dispatcher-config.schema.json  # 可选串行 Dispatcher policy
+schemas/dispatcher-config.schema.json  # experimental Dispatcher policy
 ```
 
 `expectedTitle` 使用 GitHub API 返回的原始字符串做 `===` 比较，不 trim、不大小写折叠、不 Unicode normalize。`expectedBodyHash` 对 GitHub API 返回的原始 body 做 UTF-8 SHA-256；不 trim、不 normalize、不转换换行、不解析 Markdown，空 body 按空字符串计算。Issue body hash 带 `sha256:` 前缀，config/plan digest 不带前缀。
 
 config/plan digest 的算法为：先验证并构造 Controller 返回的对象；递归排序每个 object 的 key，保留 array 顺序；对 `JSON.stringify` 结果计算 SHA-256，输出 64 位小写 hex。`config validate` 和 `plan validate` 返回的 digest 是启动时应使用和记录的权威值。
+
+Controller runtime identity 由三项组成：Controller checkout 的 40 位 `HEAD` commit；当前 checkout 每个 tracked regular file 的 path/mode/bytes/SHA-256 所形成的规范 manifest digest；实际 `dist/src/**/*.js`、`package.json`、`package-lock.json` 所形成的 build digest。Job provenance 再绑定 `executionMode`、config digest、Release Plan version/digest，并对完整对象 self-digest。`job.json` 以一次原子替换保存该 snapshot；每个 Controller step 都重新计算并比较，source/build/config/plan 任一漂移都会 fail closed。
 
 v2 prepare 严格按以下顺序执行：
 
@@ -241,23 +249,21 @@ node dist/src/cli.js plan validate \
 
 node dist/src/cli.js doctor \
   --config /PRIVATE/PATH/controller.json --json
-
-node dist/src/cli.js start \
-  --config /PRIVATE/PATH/controller.json \
-  --plan /PRIVATE/PATH/release-plan.json --json
 ```
 
-上面的 `start` 对 v1 保持兼容。v2 必须从刚才 `config validate` 的输出复制精确 `configDigest`，且不得带 `sha256:` 前缀：
+`config validate` 和 `doctor` 返回 `controller` identity；`plan validate` 返回完整 `provenance`。v2 `start` 必须从这些输出复制 exact `configDigest`、`provenance.controller.sourceRevision` 和 `provenance.digest`，digest 均不得带 `sha256:` 前缀：
 
 ```bash
 node dist/src/cli.js start \
   --config /PRIVATE/PATH/controller.json \
   --plan /PRIVATE/PATH/release-plan.json \
   --expected-config-digest 64位小写CONFIG_DIGEST \
+  --expected-controller-revision 40位小写CONTROLLER_COMMIT \
+  --expected-controller-provenance-digest 64位小写PROVENANCE_DIGEST \
   --json
 ```
 
-缺失、格式非法或与当前已验证配置不一致会分别以 `expected_config_digest_required`、`expected_config_digest_invalid`、`expected_config_digest_mismatch` 失败，并且不会创建 Job。
+三项 expected gate 的缺失、格式非法或不一致都会在 Job 创建前失败。Controller 还会在 `JobStore.create` 内重新计算一次 provenance，关闭 gate 与原子 snapshot 之间的漂移窗口。
 
 `start` 返回 Job ID。随后运行：
 
@@ -273,6 +279,8 @@ node dist/src/cli.js run \
 node dist/src/cli.js step --config /PRIVATE/PATH/controller.json --job RELEASE_ID --json
 node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --operator --json
 ```
+
+`status` 同时返回 Job 的 exact `provenance`、当前 `currentProvenance` 和 `provenanceMatches`。Planner 集成应调用这些公开 CLI，而不是读取 Controller 私有 `job.json`；Controller 也不会让 Planner 读取任何 Job 私有状态。
 
 ## 人工操作
 
@@ -348,6 +356,9 @@ npm run verify
 - 配置和有序依赖计划；
 - v1 向后兼容，以及 v2 JSON Schema/runtime/CLI 契约一致性；
 - v2 config digest 启动 gate、Job 持久化和 digest 漂移阻断；
+- expected Controller revision/provenance match、mismatch、格式和缺失 gate；
+- tracked source manifest/build drift 在任何 Worktree/setup/Codex 副作用前阻断；
+- production direct 拒绝 v1 和 Dispatcher，并完整执行 v2 direct；
 - v2 base/Parent/Child 精确校验及所有漂移路径的零 Worktree/setup/Codex 副作用；
 - 真实 Git branch/worktree/commit；
 - 多 Issue fresh Worker；
@@ -359,7 +370,7 @@ npm run verify
 - Codex 写入 run 的 `gpt-5.6-terra/high` 与 aggregate Reviewer 的 `gpt-5.6-sol/max` 显式路由；
 - PR 的 exact head branch、base branch 与 candidate SHA 绑定。
 - auto-merge 的 `--match-head-commit` exact reviewed-candidate 绑定；
-- Dispatcher 的 Parent 顺序、ready label、原生 blocker、独占 assignee、pre-Worker source binding 和 post-merge main workflow gate。
+- experimental Dispatcher 的 Parent 顺序、ready label、原生 blocker、独占 assignee、pre-Worker source binding 和 post-merge main workflow gate。
 
 这些是确定性本地/假端口测试，不代表 `pi-ticket-planning` 与真实 Controller/GitHub/Codex 的跨仓 canary 已执行。跨仓闭环只有在 Planner 后续以真实 v2 handoff 运行通过后才能宣称。
 

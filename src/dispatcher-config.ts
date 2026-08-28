@@ -69,6 +69,9 @@ export function assertDispatcherCompatible(
   dispatcher: DispatcherConfig,
   controller: ControllerConfig,
 ): void {
+  if (controller.executionMode !== "dispatcher-experimental") {
+    throw new Error("dispatcher requires executionMode=dispatcher-experimental");
+  }
   if (!controller.delivery.createPullRequest) throw new Error("dispatcher requires delivery.createPullRequest=true");
   if (!controller.delivery.autoMerge) throw new Error("dispatcher requires delivery.autoMerge=true");
   if (controller.delivery.allowNoChecks) throw new Error("dispatcher requires delivery.allowNoChecks=false");

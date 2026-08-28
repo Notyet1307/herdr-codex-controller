@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { validatePlan } from "../src/plan.js";
 import { validateDispatcherConfig } from "../src/dispatcher-config.js";
+import { validateConfig } from "../src/config.js";
 import { createTestRepo, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
 
 function readSchema(name: string): Record<string, unknown> {
@@ -88,5 +89,24 @@ test("dispatcher JSON Schema and runtime validator agree on the closed policy", 
     assert.equal(validateSchema(value), fixture.valid, JSON.stringify(validateSchema.errors));
     if (fixture.valid) assert.doesNotThrow(() => validateDispatcherConfig(value));
     else assert.throws(() => validateDispatcherConfig(value));
+  }
+});
+
+test("Controller config schema exposes only the explicit execution modes", () => {
+  const schema = readSchema("controller-config.schema.json");
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  const validateSchema = ajv.compile(schema);
+  const positive = JSON.parse(readFileSync(resolve("examples", "controller.config.example.json"), "utf8"));
+  const fixtures: Array<{ valid: boolean; mutate(value: any): void }> = [
+    { valid: true, mutate: () => {} },
+    { valid: true, mutate: (value) => { delete value.executionMode; } },
+    { valid: false, mutate: (value) => { value.executionMode = "dispatcher-qualified"; } },
+  ];
+  for (const fixture of fixtures) {
+    const value = structuredClone(positive);
+    fixture.mutate(value);
+    assert.equal(validateSchema(value), fixture.valid, JSON.stringify(validateSchema.errors));
+    if (fixture.valid) assert.doesNotThrow(() => validateConfig(value));
+    else assert.throws(() => validateConfig(value));
   }
 });

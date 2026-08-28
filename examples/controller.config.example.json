@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "executionMode": "release-plan-v2-direct",
   "repo": "OWNER/REPOSITORY",
   "localPath": "/ABSOLUTE/PATH/TO/LOCAL/CHECKOUT",
   "stateDir": "/ABSOLUTE/PRIVATE/PATH/herdr-codex-state",

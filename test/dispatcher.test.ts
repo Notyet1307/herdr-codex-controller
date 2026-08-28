@@ -37,6 +37,7 @@ test("dispatcher config requires fail-closed reviewed squash auto-merge", () => 
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
+      executionMode: "dispatcher-experimental",
       delivery: {
         createPullRequest: true,
         draft: false,
@@ -85,6 +86,7 @@ test("dispatcher gates the next claim on post-merge evidence, then claims it wit
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
+      executionMode: "dispatcher-experimental",
       validation: { setup: [], issue: [], release: [], maxOutputBytes: 64 * 1024 },
       delivery: {
         createPullRequest: true,

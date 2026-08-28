@@ -62,6 +62,7 @@ export function createTestRepo(): TestRepo {
 export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> = {}): ControllerConfig {
   const base: ControllerConfig = {
     version: 1,
+    executionMode: "release-plan-v1-compatibility",
     repo: "example/project",
     localPath: repo.source,
     stateDir: repo.state,

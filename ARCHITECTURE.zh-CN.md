@@ -8,26 +8,53 @@
 
 系统不控制 Codex 内部推理过程，只控制外部交付事实。
 
-## 2. 三个核心组件和一个可选上层
+## 2. 三个核心组件和一个实验上层
 
 ```text
 Release Plan  → 决定做什么、顺序和验收标准
 Codex CLI     → 决定如何探索、实现、自测和自我 Review
 Controller    → Worktree、状态、验证、commit、PR、CI、人工 gate
-Dispatcher    → 可选；只做严格 admission、GitHub claim、单 Job 串行与 post-merge gate
+Dispatcher    → 保留的 experimental compatibility；不属于 qualified production path
 ```
 
-## 3. Release Plan 与来源绑定
+## 3. 生产入口、Release Plan 与来源绑定
+
+Controller config 的 `executionMode` 是入口 authority：
+
+| mode | 可启动入口 | qualification |
+|---|---|---|
+| `release-plan-v2-direct` | 仅 source-bound v2 direct | 默认且唯一 qualified production path |
+| `release-plan-v1-compatibility` | v1 direct compatibility | 显式非生产兼容 |
+| `dispatcher-experimental` | 保留的 Dispatcher | 显式实验路径 |
+
+缺少 `executionMode` 按 `release-plan-v2-direct` 解析，因此旧配置不会静默保留 v1/Dispatcher admission。production direct 在读取 Dispatcher config、ready label 或 queue 前就拒绝所有 `dispatch*` 命令。
 
 `ReleasePlan = ReleasePlanV1 | ReleasePlanV2`。
 
 - v1 保持手工/旧集成语义，不要求 Parent 或 Planner source binding。
 - v2 是 `pi-ticket-planning` 的公开 handoff；Plan 自身携带 repo/baseRef/baseSha、Parent binding 和每个 Child 的 title/body binding。Controller 不依赖 Planner package/runtime，也不读取 Planning Case、Handoff 私有 artifact 或 Delivery Graph。
 
-v2 有两个相互独立的批准 gate：
+v2 有四层相互独立的确定性 gate：
 
 1. `start` 的 `--expected-config-digest` 必须等于当前 validated config 的无前缀 64 位小写 SHA-256；因此批准后修改 config 不能静默改变执行策略。
-2. `prepare` 重新读取 Git/GitHub 当前事实，只有 base、Parent、全部 Child 与 Plan exact 相等才可创建 Worktree。
+2. `--expected-controller-revision` 必须等于运行该命令的 Controller checkout exact commit。
+3. `--expected-controller-provenance-digest` 必须等于 `plan validate` 返回的完整 provenance digest，绑定 build/source、mode、config 与 Plan；三项 expected 值缺失、格式错误或不一致都不能创建 Job。
+4. `prepare` 重新读取 Git/GitHub 当前事实，只有 base、Parent、全部 Child 与 Plan exact 相等才可创建 Worktree。
+
+Controller runtime identity 不依赖被控仓库 `config.localPath`：
+
+```text
+Controller checkout HEAD commit
++ canonical manifest(path/mode/bytes/hash) of every tracked regular file
++ actual dist/src/**/*.js + package.json + package-lock.json build digest
+→ Controller identity self-digest
++ executionMode + validated config digest + Release Plan version/digest
+→ Job provenance self-digest
+→ atomic job.json snapshot
+→ compare again before every Controller step
+```
+
+`config validate`/`doctor` 暴露 runtime identity，`plan validate` 暴露完整待绑定 provenance，`start` 原子写入 Job，`status` 回读 snapshot、current 和 match。任何 source/build/config/plan drift 都阻止后续执行；缺少 provenance 的旧 Job 不会被静默 backfill。
 
 ```text
 preflight(git → github → codex)
@@ -57,6 +84,8 @@ complete
 ```
 
 `harden` 不是常规阶段。只有 full validation、aggregate review 或 CI 给出精确阻断证据时才进入，并受统一次数上限约束。
+
+每次 phase dispatch 前先比较当前 Controller provenance 与 Job snapshot。mismatch 由现有 blocked checkpoint 路径保存为 `controller_provenance_drift`，所以不会到达 Worktree、validator、Codex、push 或 GitHub mutation。
 
 ## 5. Issue 边界
 
@@ -177,7 +206,7 @@ V1 可安全增加：
 - PR body 和 label 策略；
 - 可选人工批准。
 
-可选 Dispatcher 仍位于单个 Release Controller 之上。它不保存 Codex Session，不并行同仓库 Writer，也不决定如何实现 Issue。其新增耐久状态只覆盖无法从单一系统原子重建的跨边界事实：GitHub claim、对应 Controller Job、以及下一次 claim 前必须满足的 post-merge receipts。
+实验 Dispatcher 仍位于单个 Release Controller 之上。它只在 `dispatcher-experimental` mode 可调用，不保存 Codex Session，不并行同仓库 Writer，也不决定如何实现 Issue。其新增耐久状态只覆盖无法从单一系统原子重建的跨边界事实：GitHub claim、对应 Controller Job、以及下一次 claim 前必须满足的 post-merge receipts；这些能力不构成 production qualification。
 
 Dispatcher 的选择与交付序列是：
 

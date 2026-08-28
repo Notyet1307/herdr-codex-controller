@@ -47,7 +47,15 @@ export function isReleasePlanV2(plan: ReleasePlan): plan is ReleasePlanV2 {
 }
 
 export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: ControllerConfig): void {
-  if (!isReleasePlanV2(plan)) return;
+  if (!isReleasePlanV2(plan)) {
+    if (config.executionMode === "release-plan-v2-direct") {
+      throw new ControllerError(
+        "production_plan_v1_rejected",
+        "release-plan-v2-direct mode rejects Release Plan v1.",
+      );
+    }
+    return;
+  }
   if (plan.source.repo !== config.repo) {
     throw new ControllerError(
       "plan_source_repo_mismatch",

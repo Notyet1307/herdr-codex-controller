@@ -20,14 +20,14 @@ node --version
 
 ## 推荐上线顺序
 
-1. `delivery.createPullRequest=false`，使用 1 个 disposable Issue 做本地 candidate 演练。
+1. 保持 `executionMode=release-plan-v2-direct`；`delivery.createPullRequest=false`，使用 1 个 source-bound v2 disposable Issue 做本地 candidate 演练。
 2. 启用 PR，但保持 `autoMerge=false`。
 3. 连续完成数个小 Release 后，再考虑 auto-merge。
 4. 先保持单仓库单 Job；多仓库并发由独立进程和独立目录实现。
 
-## Dispatcher 上线与定时执行
+## 实验 Dispatcher 与定时执行
 
-连续领取是 Controller 上方的可选层。先手工执行并检查至少一次 idle 结果，再交给桌面定时任务：
+连续领取是 Controller 上方保留的 experimental 层，不属于 qualified production path。必须先把独立 Controller config 显式设为 `executionMode=dispatcher-experimental`，再手工执行并检查至少一次 idle 结果：
 
 ```bash
 node dist/src/cli.js config validate --config /PRIVATE/PATH/controller.json --json
@@ -54,22 +54,25 @@ node dist/src/cli.js dispatch status --config /PRIVATE/PATH/controller.json --di
 
 v2 只接受公开 Release Plan 文件；不要安装/加载 `pi-ticket-planning` package，也不要让 Controller 读取 Planner 私有 artifact。
 
-1. 执行 `config validate --json`，记录返回的 `configDigest`。
-2. 执行 `plan validate --config ... --plan ... --json`，确认 `source.repo/baseRef` 与配置 exact 一致并记录 `planDigest`。
-3. 确认批准后 config 文件没有变化。
-4. 使用同一个无 `sha256:` 前缀、64 位小写 `configDigest` 启动：
+1. 确认 Controller config 为 `executionMode=release-plan-v2-direct`。
+2. 执行 `config validate --json`，记录返回的 `configDigest` 和 `controller` identity。
+3. 执行 `plan validate --config ... --plan ... --json`，确认 `source.repo/baseRef` 与配置 exact 一致，并记录完整 `provenance`。
+4. 确认批准后 Controller checkout/build、config 和 Plan 文件都没有变化。
+5. 使用无 `sha256:` 前缀的 exact 值启动：
 
 ```bash
 node dist/src/cli.js start \
   --config /PRIVATE/PATH/controller.json \
   --plan /PRIVATE/PATH/release-plan.json \
   --expected-config-digest 64位小写CONFIG_DIGEST \
+  --expected-controller-revision 40位小写CONTROLLER_COMMIT \
+  --expected-controller-provenance-digest 64位小写PROVENANCE_DIGEST \
   --json
 ```
 
-`expected_config_digest_required`、`expected_config_digest_invalid`、`expected_config_digest_mismatch` 和 `plan_source_repo_mismatch`、`plan_source_base_ref_mismatch` 都发生在 Job 创建前。不要通过修改 Plan/config 绕过批准 gate。
+`expected_config_digest_*`、`expected_controller_revision_*`、`expected_controller_provenance_*` 和 `plan_source_repo_mismatch`、`plan_source_base_ref_mismatch` 都发生在 Job 创建前。不要通过修改 Controller、Plan/config 绕过批准 gate。
 
-v2 Job 的第一次 `step` 只在 git/GitHub/Codex preflight、remote base、Parent 和全部 Child 校验通过后创建 Worktree。可在 `stateDir/jobs/<id>/issues/` 审计 Parent/Child snapshots；`job.json` 中的 `planDigest` 覆盖全部 source 和 expected fields。
+v2 Job 的第一次 `step` 只在 Controller provenance、git/GitHub/Codex preflight、remote base、Parent 和全部 Child 校验通过后创建 Worktree。可在 `stateDir/jobs/<id>/issues/` 审计 Parent/Child snapshots；`job.json.provenance` 可回读 exact Controller commit、tracked source manifest digest、build digest、config digest 和 Plan version/digest。`status --json` 同时返回 current provenance 与 `provenanceMatches`。
 
 ## blocked 分类
 
@@ -92,6 +95,8 @@ blocked 分为两类：
 - `post_merge_ci_failed`：至少一个配置的 main push workflow 非 success；不会领取下一项。
 - `post_merge_verification_timeout`：merge/base、Issue closure 或 main workflow receipt 在时限内没有形成完整证据。
 - `config_drift`：当前配置与 Job 启动时绑定的 digest 不一致；恢复完全相同的配置后再继续。`config.snapshot.json` 只用于证据和人工核对，不会被运行时静默采用。
+- `controller_provenance_drift`：当前 Controller commit、tracked source manifest 或 executable build/package identity 与 Job snapshot 不一致；该 Job 不得由漂移后的 Controller 继续执行。恢复 snapshot 对应的 exact Controller build，或 abort 后用新 provenance 创建新 Job。
+- `controller_provenance_unavailable`：Controller 无法证明自己的 Git revision、tracked files 或实际 build；修复 checkout/build 后再操作，不得绕过 identity gate。
 - `plan_base_drift`：当前 remote/baseRef commit 不等于 v2 `source.baseSha`；映射为 `replan_required`。
 - `plan_parent_not_open` / `plan_parent_drift`：Parent 已关闭或精确 title/raw-body hash 漂移；映射为 `replan_required`。
 - `plan_issue_not_open` / `plan_issue_drift`：至少一个 Child 已关闭或精确 title/raw-body hash 漂移；映射为 `replan_required`。
@@ -151,6 +156,6 @@ operator-retry-*.json
 
 ## 回滚
 
-回滚 v2 Controller 代码只影响未来 v2 Job。不要删除或重写已有 v1/v2 Job 的 `job.json`、Worktree、commit、PR 或证据目录。若必须退回只支持 v1 的 Controller，先让所有 v2 Job 到达终态并保留状态目录；旧 v1 Job 的格式和执行语义不需要迁移。
+带 provenance 的 Job state version 为 2。升级不会为旧 Job 静默补写 Controller identity；升级前应让旧 Job 到达终态，或保留原 Controller build 完成/中止它。不要删除或重写已有 Job 的 `job.json`、Worktree、commit、PR 或证据目录。回滚 Controller 时，同样只能让 snapshot 匹配的 exact build 继续对应 Job。
 
 本版本的 deterministic/fake-port 测试只能证明本地契约和零副作用 gate；不能作为真实 Planner cross-repo canary、真实 Codex run 或真实 GitHub delivery 的证据。
