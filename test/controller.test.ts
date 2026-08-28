@@ -6,7 +6,9 @@ import { GitClient } from "../src/git.js";
 import { Validator } from "../src/validator.js";
 import { blockJob, JobStore, retryBlockedJob } from "../src/state.js";
 import { ReleaseController } from "../src/controller.js";
-import { digestJson } from "../src/util.js";
+import { digestJson, sha256 } from "../src/util.js";
+import { ControllerError } from "../src/errors.js";
+import type { RetryAuthorization } from "../src/types.js";
 import {
   FakeCodex,
   FakeGitHub,
@@ -145,6 +147,173 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
   } finally { repo.cleanup(); }
 });
 
+test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [],
+        issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
+        release: [{ command: "test -f issue-1.txt" }],
+        maxOutputBytes: 64 * 1024,
+      },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new GitClient(config);
+    const codex = new FakeCodex(gitClient, async (input) => {
+      if (input.kind === "review") {
+        return {
+          review: {
+            status: "changes",
+            summary: "The finding cannot be repaired inside the bound release.",
+            findings: [{
+              severity: "major",
+              path: null,
+              line: null,
+              summary: "Accepted ADR and dependency handoff must change",
+              rationale: "The required behavior is outside the included Issue scope.",
+              recommendation: "Return to Planner and bind a new Release Plan v2.",
+              relatedIssues: [1],
+            }],
+          },
+        };
+      }
+      if (input.kind === "release-harden") {
+        assert.match(input.prompt, /accepted ADR/);
+        assert.match(input.prompt, /new Release Plan v2 and a new Job/);
+        return {
+          worker: {
+            status: "blocked",
+            summary: "Structural replan required.",
+            selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
+            testsRun: [],
+            residualRisks: [],
+            blockedReason: "Repair requires changing accepted ADR, Issue scope, and dependency handoff.",
+            blockedKind: "replan_required",
+          },
+        };
+      }
+      return {};
+    });
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github: new FakeGitHub(),
+      codex,
+      validator: new Validator(config),
+    });
+    const created = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+
+    const settled = await runToTerminal(controller, store, created.id);
+
+    assert.equal(settled.blocked?.code, "replan_required");
+    assert.equal(settled.status, "blocked");
+    assert.equal(settled.phase, "harden");
+  } finally { repo.cleanup(); }
+});
+
+test("a recoverable hardening blocker can resume once with new infrastructure evidence", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [],
+        issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
+        release: [{ command: "test -f issue-1.txt" }],
+        maxOutputBytes: 64 * 1024,
+      },
+    } as any);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new GitClient(config);
+    let reviews = 0;
+    let hardeningRuns = 0;
+    const codex = new FakeCodex(gitClient, async (input) => {
+      if (input.kind === "review") {
+        reviews += 1;
+        return reviews === 1
+          ? {
+              review: {
+                status: "changes",
+                summary: "One in-scope repair remains.",
+                findings: [{
+                  severity: "major",
+                  path: "issue-1.txt",
+                  line: 1,
+                  summary: "Repair fixture",
+                  rationale: "The current release needs one bounded repair.",
+                  recommendation: "Apply the in-scope hardening change.",
+                  relatedIssues: [1],
+                }],
+              },
+            }
+          : { review: { status: "pass", summary: "Recovered candidate passes.", findings: [] } };
+      }
+      if (input.kind === "release-harden") {
+        hardeningRuns += 1;
+        if (hardeningRuns === 1) {
+          return {
+            worker: {
+              status: "blocked",
+              summary: "Local dependency is temporarily unavailable.",
+              selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
+              testsRun: [],
+              residualRisks: [],
+              blockedReason: "Retry after the local dependency is restored.",
+              blockedKind: "recoverable",
+            },
+          };
+        }
+      }
+      return {};
+    });
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github: new FakeGitHub(),
+      codex,
+      validator: new Validator(config),
+    });
+    const created = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    let job = await runToTerminal(controller, store, created.id);
+    assert.equal(job.blocked?.code, "codex_hardening_recoverable");
+
+    const evidencePath = join(store.root(job.id), "dependency-restored.json");
+    const evidence = "{\"dependency\":\"ready\"}\n";
+    writeFileSync(evidencePath, evidence, "utf8");
+    job = retryBlockedJob(job, {
+      previousBlockedCode: "codex_hardening_recoverable",
+      previousBlockedPhase: "harden",
+      previousDetailsPath: job.blocked?.detailsPath ?? null,
+      operatorReason: "The local dependency is restored.",
+      recoveryEvidencePath: evidencePath,
+      evidenceDigest: sha256(evidence),
+      authorizedAt: "2026-08-28T10:00:00.000Z",
+    }, store.root(job.id));
+    store.save(job);
+
+    const completed = await runToTerminal(controller, store, job.id);
+    assert.equal(completed.status, "completed");
+    assert.equal(hardeningRuns, 2);
+    assert.equal(completed.hardeningRounds, 1);
+  } finally { repo.cleanup(); }
+});
+
 test("release validation evidence remains exactly bound after hardening exhaustion and restart", async () => {
   const repo = createTestRepo();
   try {
@@ -178,7 +347,8 @@ test("release validation evidence remains exactly bound after hardening exhausti
 
     const settled = await runToTerminal(controller, store, created.id);
     assert.equal(settled.status, "blocked");
-    assert.equal(settled.blocked?.code, "release_hardening_exhausted");
+    assert.equal(settled.blocked?.code, "replan_required");
+    assert.match(settled.blocked?.message ?? "", /release_hardening_exhausted/);
 
     const restarted = new JobStore(config).load(created.id);
     const releaseBinding = restarted.validations.at(-1);
@@ -296,7 +466,8 @@ test("latest blocking review and run remain exactly bound after hardening exhaus
 
     const settled = await runToTerminal(controller, store, created.id);
     assert.equal(settled.status, "blocked");
-    assert.equal(settled.blocked?.code, "release_hardening_exhausted");
+    assert.equal(settled.blocked?.code, "replan_required");
+    assert.match(settled.blocked?.message ?? "", /release_hardening_exhausted/);
 
     const restarted = new JobStore(config).load(created.id);
     const reviewRuns = restarted.runs.filter((run) => run.kind === "review");
@@ -371,7 +542,7 @@ test("validated review evidence is checkpointed before post-run worktree policy"
   } finally { repo.cleanup(); }
 });
 
-test("operator retry after hardening exhaustion authorizes exactly one additional hardening round", () => {
+test("REPLAN_REQUIRED after hardening exhaustion cannot be retried", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
@@ -396,20 +567,26 @@ test("operator retry after hardening exhaustion authorizes exactly one additiona
       join(store.root(job.id), "review-02.json"),
     );
 
-    const authorizationPath = join(store.root(job.id), "operator-retry.md");
-    const retried = retryBlockedJob(job, authorizationPath);
+    assert.equal(job.blocked?.code, "replan_required");
+    assert.throws(
+      () => retryBlockedJob(job),
+      (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
+    );
+    assert.equal(job.status, "blocked");
+    assert.equal(job.hardeningRounds, 1);
 
-    assert.equal(retried.status, "running");
-    assert.equal(retried.phase, "harden");
-    assert.equal(retried.hardeningRounds, 2);
-    assert.equal(retried.hardeningReasonPath, authorizationPath);
-    assert.equal(retried.blocked, null);
+    job.blocked!.code = "release_hardening_exhausted";
+    job.blocked!.message = "legacy durable checkpoint";
+    store.save(job);
+    const reloaded = store.load(job.id);
+    assert.equal(reloaded.blocked?.code, "replan_required");
+    assert.match(reloaded.blocked?.message ?? "", /release_hardening_exhausted/);
   } finally {
     repo.cleanup();
   }
 });
 
-test("operator retry after an oversized release diff authorizes one shrinking hardening round", () => {
+test("REPLAN_REQUIRED after an oversized release diff cannot be retried", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
@@ -432,20 +609,45 @@ test("operator retry after an oversized release diff authorizes one shrinking ha
       join(store.root(job.id), "release-validation.json"),
     );
 
-    const authorizationPath = join(store.root(job.id), "operator-retry.md");
-    const retried = retryBlockedJob(job, authorizationPath);
-
-    assert.equal(retried.status, "running");
-    assert.equal(retried.phase, "harden");
-    assert.equal(retried.hardeningRounds, 4);
-    assert.equal(retried.hardeningReasonPath, authorizationPath);
-    assert.equal(retried.blocked, null);
+    assert.equal(job.blocked?.code, "replan_required");
+    assert.throws(
+      () => retryBlockedJob(job),
+      (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
+    );
+    assert.equal(job.status, "blocked");
+    assert.equal(job.hardeningRounds, 3);
   } finally {
     repo.cleanup();
   }
 });
 
-test("operator retry after CI exhaustion authorizes exactly one CI hardening round", () => {
+test("legacy Worker blocked checkpoints fail closed as REPLAN_REQUIRED", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    job.phase = "harden";
+    job = blockJob(job, "codex_hardening_blocked", "legacy result has no blockedKind", join(store.root(job.id), "legacy-result.json"));
+
+    assert.equal(job.blocked?.code, "replan_required");
+    assert.match(job.blocked?.message ?? "", /codex_hardening_blocked/);
+    assert.throws(
+      () => retryBlockedJob(job),
+      (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
+    );
+  } finally { repo.cleanup(); }
+});
+
+test("new infrastructure evidence authorizes one fresh recovery without changing release authority", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
@@ -462,6 +664,7 @@ test("operator retry after CI exhaustion authorizes exactly one CI hardening rou
       planDigest: digestJson(plan),
     });
     job.phase = "ci";
+    job.baseSha = "1".repeat(40);
     job.hardeningRounds = 2;
     job.ciRepairRounds = 0;
     job = blockJob(
@@ -470,15 +673,87 @@ test("operator retry after CI exhaustion authorizes exactly one CI hardening rou
       "CI repair requires operator authority",
       join(store.root(job.id), "hardening-02-ci-failure.md"),
     );
+    const authorityBefore = {
+      plan: job.plan,
+      planDigest: job.planDigest,
+      baseSha: job.baseSha,
+      issues: job.issues,
+    };
+    const recoveryEvidencePath = join(store.root(job.id), "ci-recovery.json");
+    const recoveryEvidence = "{\"checks\":\"passing\"}\n";
+    writeFileSync(recoveryEvidencePath, recoveryEvidence, "utf8");
+    const authorization: RetryAuthorization = {
+      previousBlockedCode: "ci_failed",
+      previousBlockedPhase: "ci",
+      previousDetailsPath: job.blocked?.detailsPath ?? null,
+      operatorReason: "GitHub Actions runner recovered and the exact candidate checks were rerun.",
+      recoveryEvidencePath,
+      evidenceDigest: sha256(recoveryEvidence),
+      authorizedAt: "2026-08-28T10:00:00.000Z",
+    };
 
-    const retried = retryBlockedJob(job);
+    const retried = retryBlockedJob(job, authorization, store.root(job.id));
 
     assert.equal(retried.status, "running");
-    assert.equal(retried.phase, "harden");
-    assert.equal(retried.hardeningRounds, 3);
-    assert.equal(retried.ciRepairRounds, 1);
-    assert.equal(retried.hardeningReasonPath, job.blocked?.detailsPath);
+    assert.equal(retried.phase, "ci");
+    assert.equal(retried.hardeningRounds, 2);
+    assert.equal(retried.ciRepairRounds, 0);
+    assert.equal(retried.hardeningReasonPath, job.hardeningReasonPath);
+    assert.deepEqual(retried.retryAuthorizations, [authorization]);
+    assert.deepEqual(
+      { plan: retried.plan, planDigest: retried.planDigest, baseSha: retried.baseSha, issues: retried.issues },
+      authorityBefore,
+    );
     assert.equal(retried.blocked, null);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("the same blocked code and evidence digest cannot authorize retry twice", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan([1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    let job = store.create({
+      configPath,
+      planPath,
+      plan,
+      configDigest: digestJson(config),
+      planDigest: digestJson(plan),
+    });
+    const recoveryEvidencePath = join(store.root(job.id), "infrastructure-recovered.json");
+    const recoveryEvidence = "{\"status\":\"recovered\"}\n";
+    writeFileSync(recoveryEvidencePath, recoveryEvidence, "utf8");
+    const evidenceDigest = sha256(recoveryEvidence);
+    job = blockJob(job, "setup_validation_failed", "local dependency is unavailable", join(store.root(job.id), "setup-01.json"));
+    job = retryBlockedJob(job, {
+      previousBlockedCode: "setup_validation_failed",
+      previousBlockedPhase: "prepare",
+      previousDetailsPath: job.blocked?.detailsPath ?? null,
+      operatorReason: "The local dependency was installed.",
+      recoveryEvidencePath,
+      evidenceDigest,
+      authorizedAt: "2026-08-28T10:00:00.000Z",
+    }, store.root(job.id));
+    store.save(job);
+
+    job = blockJob(store.load(job.id), "setup_validation_failed", "local dependency is still unavailable", join(store.root(job.id), "setup-02.json"));
+    assert.throws(
+      () => retryBlockedJob(job, {
+        previousBlockedCode: "setup_validation_failed",
+        previousBlockedPhase: "prepare",
+        previousDetailsPath: job.blocked?.detailsPath ?? null,
+        operatorReason: "Retry the same recovery claim again.",
+        recoveryEvidencePath,
+        evidenceDigest,
+        authorizedAt: "2026-08-28T10:01:00.000Z",
+      }, store.root(job.id)),
+      (error: unknown) => error instanceof ControllerError && error.code === "retry_without_new_evidence",
+    );
+    assert.equal(job.status, "blocked");
   } finally {
     repo.cleanup();
   }

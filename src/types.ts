@@ -141,6 +141,7 @@ export type WorkerResult = {
   }>;
   residualRisks: string[];
   blockedReason: string | null;
+  blockedKind: "recoverable" | "replan_required" | null;
 };
 
 export type ReviewFinding = {
@@ -235,6 +236,16 @@ export type BlockedState = {
   fromPhase: JobPhase;
   createdAt: string;
   detailsPath: string | null;
+};
+
+export type RetryAuthorization = {
+  previousBlockedCode: string;
+  previousBlockedPhase: JobPhase;
+  previousDetailsPath: string | null;
+  operatorReason: string;
+  recoveryEvidencePath: string;
+  evidenceDigest: string;
+  authorizedAt: string;
 };
 
 export type PullRequestState = {
@@ -376,6 +387,7 @@ export type JobState = {
   hardeningReasonPath: string | null;
   pullRequest: PullRequestState | null;
   blocked: BlockedState | null;
+  retryAuthorizations: RetryAuthorization[];
   createdAt: string;
   updatedAt: string;
 };

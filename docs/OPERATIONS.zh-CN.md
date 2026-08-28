@@ -73,11 +73,17 @@ v2 Job 的第一次 `step` 只在 git/GitHub/Codex preflight、remote base、Par
 
 ## blocked 分类
 
-常见 code：
+blocked 分为两类：
 
-- `codex_worker_blocked`：需求或仓库事实不足；补充 Issue/文档后 retry。
+- `replan_required`：当前 Job 的终态阻断。`blocked.message` 保留原始 cause code；至少包括 `release_hardening_exhausted`、`release_diff_too_large`、source-bound Plan/Parent/Child drift，以及 hardening Worker 确认必须改变未包含 Issue scope、accepted ADR、source-bound Plan 或 dependency handoff 的 finding。同一 Job 禁止 retry；必须保存证据、`abort`，回到 Planner 生成并批准新的公开 Release Plan v2，再用新 Release ID 启动新 Job。
+- 可恢复阻断：不改变 product scope、Plan、base SHA、Issue snapshot、ADR 或 dependency handoff 的暂态事实，例如基础设施/Provider 故障、凭据重新登录、恢复 exact config，或已修复的本地依赖。只有这类阻断可 retry。
+
+常见 cause/recoverable code：
+
+- `codex_worker_recoverable` / `codex_hardening_recoverable`：Worker 结构化返回 `blockedKind=recoverable`；修复本地/外部事实并提供新证据后可 retry。旧版无 `blockedKind` 的 `codex_worker_blocked` / `codex_hardening_blocked` 无法证明可恢复，升级后 fail closed 为 `replan_required`。
+- `codex_worker_replan_required` / `codex_hardening_replan_required`：Worker 结构化返回 `blockedKind=replan_required`；映射为 `replan_required`，必须 abort/replan。
 - `issue_validation_failed`：局部验证在 bounded repair 后仍失败。
-- `release_hardening_exhausted`：完整验证、Review 或 CI 要求超过允许的自动修复轮数。
+- `release_hardening_exhausted` / `release_diff_too_large`：映射为 `replan_required`，不能由 operator reason 增加 hardening budget。
 - `validator_mutated_worktree`：验证命令修改了 Git-visible 文件；修复命令或 `.gitignore`。
 - `review_candidate_drift`：Review 前 candidate 不再等于 clean HEAD。
 - `pull_request_head_drift`：PR 被其他写者更新；人工决定是否重新建立 candidate。
@@ -86,9 +92,9 @@ v2 Job 的第一次 `step` 只在 git/GitHub/Codex preflight、remote base、Par
 - `post_merge_ci_failed`：至少一个配置的 main push workflow 非 success；不会领取下一项。
 - `post_merge_verification_timeout`：merge/base、Issue closure 或 main workflow receipt 在时限内没有形成完整证据。
 - `config_drift`：当前配置与 Job 启动时绑定的 digest 不一致；恢复完全相同的配置后再继续。`config.snapshot.json` 只用于证据和人工核对，不会被运行时静默采用。
-- `plan_base_drift`：当前 remote/baseRef commit 不等于 v2 `source.baseSha`。
-- `plan_parent_not_open` / `plan_parent_drift`：Parent 已关闭或精确 title/raw-body hash 漂移。
-- `plan_issue_not_open` / `plan_issue_drift`：至少一个 Child 已关闭或精确 title/raw-body hash 漂移。
+- `plan_base_drift`：当前 remote/baseRef commit 不等于 v2 `source.baseSha`；映射为 `replan_required`。
+- `plan_parent_not_open` / `plan_parent_drift`：Parent 已关闭或精确 title/raw-body hash 漂移；映射为 `replan_required`。
+- `plan_issue_not_open` / `plan_issue_drift`：至少一个 Child 已关闭或精确 title/raw-body hash 漂移；映射为 `replan_required`。
 
 source drift 不应对旧 Job 执行 retry 来采用新事实，因为 Job 内 Plan 不允许被覆盖。应保存 evidence、`abort` 旧 Job，回到 Planner 基于新 base/Issue 生成并批准新 Plan，再以新 Release ID 启动。Controller 不自动更新 drifted Plan，也不让 Codex 判断漂移。
 
@@ -110,14 +116,19 @@ Job blocked 时可以人工修复，但必须：
 - 不切换 branch；
 - 不 push；
 - 不创建与 Controller trailer 混淆的 commit；
-- 修改后使用 `retry --reason`；
+- 只处理不改变 Job authority 的可恢复问题；
+- 生成一份新的、非空、最大 1 MiB 的 regular evidence file；不要使用 Planner 私有状态；
+- 修改后使用 `retry --reason TEXT --evidence PATH`；Controller 按原始字节计算 SHA-256 并将 evidence snapshot 保存到 Job 私有目录；
+- 同一 blocked code + 同一 evidence digest 再次授权会返回 `retry_without_new_evidence`；
 - 后续仍会经过完整 Controller validation/review。
+
+`retry` 的 durable authorization 保存在 `job.json.retryAuthorizations`，记录 previous blocked code/phase/details path、operator reason、Job-private recovery evidence path、evidence digest 和 authorization time。每次 reload 都会验证 snapshot 仍位于 Job 私有根且字节 SHA-256 匹配。retry 只回到原 blocked phase，不增加 hardening/CI round，也不改 Plan、base SHA 或 Issue snapshots。
 
 ## 证据保留
 
 Release validation 或 aggregate review 完成后，Controller 按以下 durability 顺序处理：先落盘 receipt/result，再将 path、digest、candidate SHA、Codex run record、review round/last review path 原子 checkpoint 到 `job.json`，最后判断 Worktree/diff policy、Review 结论或 hardening budget。进程在 checkpoint 后退出时，重启会保留这些 binding，不会把 round 或 last evidence 回退到上一轮。
 
-`release_hardening_exhausted` 由 `scheduleHardening` 直接保存为 blocked，不依赖异常后的 reload。排查时应同时核对：
+`release_hardening_exhausted` 由 `scheduleHardening` 直接保存为 `replan_required`，不依赖异常后的 reload。排查时应同时核对：
 
 - `blocked.detailsPath` 是本轮 exact receipt/result；
 - `validations` 中同 path 的 digest 与 receipt 自身 digest 一致；或 `runs` 中同 result path 的 `resultDigest`、`baseHeadSha` 与当前 candidate 一致；
@@ -132,6 +143,8 @@ job.json
 runs/
 validations/
 issues/
+retry-evidence-*.bin
+operator-retry-*.json
 ```
 
 `cleanup` 只删除 terminal clean Worktree，不删除这些证据。

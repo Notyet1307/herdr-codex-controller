@@ -1,9 +1,32 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
-import type { ControllerConfig, JobState, ReleasePlan } from "./types.js";
+import { isAbsolute, join, resolve } from "node:path";
+import type { ControllerConfig, JobState, ReleasePlan, RetryAuthorization } from "./types.js";
 import { copyJsonSnapshot, ensurePrivateDir, readJsonFile, writeJsonAtomic } from "./fs-atomic.js";
-import { digestJson, nowIso, safeToken } from "./util.js";
+import { digestJson, nowIso, pathWithin, safeToken, sha256 } from "./util.js";
 import { assertPlanCompatibleWithConfig, isReleasePlanV2 } from "./plan.js";
+import { ControllerError } from "./errors.js";
+
+export const REPLAN_REQUIRED_CODE = "replan_required";
+
+const REPLAN_CAUSES = new Set([
+  "codex_hardening_blocked",
+  "codex_hardening_replan_required",
+  "codex_worker_blocked",
+  "codex_worker_replan_required",
+  "issue_dependency_incomplete",
+  "plan_base_drift",
+  "plan_drift",
+  "plan_issue_drift",
+  "plan_issue_missing",
+  "plan_issue_not_open",
+  "plan_parent_drift",
+  "plan_parent_not_open",
+  "plan_version_mismatch",
+  "release_diff_too_large",
+  "release_hardening_exhausted",
+  "release_review_blocked",
+  "release_too_many_issues",
+]);
 
 export class JobStore {
   readonly jobsRoot: string;
@@ -64,6 +87,7 @@ export class JobStore {
       hardeningReasonPath: null,
       pullRequest: null,
       blocked: null,
+      retryAuthorizations: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -73,12 +97,22 @@ export class JobStore {
 
   load(id: string): JobState {
     const job = readJsonFile<JobState>(this.path(id));
+    if (job.blocked && REPLAN_CAUSES.has(job.blocked.code)) {
+      job.blocked = {
+        ...job.blocked,
+        code: REPLAN_REQUIRED_CODE,
+        message: `${job.blocked.code}: ${job.blocked.message}`,
+      };
+    }
+    if (job.retryAuthorizations === undefined) job.retryAuthorizations = [];
     assertJob(job);
+    assertRetryEvidence(job, this.root(job.id));
     return job;
   }
 
   save(job: JobState): void {
     assertJob(job);
+    assertRetryEvidence(job, this.root(job.id));
     job.updatedAt = nowIso();
     ensurePrivateDir(this.root(job.id));
     writeJsonAtomic(this.path(job.id), job);
@@ -141,12 +175,13 @@ export function nextPendingIssue(job: JobState) {
 }
 
 export function blockJob(job: JobState, code: string, message: string, detailsPath: string | null = null): JobState {
+  const replanRequired = REPLAN_CAUSES.has(code);
   return {
     ...job,
     status: "blocked",
     blocked: {
-      code,
-      message,
+      code: replanRequired ? REPLAN_REQUIRED_CODE : code,
+      message: replanRequired ? `${code}: ${message}` : message,
       fromPhase: job.phase,
       createdAt: nowIso(),
       detailsPath,
@@ -155,24 +190,30 @@ export function blockJob(job: JobState, code: string, message: string, detailsPa
   };
 }
 
-export function retryBlockedJob(job: JobState, authorizationPath?: string): JobState {
+export function retryBlockedJob(job: JobState, authorization?: RetryAuthorization, jobRoot?: string): JobState {
   if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
-  const explicitlyAuthorizedCiRepair = job.blocked.code === "ci_failed";
-  const explicitlyAuthorizedHardening =
-    job.blocked.code === "release_hardening_exhausted"
-    || job.blocked.code === "release_diff_too_large"
-    || explicitlyAuthorizedCiRepair;
+  if (job.blocked.code === REPLAN_REQUIRED_CODE) {
+    throw new ControllerError(REPLAN_REQUIRED_CODE, "This Job requires abort, a new Release Plan v2, and a new Job.");
+  }
+  if (!authorization) {
+    throw new ControllerError("retry_evidence_required", "Retry requires new recovery evidence.");
+  }
+  assertRetryAuthorization(authorization, job.blocked);
+  if (!jobRoot) throw new ControllerError("retry_evidence_invalid", "Retry requires the Job private root.");
+  assertRetryEvidenceBinding(authorization, jobRoot);
+  if (job.retryAuthorizations.some((previous) => (
+    previous.previousBlockedCode === job.blocked!.code
+    && previous.evidenceDigest === authorization.evidenceDigest
+  ))) {
+    throw new ControllerError("retry_without_new_evidence", "This blocked code has already consumed the same recovery evidence.");
+  }
   return {
     ...job,
     status: "running",
-    phase: explicitlyAuthorizedHardening ? "harden" : job.blocked.fromPhase,
-    hardeningRounds: explicitlyAuthorizedHardening ? job.hardeningRounds + 1 : job.hardeningRounds,
-    ciRepairRounds: explicitlyAuthorizedCiRepair ? job.ciRepairRounds + 1 : job.ciRepairRounds,
-    hardeningReasonPath: explicitlyAuthorizedHardening
-      ? authorizationPath ?? job.blocked.detailsPath ?? job.hardeningReasonPath
-      : job.hardeningReasonPath,
+    phase: job.blocked.fromPhase,
     blocked: null,
     activeRun: null,
+    retryAuthorizations: [...job.retryAuthorizations, authorization],
   };
 }
 
@@ -190,8 +231,57 @@ export function assertJob(job: JobState): void {
   }
   if (job.status === "blocked" && !job.blocked) throw new Error("blocked job has no blocked record");
   if (job.status !== "blocked" && job.blocked) throw new Error("non-blocked job has a blocked record");
+  if (!Array.isArray(job.retryAuthorizations)) throw new Error("job retry authorizations are invalid");
+  for (const authorization of job.retryAuthorizations) assertRetryAuthorization(authorization);
   if (job.status === "completed" && job.phase !== "complete") throw new Error("completed job must be in complete phase");
   if (job.activeRun && job.status !== "running") throw new Error("only running jobs may have an active run");
+}
+
+function assertRetryAuthorization(authorization: RetryAuthorization, blocked?: NonNullable<JobState["blocked"]>): void {
+  if (!authorization || typeof authorization !== "object"
+    || !authorization.previousBlockedCode
+    || !isJobPhase(authorization.previousBlockedPhase)
+    || (authorization.previousDetailsPath !== null && !isAbsolute(authorization.previousDetailsPath))
+    || !authorization.operatorReason.trim()
+    || Buffer.byteLength(authorization.operatorReason, "utf8") > 4_000
+    || !isAbsolute(authorization.recoveryEvidencePath)
+    || !/^[a-f0-9]{64}$/.test(authorization.evidenceDigest)
+    || !isCanonicalIsoTime(authorization.authorizedAt)) {
+    throw new ControllerError("retry_authorization_invalid", "Retry authorization is invalid.");
+  }
+  if (blocked && (authorization.previousBlockedCode !== blocked.code
+    || authorization.previousBlockedPhase !== blocked.fromPhase
+    || authorization.previousDetailsPath !== blocked.detailsPath)) {
+    throw new ControllerError("retry_authorization_mismatch", "Retry authorization does not match the current blocked state.");
+  }
+}
+
+function assertRetryEvidence(job: JobState, jobRoot: string): void {
+  for (const authorization of job.retryAuthorizations) assertRetryEvidenceBinding(authorization, jobRoot);
+}
+
+function assertRetryEvidenceBinding(authorization: RetryAuthorization, jobRoot: string): void {
+  if (!pathWithin(jobRoot, authorization.recoveryEvidencePath)) {
+    throw new ControllerError("retry_evidence_invalid", "Retry evidence is outside the Job private root.");
+  }
+  let stat;
+  try { stat = lstatSync(authorization.recoveryEvidencePath); }
+  catch { throw new ControllerError("retry_evidence_invalid", "Retry evidence snapshot is missing."); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new ControllerError("retry_evidence_invalid", "Retry evidence snapshot is not a safe regular file.");
+  }
+  if (sha256(readFileSync(authorization.recoveryEvidencePath)) !== authorization.evidenceDigest) {
+    throw new ControllerError("retry_evidence_digest_mismatch", "Retry evidence digest mismatch.");
+  }
+}
+
+function isJobPhase(value: unknown): boolean {
+  return ["prepare", "implement", "issue_validate", "release_validate", "review", "harden", "deliver", "ci", "awaiting_merge", "complete"].includes(String(value));
+}
+
+function isCanonicalIsoTime(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try { return new Date(value).toISOString() === value; } catch { return false; }
 }
 
 export function readJobRaw(path: string): unknown {

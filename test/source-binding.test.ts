@@ -171,7 +171,9 @@ test("every Release Plan v2 source drift fails with zero Worktree, setup, or Cod
       const result = await controller.step(created.id);
       const job = store.load(created.id);
       assert.equal(result.action, "blocked", scenario.name);
-      assert.equal(job.blocked?.code, scenario.code, scenario.name);
+      assert.match(result.message, /replan_required/, scenario.name);
+      assert.equal(job.blocked?.code, "replan_required", scenario.name);
+      assert.match(job.blocked?.message ?? "", new RegExp(scenario.code), scenario.name);
       assert.equal(
         job.baseSha,
         scenario.code === "plan_base_drift" ? null : plan.source.baseSha,
