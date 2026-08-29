@@ -111,6 +111,41 @@ export type ReleasePlanSourceV2 = {
   };
   specContentHash: string;
   deliveryGraphDigest: string;
+  decisionManifestDigest: string;
+  predecessorReceiptDigest: string | null;
+  dependencyHandoffDigests: string[];
+};
+
+export type OracleBindingV1 = {
+  schema: "pi-ticket-planning:oracle-binding:v1";
+  id: string;
+  owner: {
+    kind: "INDEPENDENT_VERIFICATION";
+    identity: string;
+  };
+  artifact: {
+    path: string;
+    format: string;
+    baseSha: string;
+    sha256: string;
+    byteCount: number;
+  };
+  execution: {
+    command: string;
+  };
+  workerMutationAllowed: false;
+};
+
+export type ScopeBudget = {
+  maxFiles: number;
+  maxChangedLines: number;
+};
+
+export type IntegrationOnlyContract = {
+  noNewProductBehavior: true;
+  noSchemaChanges: true;
+  noDuplicatedProductionLogic: true;
+  missingBehavior: "REPLAN_REQUIRED";
 };
 
 export type ReleasePlanIssueV2 = {
@@ -123,6 +158,14 @@ export type ReleasePlanIssueV2 = {
   allowNoop: false;
   expectedTitle: string;
   expectedBodyHash: string;
+  oracleBindings: OracleBindingV1[];
+  riskClasses: string[];
+  scopeBudget: ScopeBudget;
+  expectedPaths: string[];
+  protectedPaths: string[];
+  replanTriggers: string[];
+  integrationOnly: IntegrationOnlyContract | null;
+  waiverDigests: string[];
 };
 
 export type ReleasePlanV2 = {
@@ -165,6 +208,7 @@ export type WorkerResult = {
     outcome: "passed" | "failed" | "not-run";
   }>;
   residualRisks: string[];
+  observedRiskClasses: string[];
   blockedReason: string | null;
   blockedKind: "recoverable" | "replan_required" | null;
 };

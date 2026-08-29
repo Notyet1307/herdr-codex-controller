@@ -174,7 +174,7 @@ Dispatcher 则只能使用 `dispatcher-experimental`；两种 opt-in 都不会�
 ## Release Plan v1 / v2
 
 - v1 是手工计划和旧集成的兼容格式；`parentIssue` 可为 `null`，Issue `objective` 可为 `null`，并保留既有 `suggestedValidation`、`allowNoop` 语义。
-- v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent Issue 的精确 title/body hash，以及每个 Child Issue 的精确 title/body hash。
+- v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent/Child 精确 title/body hash、decision/predecessor/dependency digests，以及每个 Child 的 immutable Oracle、risk classes、scope budget、expected write paths、protected paths 和 replan triggers。
 - `release-plan-v2-direct` 拒绝 v1；v1 只有在 `release-plan-v1-compatibility` 或 Dispatcher 内部的 `dispatcher-experimental` 路径才可创建 Job。
 - Controller 不读取 Planner 的 Planning Case、Handoff 私有 artifact 或 Delivery Graph；v2 文件本身就是完整公开契约。
 
@@ -203,11 +203,14 @@ git preflight
 → baseSha exact gate
 → fetch + verify Parent OPEN/title/body
 → fetch + verify 全部 Child OPEN/title/body
-→ ensureWorktree
+→ verify reviewed-base Oracle regular-file bytes
+→ ensureWorktree + clean gate + verify Oracle bytes again
 → 写入 snapshots
 → setup validation
 → implement
 ```
+
+每个 writing Worker 前后都会重新验证 Oracle/protected paths；每个 Issue commit（包括 crash salvage）都会检查 exact write paths 与 file/changed-line budget。hardening 的每个路径必须唯一归属一个 Ticket，并按完整 aggregate diff 重新核算；binary diff 不会按 0 行放行。任何偏离都进入不可 retry 的 `replan_required`。
 
 `plan_base_drift`、`plan_parent_not_open`、`plan_parent_drift`、`plan_issue_not_open`、`plan_issue_drift` 都发生在 Worktree、setup 和 Codex run 之前。Controller 不自动更新漂移的 Plan；应停止旧 Job，回到 Planner 生成并批准新的 v2 Plan。
 

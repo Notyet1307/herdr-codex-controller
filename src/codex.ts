@@ -135,7 +135,7 @@ export class CodexRunner {
 }
 
 export function validateWorkerResult(value: unknown): WorkerResult {
-  const object = exactObject(value, ["blockedKind", "blockedReason", "residualRisks", "selfReview", "status", "summary", "testsRun"], "worker result");
+  const object = exactObject(value, ["blockedKind", "blockedReason", "observedRiskClasses", "residualRisks", "selfReview", "status", "summary", "testsRun"], "worker result");
   if (object.status !== "completed" && object.status !== "blocked") throw new Error("worker result status is invalid");
   if (object.blockedKind !== null && object.blockedKind !== "recoverable" && object.blockedKind !== "replan_required") {
     throw new Error("worker blockedKind is invalid");
@@ -162,6 +162,7 @@ export function validateWorkerResult(value: unknown): WorkerResult {
     },
     testsRun: tests,
     residualRisks: stringArray(object.residualRisks, "worker residualRisks", 20, 500),
+    observedRiskClasses: stringArray(object.observedRiskClasses, "worker observedRiskClasses", 16, 64),
     blockedReason: object.blockedReason === null ? null : text(object.blockedReason, "worker blockedReason", 2000),
     blockedKind: object.blockedKind,
   };
@@ -170,6 +171,9 @@ export function validateWorkerResult(value: unknown): WorkerResult {
   }
   if (result.status === "completed" && (result.blockedReason !== null || result.blockedKind !== null)) {
     throw new Error("completed worker result cannot include blockedReason or blockedKind");
+  }
+  if (result.observedRiskClasses.some((risk) => !/^[A-Z][A-Z0-9_]{0,63}$/.test(risk))) {
+    throw new Error("worker observedRiskClasses is invalid");
   }
   return result;
 }

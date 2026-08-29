@@ -4,13 +4,14 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ReleaseController } from "../src/controller.js";
 import { GitClient } from "../src/git.js";
-import { JobStore } from "../src/state.js";
+import { JobStore, retryBlockedJob } from "../src/state.js";
 import { Validator } from "../src/validator.js";
 import type { ControllerConfig, ControllerIdentity, IssueSnapshot, JobState } from "../src/types.js";
 import { digestJson } from "../src/util.js";
 import {
   FakeCodex,
   FakeGitHub,
+  completedWorker,
   createTestRepo,
   testConfig,
   testPlanV2,
@@ -129,6 +130,7 @@ test("every Release Plan v2 source drift fails with zero Worktree, setup, or Cod
     baseOverride?: string;
     changes?: Array<[number, Partial<IssueSnapshot>]>;
     secretBody?: string;
+    mutatePlan?(plan: ReturnType<typeof testPlanV2>): void;
   }> = [
     { name: "base drift", code: "plan_base_drift", baseOverride: "f".repeat(40) },
     { name: "Parent closed", code: "plan_parent_not_open", changes: [[100, { state: "CLOSED" }]] },
@@ -147,6 +149,11 @@ test("every Release Plan v2 source drift fails with zero Worktree, setup, or Cod
       changes: [[1, { body: "PRIVATE CHILD BODY MUST NOT BE ECHOED" }]],
       secretBody: "PRIVATE CHILD BODY MUST NOT BE ECHOED",
     },
+    {
+      name: "Oracle bytes drift",
+      code: "oracle_binding_drift",
+      mutatePlan: (plan) => { plan.issues[0]!.oracleBindings[0]!.artifact.sha256 = `sha256:${"0".repeat(64)}`; },
+    },
   ];
 
   for (const scenario of scenarios) {
@@ -154,6 +161,7 @@ test("every Release Plan v2 source drift fails with zero Worktree, setup, or Cod
     try {
       const config = testConfig(repo);
       const plan = testPlanV2(repo);
+      scenario.mutatePlan?.(plan);
       const { configPath, planPath } = writeInputs(repo, config, plan);
       const store = new JobStore(config);
       const git = new CountingGit(config, scenario.baseOverride ?? null);
@@ -288,6 +296,180 @@ test("Controller source or build provenance drift blocks before source verificat
       assert.equal(git.ensureCalls, 0, field);
       assert.equal(validator.calls, 0, field);
       assert.equal(codex.calls.length, 0, field);
+    } finally { repo.cleanup(); }
+  }
+});
+
+test("v2 Worker Oracle or risk drift is terminal REPLAN_REQUIRED before validation or commit", async () => {
+  for (const kind of ["oracle", "risk"] as const) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const plan = testPlanV2(repo, [1]);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const git = new CountingGit(config);
+      const codex = new FakeCodex(git, async ({ job, kind: runKind }) => {
+        if (runKind !== "worker") return {};
+        if (kind === "oracle") writeFileSync(join(job.worktreePath, "fixtures/oracle.json"), "{\"ok\":false}\n", "utf8");
+        else writeFileSync(join(job.worktreePath, "issue-1.txt"), "implemented\n", "utf8");
+        return { worker: completedWorker("done", kind === "risk" ? ["FIXTURE_BEHAVIOR", "NEW_BOUNDARY"] : ["FIXTURE_BEHAVIOR"]) };
+      });
+      const validator = new CountingValidator(config);
+      const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator });
+      const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      assert.equal((await controller.step(created.id)).action, "release_prepared");
+      assert.equal((await controller.step(created.id)).action, "blocked");
+      const blocked = store.load(created.id);
+      assert.equal(blocked.blocked?.code, "replan_required");
+      assert.match(blocked.blocked?.message ?? "", kind === "oracle" ? /oracle_binding_drift/ : /issue_risk_class_drift/);
+      assert.equal(validator.calls, 1);
+      assert.equal(git.commitCalls, 0);
+      assert.throws(() => retryBlockedJob(blocked), (error: any) => error?.code === "replan_required");
+    } finally { repo.cleanup(); }
+  }
+});
+
+test("every v2 Issue commit enforces its scope budget, including crash salvage", async () => {
+  for (const salvage of [false, true]) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const plan = testPlanV2(repo, [1]);
+      plan.issues[0]!.scopeBudget = { maxFiles: 1, maxChangedLines: 1 };
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const git = new CountingGit(config);
+      const codex = new FakeCodex(git, async ({ job, kind }) => {
+        if (kind !== "worker") return {};
+        writeFileSync(join(job.worktreePath, "issue-1.txt"), "one\ntwo\n", "utf8");
+        return { worker: completedWorker("done", ["FIXTURE_BEHAVIOR"]) };
+      });
+      const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator: new Validator(config) });
+      const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      assert.equal((await controller.step(created.id)).action, "release_prepared");
+      if (salvage) {
+        const job = store.load(created.id);
+        job.phase = "issue_validate";
+        job.currentIssueNumber = 1;
+        job.issues[0]!.status = "running";
+        writeFileSync(join(job.worktreePath, "issue-1.txt"), "one\ntwo\n", "utf8");
+        await git.commitIssue(job, 1, "Issue 1", false);
+        store.save(job);
+      } else {
+        assert.equal((await controller.step(created.id)).action, "worker_completed");
+      }
+      assert.equal((await controller.step(created.id)).action, "blocked");
+      const blocked = store.load(created.id);
+      assert.equal(blocked.blocked?.code, "replan_required");
+      assert.match(blocked.blocked?.message ?? "", /issue_scope_budget_exceeded/);
+      assert.throws(() => retryBlockedJob(blocked), (error: any) => error?.code === "replan_required");
+    } finally { repo.cleanup(); }
+  }
+});
+
+test("v2 release hardening cannot modify a protected Oracle or bypass replan", async () => {
+  const repo = createTestRepo();
+  try {
+    const base = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo, {
+      executionMode: "release-plan-v2-direct",
+      validation: { ...base.validation, release: [{ command: "test -f issue-1.txt" }] },
+    } as any);
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const git = new CountingGit(config);
+    const codex = new FakeCodex(git, async ({ job, kind }) => {
+      if (kind === "review") return { review: { status: "changes", summary: "hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fixture", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
+      if (kind === "release-harden") {
+        writeFileSync(join(job.worktreePath, "fixtures/oracle.json"), "{\"changed\":true}\n", "utf8");
+        return { worker: completedWorker("hardening", ["FIXTURE_BEHAVIOR"]) };
+      }
+      return {};
+    });
+    const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator: new Validator(config) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    for (let index = 0; index < 10 && store.load(created.id).status !== "blocked"; index += 1) await controller.step(created.id);
+    const blocked = store.load(created.id);
+    assert.equal(blocked.blocked?.code, "replan_required");
+    assert.match(blocked.blocked?.message ?? "", /oracle_binding_drift/);
+    assert.throws(() => retryBlockedJob(blocked), (error: any) => error?.code === "replan_required");
+  } finally { repo.cleanup(); }
+});
+
+test("binary Issue changes cannot count as zero changed lines", async () => {
+  const repo = createTestRepo();
+  try {
+    const base = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo, {
+      executionMode: "release-plan-v2-direct",
+      validation: { ...base.validation, issue: [{ command: "test -f asset.bin" }] },
+    } as any);
+    const plan = testPlanV2(repo, [1]);
+    plan.issues[0]!.expectedPaths = ["asset.bin"];
+    plan.issues[0]!.scopeBudget = { maxFiles: 1, maxChangedLines: 1 };
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const git = new CountingGit(config);
+    const codex = new FakeCodex(git, async ({ job, kind }) => {
+      if (kind !== "worker") return {};
+      writeFileSync(join(job.worktreePath, "asset.bin"), new Uint8Array([0, 1, 2]));
+      return { worker: completedWorker("binary", ["FIXTURE_BEHAVIOR"]) };
+    });
+    const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator: new Validator(config) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    assert.equal((await controller.step(created.id)).action, "release_prepared");
+    assert.equal((await controller.step(created.id)).action, "worker_completed");
+    assert.equal((await controller.step(created.id)).action, "blocked");
+    assert.match(store.load(created.id).blocked?.message ?? "", /issue_scope_budget_exceeded/);
+  } finally { repo.cleanup(); }
+});
+
+test("v2 hardening aggregate budget applies to normal and every salvage path", async () => {
+  for (const mode of ["normal", "salvage", "interrupted-salvage"] as const) {
+    const repo = createTestRepo();
+    try {
+      const base = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const config = testConfig(repo, {
+        executionMode: "release-plan-v2-direct",
+        validation: { ...base.validation, release: [{ command: "test -f issue-1.txt" }] },
+      } as any);
+      const plan = testPlanV2(repo, [1]);
+      plan.issues[0]!.scopeBudget = { maxFiles: 1, maxChangedLines: 1 };
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const git = new CountingGit(config);
+      const codex = new FakeCodex(git, async ({ job, kind }) => {
+        if (kind === "review") return { review: { status: "changes", summary: "hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fixture", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
+        if (kind === "release-harden") {
+          writeFileSync(join(job.worktreePath, "issue-1.txt"), "issue 1\nhardened\n", "utf8");
+          return { worker: completedWorker("hardening", ["FIXTURE_BEHAVIOR"]) };
+        }
+        return {};
+      });
+      const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator: new Validator(config) });
+      const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      for (let index = 0; index < 10 && store.load(created.id).phase !== "harden"; index += 1) await controller.step(created.id);
+      if (mode !== "normal") {
+        const job = store.load(created.id);
+        writeFileSync(join(job.worktreePath, "issue-1.txt"), "issue 1\nhardened\n", "utf8");
+        if (mode === "interrupted-salvage") {
+          job.activeRun = {
+            id: "interrupted-hardening",
+            kind: "release-harden",
+            issueNumber: null,
+            startedAt: new Date().toISOString(),
+            baseHeadSha: await git.head(job.worktreePath),
+          };
+          store.save(job);
+        }
+        await git.commitHardening(job, "fixture");
+      }
+      assert.equal((await controller.step(created.id)).action, "blocked");
+      const blocked = store.load(created.id);
+      assert.equal(blocked.blocked?.code, "replan_required");
+      assert.match(blocked.blocked?.message ?? "", /issue_scope_budget_exceeded/);
     } finally { repo.cleanup(); }
   }
 });

@@ -8,7 +8,7 @@ The Controller does **not** implement an agent runtime. Codex owns internal plan
 
 The qualified production mode is `release-plan-v2-direct`, which is also the default when `executionMode` is omitted. It accepts only source-bound Release Plan v2 and never reads `ready-for-agent`. Release Plan v1 requires explicit `release-plan-v1-compatibility`; the retained Dispatcher requires explicit `dispatcher-experimental` and is not a qualified production path.
 
-Release Plan v2 is the exact source-bound `pi-ticket-planning` handoff: it binds the configured repository/base ref, one 40-character base commit, the Parent Issue, and every Child Issue title/body. Before creating a Worktree, v2 re-fetches and verifies all of those facts. `plan validate --json` returns the exact Controller provenance approved by `start`:
+Release Plan v2 is the exact source-bound `pi-ticket-planning` handoff: it binds the configured repository/base ref, one 40-character base commit, the Parent and Child Issue bytes, decision/predecessor/dependency digests, and every Issue's immutable Oracle, risk classes, scope budget, write-path families, protected paths, and replan triggers. The Controller verifies Oracle bytes before and after each writing Worker, checks every Issue commit and aggregate hardening diff against its bound paths/budget, rejects binary budget ambiguity, and maps any Oracle, scope, protected-path, or risk-class drift to terminal `replan_required`. `plan validate --json` returns the exact Controller provenance approved by `start`:
 
 ```bash
 node dist/src/cli.js plan validate --config /private/controller.json --plan /private/release-plan.json --json

@@ -15,7 +15,7 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
     const fake = join(repo.root, "fake-codex.mjs");
     const argsPath = join(repo.root, "codex-args.json");
     process.env.FAKE_CODEX_ARGS_PATH = argsPath;
-    writeFileSync(fake, `#!/usr/bin/env node\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);\nif(args[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(args[0]==='login'&&args[1]==='status'){console.log('logged in');process.exit(0)}\nfs.writeFileSync(process.env.FAKE_CODEX_ARGS_PATH, JSON.stringify(args));\nlet input='';for await (const chunk of process.stdin) input+=chunk;\nconst output=args[args.indexOf('--output-last-message')+1];\nconst review=args.includes('read-only');\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],blockedReason:null,blockedKind:null};\nfs.writeFileSync(output, JSON.stringify(result));\nconsole.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
+    writeFileSync(fake, `#!/usr/bin/env node\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);\nif(args[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(args[0]==='login'&&args[1]==='status'){console.log('logged in');process.exit(0)}\nfs.writeFileSync(process.env.FAKE_CODEX_ARGS_PATH, JSON.stringify(args));\nlet input='';for await (const chunk of process.stdin) input+=chunk;\nconst output=args[args.indexOf('--output-last-message')+1];\nconst review=args.includes('read-only');\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],observedRiskClasses:[],blockedReason:null,blockedKind:null};\nfs.writeFileSync(output, JSON.stringify(result));\nconsole.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
     chmodSync(fake, 0o700);
     const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fake } } as any);
     const plan = testPlan([1]);
@@ -85,11 +85,13 @@ test("worker blockedKind is required and closed", () => {
     selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
     testsRun: [],
     residualRisks: [],
+    observedRiskClasses: [],
     blockedReason: "The accepted ADR must change.",
     blockedKind: "replan_required",
   };
   assert.equal(validateWorkerResult(blocked).blockedKind, "replan_required");
   assert.throws(() => validateWorkerResult({ ...blocked, blockedKind: "guess" }), /blockedKind is invalid/);
+  assert.throws(() => validateWorkerResult({ ...blocked, observedRiskClasses: ["not-valid"] }), /observedRiskClasses is invalid/);
   assert.throws(() => validateWorkerResult({ ...blocked, blockedKind: null }), /requires blockedReason and blockedKind/);
   assert.throws(() => validateWorkerResult({ ...blocked, status: "completed" }), /cannot include blockedReason or blockedKind/);
 });

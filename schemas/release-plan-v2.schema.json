@@ -9,7 +9,7 @@
     "source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["planner", "repo", "baseRef", "baseSha", "parentBinding", "specContentHash", "deliveryGraphDigest"],
+      "required": ["planner", "repo", "baseRef", "baseSha", "parentBinding", "specContentHash", "deliveryGraphDigest", "decisionManifestDigest", "predecessorReceiptDigest", "dependencyHandoffDigests"],
       "properties": {
         "planner": { "const": "pi-ticket-planning" },
         "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 300 },
@@ -32,7 +32,20 @@
           }
         },
         "specContentHash": { "$ref": "#/$defs/prefixedSha256" },
-        "deliveryGraphDigest": { "$ref": "#/$defs/prefixedSha256" }
+        "deliveryGraphDigest": { "$ref": "#/$defs/prefixedSha256" },
+        "decisionManifestDigest": { "$ref": "#/$defs/prefixedSha256" },
+        "predecessorReceiptDigest": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/prefixedSha256" }
+          ]
+        },
+        "dependencyHandoffDigests": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/prefixedSha256" }
+        }
       }
     },
     "id": { "type": "string", "pattern": "\\S", "maxLength": 120 },
@@ -46,7 +59,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["number", "order", "dependsOn", "objective", "acceptanceCriteria", "suggestedValidation", "allowNoop", "expectedTitle", "expectedBodyHash"],
+        "required": ["number", "order", "dependsOn", "objective", "acceptanceCriteria", "suggestedValidation", "allowNoop", "expectedTitle", "expectedBodyHash", "oracleBindings", "riskClasses", "scopeBudget", "expectedPaths", "protectedPaths", "replanTriggers", "integrationOnly", "waiverDigests"],
         "properties": {
           "number": { "type": "integer", "minimum": 1 },
           "order": { "type": "integer", "minimum": 1, "maximum": 10000 },
@@ -62,7 +75,79 @@
           "suggestedValidation": { "const": [] },
           "allowNoop": { "const": false },
           "expectedTitle": { "type": "string", "pattern": "\\S", "maxLength": 500 },
-          "expectedBodyHash": { "$ref": "#/$defs/prefixedSha256" }
+          "expectedBodyHash": { "$ref": "#/$defs/prefixedSha256" },
+          "oracleBindings": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/oracleBinding" }
+          },
+          "riskClasses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" }
+          },
+          "scopeBudget": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["maxFiles", "maxChangedLines"],
+            "properties": {
+              "maxFiles": { "type": "integer", "minimum": 1, "maximum": 1000 },
+              "maxChangedLines": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+            }
+          },
+          "expectedPaths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/expectedPath" }
+          },
+          "protectedPaths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/repoPath" }
+          },
+          "replanTriggers": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$" },
+            "allOf": [
+              { "contains": { "const": "ACCEPTED_DECISION_CHANGE_REQUIRED" } },
+              { "contains": { "const": "THIRD_RISK_CLASS_DISCOVERED" } },
+              { "contains": { "const": "SCOPE_BUDGET_EXCEEDED" } },
+              { "contains": { "const": "DOWNSTREAM_RELEASE_BEHAVIOR_DISCOVERED" } }
+            ]
+          },
+          "integrationOnly": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["noNewProductBehavior", "noSchemaChanges", "noDuplicatedProductionLogic", "missingBehavior"],
+                "properties": {
+                  "noNewProductBehavior": { "const": true },
+                  "noSchemaChanges": { "const": true },
+                  "noDuplicatedProductionLogic": { "const": true },
+                  "missingBehavior": { "const": "REPLAN_REQUIRED" }
+                }
+              }
+            ]
+          },
+          "waiverDigests": {
+            "type": "array",
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/prefixedSha256" }
+          }
         }
       }
     },
@@ -81,6 +166,57 @@
     }
   },
   "$defs": {
-    "prefixedSha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+    "prefixedSha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "repoPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\.\\.?(?:/|$))(?!.*(?:/\\.\\.?)(?:/|$))(?!.*//)(?!.*[\\\\*?\\[\\]{}\\u0000\\r\\n])[^/]+(?:/[^/]+)*$"
+    },
+    "expectedPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\.\\.?(?:/|$))(?!.*(?:/\\.\\.?)(?:/|$))(?!.*//)(?!.*\\*\\*)(?!.*[\\\\?\\[\\]{}\\u0000\\r\\n])[^/]+(?:/[^/]+)*$"
+    },
+    "oracleBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "id", "owner", "artifact", "execution", "workerMutationAllowed"],
+      "properties": {
+        "schema": { "const": "pi-ticket-planning:oracle-binding:v1" },
+        "id": { "type": "string", "pattern": "^O(?:0[1-9][0-9]*|[1-9][0-9]*)$" },
+        "owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "identity"],
+          "properties": {
+            "kind": { "const": "INDEPENDENT_VERIFICATION" },
+            "identity": { "type": "string", "pattern": "\\S", "maxLength": 256 }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "format", "baseSha", "sha256", "byteCount"],
+          "properties": {
+            "path": { "$ref": "#/$defs/repoPath" },
+            "format": { "type": "string", "pattern": "\\S", "maxLength": 256 },
+            "baseSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+            "sha256": { "$ref": "#/$defs/prefixedSha256" },
+            "byteCount": { "type": "integer", "minimum": 0, "maximum": 67108864 }
+          }
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command"],
+          "properties": {
+            "command": { "type": "string", "pattern": "^npm run verify:[A-Za-z0-9:_-]+$", "maxLength": 512 }
+          }
+        },
+        "workerMutationAllowed": { "const": false }
+      }
+    }
   }
 }
