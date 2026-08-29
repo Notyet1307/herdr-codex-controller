@@ -1,5 +1,6 @@
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type { ControllerConfig, JobState } from "./types.js";
 import { runCommand, requireCommandSuccess } from "./command.js";
 import { ensurePrivateDir } from "./fs-atomic.js";
@@ -7,6 +8,9 @@ import { digestJson, pathWithin, sha256 } from "./util.js";
 
 const GIT_TIMEOUT_MS = 120_000;
 const GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
+const ORACLE_MAX_BYTES = 64 * 1024 * 1024;
+type DiffEntry = { path: string; changedLines: number; binary: boolean };
+type BoundedDiff = { files: number; changedLines: number; paths: string[]; entries: DiffEntry[] };
 
 export class GitClient {
   constructor(private readonly config: ControllerConfig) {}
@@ -86,15 +90,39 @@ export class GitClient {
   }
 
   async changedPaths(cwd: string): Promise<string[]> {
-    const raw = await this.statusPorcelain(cwd);
-    const entries = raw.split("\0").filter(Boolean);
-    const paths: string[] = [];
-    for (const entry of entries) {
-      if (entry.length < 4) throw new Error("invalid Git status entry");
-      const path = entry.slice(3).split(" -> ").at(-1)!;
-      paths.push(path);
+    const tracked = await this.textRawBounded(cwd, ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"], GIT_OUTPUT_BYTES);
+    const untracked = await this.textRawBounded(cwd, ["ls-files", "-z", "--others", "--exclude-standard"], GIT_OUTPUT_BYTES);
+    return [...new Set(`${tracked}\0${untracked}`.split("\0").filter(Boolean))].sort();
+  }
+
+  async fileAtRevision(revision: string, path: string): Promise<{ sha256: string; byteCount: number }> {
+    assertSha(revision);
+    assertSafeRepoPath(path);
+    const tree = await this.textRawBounded(this.config.localPath, ["ls-tree", "-z", revision, "--", path], 8_192);
+    const match = tree.replace(/\0$/u, "").match(/^(100644|100755) blob [a-f0-9]+\t([^\u0000]+)$/u);
+    if (!match || match[2] !== path) throw new Error("Oracle artifact is not a reviewed-base regular file");
+    return fileBinding(gitBytes(this.config.localPath, ["show", `${revision}:${path}`]));
+  }
+
+  async fileInWorktree(job: JobState, path: string): Promise<{ sha256: string; byteCount: number }> {
+    assertSafeRepoPath(path);
+    const root = realpathSync(job.worktreePath);
+    let current = root;
+    for (const segment of path.split("/")) {
+      current = join(current, segment);
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink()) throw new Error("Oracle artifact path contains a symlink");
     }
-    return [...new Set(paths)].sort();
+    const target = realpathSync(current);
+    if (!pathWithin(root, target)) throw new Error("Oracle artifact escapes the release worktree");
+    const stat = lstatSync(target);
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("Oracle artifact is not a private regular file");
+    return fileBinding(readFileSync(target));
+  }
+
+  async commitStats(job: JobState, sha: string): Promise<BoundedDiff> {
+    assertSha(sha);
+    return this.statsBetween(job.worktreePath, `${sha}^`, sha);
   }
 
   async worktreeDigest(cwd: string): Promise<string> {
@@ -193,18 +221,11 @@ export class GitClient {
     return { sha: await this.head(job.worktreePath), created: true };
   }
 
-  async diffStats(job: JobState): Promise<{ files: number; changedLines: number; summary: string }> {
+  async diffStats(job: JobState): Promise<BoundedDiff & { summary: string }> {
     if (!job.baseSha) throw new Error("job base SHA is missing");
-    const output = await this.textRaw(job.worktreePath, ["diff", "--numstat", `${job.baseSha}...HEAD`]);
-    let files = 0;
-    let changedLines = 0;
-    for (const line of output.split(/\r?\n/).filter(Boolean)) {
-      const [added, deleted] = line.split("\t", 3);
-      files += 1;
-      if (added !== "-" && deleted !== "-") changedLines += Number(added) + Number(deleted);
-    }
+    const stats = await this.statsBetween(job.worktreePath, job.baseSha, "HEAD");
     const summary = await this.textRaw(job.worktreePath, ["diff", "--stat", `${job.baseSha}...HEAD`]);
-    return { files, changedLines, summary };
+    return { ...stats, summary };
   }
 
   async diffText(job: JobState, maximumBytes: number): Promise<string> {
@@ -231,6 +252,24 @@ export class GitClient {
   private async verifyWorktreeIdentity(cwd: string): Promise<void> {
     const root = await this.text(cwd, ["rev-parse", "--show-toplevel"]);
     if (realpathSync(root) !== realpathSync(cwd)) throw new Error("unexpected Git worktree root");
+  }
+
+  private async statsBetween(cwd: string, from: string, to: string): Promise<BoundedDiff> {
+    const raw = await this.textRawBounded(cwd, [
+      "diff", "--numstat", "-z", "--no-renames", from, to, "--",
+    ], GIT_OUTPUT_BYTES);
+    const entries = raw.split("\0").filter(Boolean).map((entry) => {
+      const match = entry.match(/^([0-9]+|-)\t([0-9]+|-)\t([\s\S]+)$/u);
+      if (!match) throw new Error("invalid Git numstat entry");
+      const binary = match[1] === "-" || match[2] === "-";
+      return { path: match[3]!, changedLines: binary ? 0 : Number(match[1]) + Number(match[2]), binary };
+    });
+    return {
+      files: entries.length,
+      changedLines: entries.reduce((total, entry) => total + entry.changedLines, 0),
+      paths: entries.map(({ path }) => path).sort(),
+      entries,
+    };
   }
 
   private async text(cwd: string, args: string[]): Promise<string> {
@@ -263,6 +302,28 @@ export class GitClient {
 
 function assertSha(value: string): void {
   if (!/^[0-9a-f]{40}$/i.test(value)) throw new Error(`invalid Git SHA: ${value}`);
+}
+
+function assertSafeRepoPath(value: string): void {
+  const segments = value.split("/");
+  if (!value || value.startsWith("/") || /^[A-Za-z]:/u.test(value) || value.includes("\\")
+    || segments.some((segment) => !segment || segment === "." || segment === "..")
+    || /[*?[\]{}\u0000\r\n]/u.test(value)) {
+    throw new Error("unsafe repository path");
+  }
+}
+
+function fileBinding(bytes: Uint8Array): { sha256: string; byteCount: number } {
+  if (bytes.byteLength > ORACLE_MAX_BYTES) throw new Error("Oracle artifact exceeds the byte bound");
+  return { sha256: `sha256:${sha256(bytes)}`, byteCount: bytes.byteLength };
+}
+
+function gitBytes(cwd: string, args: string[]): Uint8Array {
+  const run = spawnSync("git", ["-C", cwd, ...args], { encoding: null, maxBuffer: ORACLE_MAX_BYTES + 1 });
+  if (run.error || run.signal || run.status !== 0 || !(run.stdout instanceof Uint8Array)) {
+    throw new Error("cannot read Oracle artifact bytes from Git");
+  }
+  return run.stdout;
 }
 
 function normalizeSubject(value: string, fallback: string): string {

@@ -17,6 +17,7 @@ import type {
   WorkflowGateSummary,
 } from "../src/types.js";
 import type { CodexPort, GitHubPort } from "../src/ports.js";
+import { isReleasePlanV2 } from "../src/plan.js";
 import { digestJson, nowIso, sha256PrefixedUtf8 } from "../src/util.js";
 import { ensurePrivateDir, writeJsonAtomic, writeTextAtomic } from "../src/fs-atomic.js";
 import type { GitClient } from "../src/git.js";
@@ -44,7 +45,9 @@ export function createTestRepo(): TestRepo {
   git(source, ["config", "user.name", "Herdr Test"]);
   git(source, ["config", "user.email", "herdr@example.invalid"]);
   writeFileSync(join(source, "README.md"), "# Fixture\n", "utf8");
-  git(source, ["add", "README.md"]);
+  mkdirSync(join(source, "fixtures"), { mode: 0o700 });
+  writeFileSync(join(source, "fixtures", "oracle.json"), "{\"ok\":true}\n", "utf8");
+  git(source, ["add", "README.md", "fixtures/oracle.json"]);
   git(source, ["commit", "-m", "initial"]);
   git(source, ["branch", "-M", "main"]);
   git(source, ["remote", "add", "origin", remote]);
@@ -144,6 +147,9 @@ export function testPlanV2(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlanV2
       },
       specContentHash: sha256PrefixedUtf8("fixture specification"),
       deliveryGraphDigest: sha256PrefixedUtf8("fixture delivery graph"),
+      decisionManifestDigest: sha256PrefixedUtf8("fixture decision manifest"),
+      predecessorReceiptDigest: null,
+      dependencyHandoffDigests: [],
     },
     id: "release-fixture-v2",
     title: "Source-bound fixture release",
@@ -163,6 +169,32 @@ export function testPlanV2(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlanV2
       allowNoop: false,
       expectedTitle: `Issue ${number}`,
       expectedBodyHash: sha256PrefixedUtf8(`Create issue-${number}.txt.`),
+      oracleBindings: [{
+        schema: "pi-ticket-planning:oracle-binding:v1",
+        id: `O0${index + 1}`,
+        owner: { kind: "INDEPENDENT_VERIFICATION", identity: "fixture-reviewer" },
+        artifact: {
+          path: "fixtures/oracle.json",
+          format: "fixture.oracle/v1",
+          baseSha: git(repo.source, ["rev-parse", "origin/main"]),
+          sha256: sha256PrefixedUtf8("{\"ok\":true}\n"),
+          byteCount: Buffer.byteLength("{\"ok\":true}\n", "utf8"),
+        },
+        execution: { command: "npm run verify:oracle" },
+        workerMutationAllowed: false,
+      }],
+      riskClasses: ["FIXTURE_BEHAVIOR"],
+      scopeBudget: { maxFiles: 8, maxChangedLines: 1_500 },
+      expectedPaths: [`issue-${number}.txt`],
+      protectedPaths: ["fixtures/oracle.json"],
+      replanTriggers: [
+        "ACCEPTED_DECISION_CHANGE_REQUIRED",
+        "THIRD_RISK_CLASS_DISCOVERED",
+        "SCOPE_BUDGET_EXCEEDED",
+        "DOWNSTREAM_RELEASE_BEHAVIOR_DISCOVERED",
+      ],
+      integrationOnly: null,
+      waiverDigests: [],
     })),
     releaseAcceptanceCriteria: ["All exact source-bound issue files exist."],
     reviewFocus: ["Cross-issue correctness."],
@@ -242,11 +274,17 @@ export class FakeCodex implements CodexPort {
     let reviewResult: ReviewResult | null = custom.review ?? null;
     if ((input.kind === "worker" || input.kind === "issue-repair") && !workerResult) {
       writeFileSync(join(input.job.worktreePath, `issue-${input.issueNumber}.txt`), `issue ${input.issueNumber}\n`, "utf8");
-      workerResult = completedWorker(`Implemented Issue #${input.issueNumber}.`);
+      const risks = isReleasePlanV2(input.job.plan)
+        ? input.job.plan.issues.find((issue) => issue.number === input.issueNumber)?.riskClasses ?? []
+        : [];
+      workerResult = completedWorker(`Implemented Issue #${input.issueNumber}.`, risks);
     }
     if (input.kind === "release-harden" && !workerResult) {
       writeFileSync(join(input.job.worktreePath, "hardening.txt"), `hardening ${invocation}\n`, "utf8");
-      workerResult = completedWorker("Applied release hardening.");
+      const risks = isReleasePlanV2(input.job.plan)
+        ? [...new Set(input.job.plan.issues.flatMap((issue) => issue.riskClasses))]
+        : [];
+      workerResult = completedWorker("Applied release hardening.", risks);
     }
     if (input.kind === "review" && !reviewResult) {
       reviewResult = { status: "pass", summary: "Aggregate candidate passes.", findings: [] };
@@ -275,13 +313,14 @@ export class FakeCodex implements CodexPort {
   }
 }
 
-export function completedWorker(summary: string): WorkerResult {
+export function completedWorker(summary: string, observedRiskClasses: string[] = []): WorkerResult {
   return {
     status: "completed",
     summary,
     selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
     testsRun: [],
     residualRisks: [],
+    observedRiskClasses,
     blockedReason: null,
     blockedKind: null,
   };

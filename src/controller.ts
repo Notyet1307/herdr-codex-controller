@@ -6,6 +6,7 @@ import type {
   IssueSnapshot,
   IssueExecution,
   JobState,
+  ReleasePlanIssueV2,
   ReviewResult,
   StepResult,
   ValidationReceipt,
@@ -102,6 +103,7 @@ export class ReleaseController {
       if (active.kind === "release-harden") {
         const salvaged = await this.deps.git.salvageHardeningCommitAtHead(job, job.hardeningRounds);
         if (salvaged === head) {
+          await this.assertReleaseCommitProtected(job, salvaged);
           const recovered: JobState = {
             ...job,
             activeRun: null,
@@ -182,6 +184,7 @@ export class ReleaseController {
     if (!(await this.deps.git.isClean(job.worktreePath))) {
       throw new ControllerError("initial_worktree_dirty", "The release worktree is dirty before the first Worker run.");
     }
+    await this.assertReleaseWorktreeContract(job);
 
     const issueRoot = this.deps.store.issuesRoot(job.id);
     if (verified.parent) {
@@ -252,7 +255,139 @@ export class ReleaseController {
       }
       issues.set(planIssue.number, snapshot);
     }
+    await this.assertOracleBindingsAtBase(plan);
     return { baseSha, parent, issues };
+  }
+
+  private async assertOracleBindingsAtBase(plan: JobState["plan"]): Promise<void> {
+    if (!isReleasePlanV2(plan)) return;
+    for (const issue of plan.issues) {
+      for (const binding of issue.oracleBindings) {
+        let observed;
+        try { observed = await this.deps.git.fileAtRevision(plan.source.baseSha, binding.artifact.path); }
+        catch { throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} is unavailable at the bound source base.`); }
+        if (observed.sha256 !== binding.artifact.sha256 || observed.byteCount !== binding.artifact.byteCount) {
+          throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} does not match its bound bytes.`);
+        }
+      }
+    }
+  }
+
+  private async assertIssueWorktreeContract(job: JobState, issue: JobState["plan"]["issues"][number]): Promise<void> {
+    if (!("oracleBindings" in issue)) return;
+    await this.assertOracleBindingsInWorktree(job, [issue]);
+    const changed = await this.deps.git.changedPaths(job.worktreePath);
+    this.assertNoProtectedChanges(changed, issue.protectedPaths);
+    if (changed.some((path) => !issue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)))) {
+      throw new ControllerError("issue_scope_path_drift", `Issue #${issue.number} changed a path outside its bound expectedPaths.`);
+    }
+  }
+
+  private async assertReleaseWorktreeContract(job: JobState): Promise<void> {
+    if (!isReleasePlanV2(job.plan)) return;
+    const issues = job.plan.issues;
+    await this.assertOracleBindingsInWorktree(job, issues);
+    const changed = await this.deps.git.changedPaths(job.worktreePath);
+    this.assertNoProtectedChanges(changed, issues.flatMap((issue) => issue.protectedPaths));
+    if (changed.some((path) => owningIssues(issues, path).length !== 1)) {
+      throw new ControllerError("hardening_scope_unattributed", "Release hardening changed a path without one exact Ticket owner.");
+    }
+  }
+
+  private async assertOracleBindingsInWorktree(job: JobState, issues: ReleasePlanIssueV2[]): Promise<void> {
+    for (const issue of issues) {
+      for (const binding of issue.oracleBindings) {
+        let observed;
+        try { observed = await this.deps.git.fileInWorktree(job, binding.artifact.path); }
+        catch { throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} is unavailable in the release worktree.`); }
+        if (observed.sha256 !== binding.artifact.sha256 || observed.byteCount !== binding.artifact.byteCount) {
+          throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} changed in the release worktree.`);
+        }
+      }
+    }
+  }
+
+  private assertNoProtectedChanges(changed: string[], protectedPaths: string[]): void {
+    const protectedSet = new Set(protectedPaths);
+    if (changed.some((path) => protectedSet.has(path))) {
+      throw new ControllerError("protected_path_changed", "A protected Oracle path changed in the release worktree.");
+    }
+  }
+
+  private async assertIssueCommitContract(
+    job: JobState,
+    issue: JobState["plan"]["issues"][number],
+    sha: string,
+  ): Promise<void> {
+    if (!("scopeBudget" in issue)) return;
+    const stats = await this.deps.git.commitStats(job, sha);
+    const maxFiles = Math.min(issue.scopeBudget.maxFiles, this.deps.store.config.policy.maxChangedFiles);
+    const maxChangedLines = Math.min(issue.scopeBudget.maxChangedLines, this.deps.store.config.policy.maxChangedLines);
+    if (stats.entries.some(({ binary }) => binary) || stats.files > maxFiles || stats.changedLines > maxChangedLines) {
+      throw new ControllerError(
+        "issue_scope_budget_exceeded",
+        `Issue #${issue.number} commit exceeds its bound scope budget.`,
+      );
+    }
+    if (stats.paths.some((path) => issue.protectedPaths.includes(path))) {
+      throw new ControllerError("protected_path_changed", `Issue #${issue.number} commit changes a protected Oracle path.`);
+    }
+    if (stats.paths.some((path) => !issue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)))) {
+      throw new ControllerError("issue_scope_path_drift", `Issue #${issue.number} commit changed a path outside its bound expectedPaths.`);
+    }
+    await this.assertOracleBindingsInWorktree(job, [issue]);
+  }
+
+  private async assertReleaseCommitProtected(job: JobState, sha: string): Promise<void> {
+    if (!isReleasePlanV2(job.plan)) return;
+    const stats = await this.deps.git.commitStats(job, sha);
+    const protectedPaths = new Set(job.plan.issues.flatMap((issue) => issue.protectedPaths));
+    if (stats.paths.some((path) => protectedPaths.has(path))) {
+      throw new ControllerError("protected_path_changed", "Release hardening changed a protected Oracle path.");
+    }
+    await this.assertOracleBindingsInWorktree(job, job.plan.issues);
+    await this.assertReleaseAggregateScope(job);
+  }
+
+  private async assertReleaseAggregateScope(job: JobState): Promise<void> {
+    if (!isReleasePlanV2(job.plan)) return;
+    const stats = await this.deps.git.diffStats(job);
+    const groups = new Map<number, typeof stats.entries>();
+    for (const entry of stats.entries) {
+      const owners = owningIssues(job.plan.issues, entry.path);
+      if (owners.length !== 1) {
+        throw new ControllerError("hardening_scope_unattributed", "Release hardening has no unique Ticket scope owner.");
+      }
+      groups.set(owners[0]!.number, [...(groups.get(owners[0]!.number) ?? []), entry]);
+    }
+    for (const issue of job.plan.issues) {
+      const entries = groups.get(issue.number) ?? [];
+      const maxFiles = Math.min(issue.scopeBudget.maxFiles, this.deps.store.config.policy.maxChangedFiles);
+      const maxChangedLines = Math.min(issue.scopeBudget.maxChangedLines, this.deps.store.config.policy.maxChangedLines);
+      if (entries.some(({ binary }) => binary) || entries.length > maxFiles
+        || entries.reduce((total, entry) => total + entry.changedLines, 0) > maxChangedLines) {
+        throw new ControllerError("issue_scope_budget_exceeded", `Release hardening exceeds Issue #${issue.number} scope budget.`);
+      }
+    }
+  }
+
+  private assertObservedRiskClasses(
+    job: JobState,
+    observed: string[],
+    issueNumber: number | null,
+    detailsPath: string,
+  ): void {
+    if (!isReleasePlanV2(job.plan)) return;
+    const expected = issueNumber === null
+      ? [...new Set(job.plan.issues.flatMap((issue) => issue.riskClasses))]
+      : job.plan.issues.find((issue) => issue.number === issueNumber)?.riskClasses;
+    if (!expected || !sameStringSet(expected, observed)) {
+      throw new ControllerError(
+        "issue_risk_class_drift",
+        "The Worker reported a risk-class set outside the bound Release Plan v2.",
+        detailsPath,
+      );
+    }
   }
 
   private async runSetupValidation(job: JobState, baseSha: string): Promise<StepResult> {
@@ -296,6 +431,7 @@ export class ReleaseController {
     if (!issue.snapshot) throw new ControllerError("issue_snapshot_missing", `Issue #${issue.number} has no bound snapshot.`);
     const planIssue = job.plan.issues.find((candidate) => candidate.number === issue!.number);
     if (!planIssue) throw new ControllerError("plan_issue_missing", `Issue #${issue.number} is not present in the job plan.`);
+    await this.assertIssueWorktreeContract(job, planIssue);
 
     const validationReceipt = issue.lastValidationId
       ? this.readValidation(job, issue.lastValidationId)
@@ -319,6 +455,7 @@ export class ReleaseController {
     });
     this.checkpointCodexRun(job, execution.record);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
+    await this.assertIssueWorktreeContract(job, planIssue);
     if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut) {
       this.deps.store.save(job);
       throw new ControllerError("codex_worker_failed", `Codex Worker failed for Issue #${issue.number}.`, execution.record.stderrPath);
@@ -328,6 +465,7 @@ export class ReleaseController {
       this.deps.store.save(job);
       throw new ControllerError("codex_worker_result_missing", `Codex Worker produced no valid structured result for Issue #${issue.number}.`, execution.record.resultPath);
     }
+    this.assertObservedRiskClasses(job, result.observedRiskClasses, planIssue.number, execution.record.resultPath);
     if (result.status === "blocked") {
       issue.status = "blocked";
       this.deps.store.save(job);
@@ -352,6 +490,7 @@ export class ReleaseController {
 
     const salvaged = await this.deps.git.salvageIssueCommitAtHead(job, issue.number);
     if (salvaged) {
+      await this.assertIssueCommitContract(job, planIssue, salvaged);
       issue.status = "committed";
       issue.commitSha = salvaged;
       job.currentIssueNumber = null;
@@ -392,6 +531,7 @@ export class ReleaseController {
     }
 
     const commit = await this.deps.git.commitIssue(job, issue.number, issue.snapshot.title, planIssue.allowNoop);
+    await this.assertIssueCommitContract(job, planIssue, commit.sha);
     issue.status = "committed";
     issue.commitSha = commit.sha;
     issue.nextRunKind = "worker";
@@ -485,6 +625,7 @@ export class ReleaseController {
   private async harden(job: JobState): Promise<StepResult> {
     const salvaged = await this.deps.git.salvageHardeningCommitAtHead(job, job.hardeningRounds);
     if (salvaged) {
+      await this.assertReleaseCommitProtected(job, salvaged);
       job.candidateSha = null;
       job.phase = "release_validate";
       job.activeRun = null;
@@ -494,6 +635,7 @@ export class ReleaseController {
     if (!job.hardeningReasonPath || !existsSync(job.hardeningReasonPath)) {
       throw new ControllerError("hardening_reason_missing", "Release hardening has no durable blocking evidence.");
     }
+    await this.assertReleaseWorktreeContract(job);
     const prompt = renderReleaseHardeningPrompt({ job, reasonPath: job.hardeningReasonPath });
     const runId = newId("release-harden");
     const baseHeadSha = await this.deps.git.head(job.worktreePath);
@@ -509,10 +651,12 @@ export class ReleaseController {
     });
     this.checkpointCodexRun(job, execution.record);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
+    await this.assertReleaseWorktreeContract(job);
     if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut || !execution.workerResult) {
       this.deps.store.save(job);
       throw new ControllerError("codex_hardening_failed", "Release hardening Worker did not complete successfully.", execution.record.stderrPath);
     }
+    this.assertObservedRiskClasses(job, execution.workerResult.observedRiskClasses, null, execution.record.resultPath);
     if (execution.workerResult.status === "blocked") {
       this.deps.store.save(job);
       const code = execution.workerResult.blockedKind === "replan_required"
@@ -531,6 +675,7 @@ export class ReleaseController {
     const reason = readFileSync(job.hardeningReasonPath, "utf8");
     const commit = await this.deps.git.commitHardening(job, reason);
     if (!commit.created) throw new ControllerError("hardening_commit_missing", "Hardening changes could not be committed.");
+    await this.assertReleaseCommitProtected(job, commit.sha);
     job.candidateSha = null;
     job.phase = "release_validate";
     this.deps.store.save(job);
@@ -731,6 +876,19 @@ function dedupeCommands(commands: CommandConfig[]): CommandConfig[] {
     }
   }
   return result;
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return [...left].sort().join("\n") === [...right].sort().join("\n");
+}
+
+function owningIssues(issues: ReleasePlanIssueV2[], path: string): ReleasePlanIssueV2[] {
+  return issues.filter((issue) => issue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)));
+}
+
+function expectedPathMatches(pattern: string, path: string): boolean {
+  const source = pattern.split("*").map((part) => part.replace(/[|\\{}()[\]^$+?.]/gu, "\\$&")).join("[^/]*");
+  return new RegExp(`^${source}$`, "u").test(path);
 }
 
 function renderValidationFailure(receipt: ValidationReceipt): string {

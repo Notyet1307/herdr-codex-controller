@@ -11,7 +11,10 @@
       "expectedBodyHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
     },
     "specContentHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-    "deliveryGraphDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    "deliveryGraphDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "decisionManifestDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "predecessorReceiptDigest": null,
+    "dependencyHandoffDigests": []
   },
   "id": "source-bound-release-001",
   "title": "Implement the approved source-bound product increment",
@@ -31,7 +34,35 @@
       "suggestedValidation": [],
       "allowNoop": false,
       "expectedTitle": "Exact Child Issue title from the GitHub API",
-      "expectedBodyHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      "expectedBodyHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "oracleBindings": [
+        {
+          "schema": "pi-ticket-planning:oracle-binding:v1",
+          "id": "O01",
+          "owner": { "kind": "INDEPENDENT_VERIFICATION", "identity": "release-reviewer" },
+          "artifact": {
+            "path": "fixtures/oracles/o01.json",
+            "format": "example.oracle/v1",
+            "baseSha": "0123456789abcdef0123456789abcdef01234567",
+            "sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            "byteCount": 128
+          },
+          "execution": { "command": "npm run verify:oracle:o01" },
+          "workerMutationAllowed": false
+        }
+      ],
+      "riskClasses": ["SCHEMA_MIGRATION"],
+      "scopeBudget": { "maxFiles": 8, "maxChangedLines": 1500 },
+      "expectedPaths": ["src/migration.ts"],
+      "protectedPaths": ["fixtures/oracles/o01.json"],
+      "replanTriggers": [
+        "ACCEPTED_DECISION_CHANGE_REQUIRED",
+        "THIRD_RISK_CLASS_DISCOVERED",
+        "SCOPE_BUDGET_EXCEEDED",
+        "DOWNSTREAM_RELEASE_BEHAVIOR_DISCOVERED"
+      ],
+      "integrationOnly": null,
+      "waiverDigests": []
     }
   ],
   "releaseAcceptanceCriteria": [

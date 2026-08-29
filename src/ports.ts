@@ -23,13 +23,16 @@ export interface GitPort {
   branch(cwd: string): Promise<string>;
   isClean(cwd: string): Promise<boolean>;
   changedPaths(cwd: string): Promise<string[]>;
+  fileAtRevision(revision: string, path: string): Promise<{ sha256: string; byteCount: number }>;
+  fileInWorktree(job: JobState, path: string): Promise<{ sha256: string; byteCount: number }>;
+  commitStats(job: JobState, sha: string): Promise<{ files: number; changedLines: number; paths: string[]; entries: Array<{ path: string; changedLines: number; binary: boolean }> }>;
   worktreeDigest(cwd: string): Promise<string>;
   assertAgentDidNotCommit(job: JobState, expectedHead: string): Promise<void>;
   commitIssue(job: JobState, issueNumber: number, title: string, allowNoop: boolean): Promise<{ sha: string; created: boolean }>;
   salvageIssueCommitAtHead(job: JobState, issueNumber: number): Promise<string | null>;
   salvageHardeningCommitAtHead(job: JobState, round: number): Promise<string | null>;
   commitHardening(job: JobState, reason: string): Promise<{ sha: string; created: boolean }>;
-  diffStats(job: JobState): Promise<{ files: number; changedLines: number; summary: string }>;
+  diffStats(job: JobState): Promise<{ files: number; changedLines: number; summary: string; entries: Array<{ path: string; changedLines: number; binary: boolean }> }>;
   diffText(job: JobState, maximumBytes: number): Promise<string>;
   push(job: JobState): Promise<void>;
   removeWorktree(job: JobState): Promise<void>;

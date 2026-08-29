@@ -26,8 +26,26 @@ const PLAN_KEYS_V2 = [...PLAN_KEYS_V1, "source"];
 const ISSUE_KEYS_V1 = [
   "acceptanceCriteria", "allowNoop", "dependsOn", "number", "objective", "order", "suggestedValidation",
 ];
-const ISSUE_KEYS_V2 = [...ISSUE_KEYS_V1, "expectedBodyHash", "expectedTitle"];
+const ISSUE_KEYS_V2 = [
+  ...ISSUE_KEYS_V1,
+  "expectedBodyHash",
+  "expectedPaths",
+  "expectedTitle",
+  "integrationOnly",
+  "oracleBindings",
+  "protectedPaths",
+  "replanTriggers",
+  "riskClasses",
+  "scopeBudget",
+  "waiverDigests",
+];
 const SHA256_PREFIXED_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const REQUIRED_REPLAN_TRIGGERS = [
+  "ACCEPTED_DECISION_CHANGE_REQUIRED",
+  "THIRD_RISK_CLASS_DISCOVERED",
+  "SCOPE_BUDGET_EXCEEDED",
+  "DOWNSTREAM_RELEASE_BEHAVIOR_DISCOVERED",
+];
 
 export function loadPlan(path: string): ReleasePlan {
   const absolute = resolve(path);
@@ -108,6 +126,10 @@ function validatePlanV2(object: Record<string, unknown>): ReleasePlanV2 {
   if (releaseAcceptanceCriteria.length === 0) {
     throw new Error("plan.releaseAcceptanceCriteria must contain 1 to 50 entries");
   }
+  const issues = validateIssueGraph(object.issues, validateIssueV2);
+  if (issues.some((issue) => issue.oracleBindings.some((binding) => binding.artifact.baseSha !== source.baseSha))) {
+    throw new Error("plan Oracle artifact baseSha must equal plan.source.baseSha");
+  }
   return {
     version: 2,
     source,
@@ -115,7 +137,7 @@ function validatePlanV2(object: Record<string, unknown>): ReleasePlanV2 {
     title: boundedText(object.title, "plan.title", 500),
     objective: boundedText(object.objective, "plan.objective", 8_000),
     parentIssue,
-    issues: validateIssueGraph(object.issues, validateIssueV2),
+    issues,
     releaseAcceptanceCriteria,
     reviewFocus: boundedStringArray(object.reviewFocus, "plan.reviewFocus", 20, 2_000),
   };
@@ -124,7 +146,8 @@ function validatePlanV2(object: Record<string, unknown>): ReleasePlanV2 {
 function validateSourceV2(value: unknown): ReleasePlanV2["source"] {
   const object = expectObject(value, "plan.source");
   expectExactKeys(object, [
-    "baseRef", "baseSha", "deliveryGraphDigest", "parentBinding", "planner", "repo", "specContentHash",
+    "baseRef", "baseSha", "decisionManifestDigest", "deliveryGraphDigest", "dependencyHandoffDigests",
+    "parentBinding", "planner", "predecessorReceiptDigest", "repo", "specContentHash",
   ], "plan.source");
   if (object.planner !== "pi-ticket-planning") {
     throw new Error('plan.source.planner must be "pi-ticket-planning"');
@@ -163,6 +186,15 @@ function validateSourceV2(value: unknown): ReleasePlanV2["source"] {
     },
     specContentHash: prefixedHash(object.specContentHash, "plan.source.specContentHash"),
     deliveryGraphDigest: prefixedHash(object.deliveryGraphDigest, "plan.source.deliveryGraphDigest"),
+    decisionManifestDigest: prefixedHash(object.decisionManifestDigest, "plan.source.decisionManifestDigest"),
+    predecessorReceiptDigest: object.predecessorReceiptDigest === null
+      ? null
+      : prefixedHash(object.predecessorReceiptDigest, "plan.source.predecessorReceiptDigest"),
+    dependencyHandoffDigests: digestArray(
+      object.dependencyHandoffDigests,
+      "plan.source.dependencyHandoffDigests",
+      100,
+    ),
   };
 }
 
@@ -196,6 +228,26 @@ function validateIssueV2(value: unknown, index: number): ReleasePlanIssueV2 {
     throw new Error(`${label}.suggestedValidation must be exactly []`);
   }
   if (object.allowNoop !== false) throw new Error(`${label}.allowNoop must be false`);
+  const oracleBindings = array(object.oracleBindings, `${label}.oracleBindings`, 1, 8)
+    .map((binding, oracleIndex) => validateOracleBinding(binding, `${label}.oracleBindings[${oracleIndex}]`));
+  if (new Set(oracleBindings.map((binding) => binding.id)).size !== oracleBindings.length) {
+    throw new Error(`${label}.oracleBindings contains duplicate ids`);
+  }
+  const riskClasses = boundedStringArray(object.riskClasses, `${label}.riskClasses`, 16, 64);
+  if (riskClasses.length === 0 || riskClasses.some((risk) => !/^[A-Z][A-Z0-9_]{0,63}$/.test(risk))) {
+    throw new Error(`${label}.riskClasses is invalid`);
+  }
+  const scopeBudget = expectObject(object.scopeBudget, `${label}.scopeBudget`);
+  expectExactKeys(scopeBudget, ["maxChangedLines", "maxFiles"], `${label}.scopeBudget`);
+  const expectedPaths = pathArray(object.expectedPaths, `${label}.expectedPaths`, 1, 8, true);
+  const protectedPaths = pathArray(object.protectedPaths, `${label}.protectedPaths`, 1, 100, false);
+  if (oracleBindings.some((binding) => !protectedPaths.includes(binding.artifact.path))) {
+    throw new Error(`${label}.protectedPaths must include every Oracle artifact path`);
+  }
+  const replanTriggers = boundedStringArray(object.replanTriggers, `${label}.replanTriggers`, 32, 128);
+  if (REQUIRED_REPLAN_TRIGGERS.some((trigger) => !replanTriggers.includes(trigger))) {
+    throw new Error(`${label}.replanTriggers is missing a controlled trigger`);
+  }
   return {
     ...common,
     objective: boundedText(object.objective, `${label}.objective`, 8_000),
@@ -204,7 +256,120 @@ function validateIssueV2(value: unknown, index: number): ReleasePlanIssueV2 {
     allowNoop: false,
     expectedTitle: boundedExactText(object.expectedTitle, `${label}.expectedTitle`, 500),
     expectedBodyHash: prefixedHash(object.expectedBodyHash, `${label}.expectedBodyHash`),
+    oracleBindings,
+    riskClasses,
+    scopeBudget: {
+      maxFiles: parsePositiveInteger(scopeBudget.maxFiles, `${label}.scopeBudget.maxFiles`, 1, 1_000),
+      maxChangedLines: parsePositiveInteger(
+        scopeBudget.maxChangedLines,
+        `${label}.scopeBudget.maxChangedLines`,
+        1,
+        1_000_000,
+      ),
+    },
+    expectedPaths,
+    protectedPaths,
+    replanTriggers,
+    integrationOnly: validateIntegrationOnly(object.integrationOnly, `${label}.integrationOnly`),
+    waiverDigests: digestArray(object.waiverDigests, `${label}.waiverDigests`, 8),
   };
+}
+
+function validateOracleBinding(value: unknown, label: string): ReleasePlanIssueV2["oracleBindings"][number] {
+  const object = expectObject(value, label);
+  expectExactKeys(object, ["artifact", "execution", "id", "owner", "schema", "workerMutationAllowed"], label);
+  if (object.schema !== "pi-ticket-planning:oracle-binding:v1" || object.workerMutationAllowed !== false) {
+    throw new Error(`${label} is not an immutable Oracle binding`);
+  }
+  const id = boundedExactText(object.id, `${label}.id`, 64);
+  if (!/^O(?:0[1-9][0-9]*|[1-9][0-9]*)$/.test(id)) throw new Error(`${label}.id is invalid`);
+  const owner = expectObject(object.owner, `${label}.owner`);
+  expectExactKeys(owner, ["identity", "kind"], `${label}.owner`);
+  if (owner.kind !== "INDEPENDENT_VERIFICATION") throw new Error(`${label}.owner.kind is invalid`);
+  const artifact = expectObject(object.artifact, `${label}.artifact`);
+  expectExactKeys(artifact, ["baseSha", "byteCount", "format", "path", "sha256"], `${label}.artifact`);
+  const execution = expectObject(object.execution, `${label}.execution`);
+  expectExactKeys(execution, ["command"], `${label}.execution`);
+  const command = boundedExactText(execution.command, `${label}.execution.command`, 512);
+  if (!/^npm run verify:[A-Za-z0-9:_-]+$/.test(command)) throw new Error(`${label}.execution.command is invalid`);
+  const baseSha = boundedExactText(artifact.baseSha, `${label}.artifact.baseSha`, 40);
+  if (!/^[a-f0-9]{40}$/.test(baseSha)) throw new Error(`${label}.artifact.baseSha is invalid`);
+  return {
+    schema: "pi-ticket-planning:oracle-binding:v1",
+    id,
+    owner: {
+      kind: "INDEPENDENT_VERIFICATION",
+      identity: boundedExactText(owner.identity, `${label}.owner.identity`, 256),
+    },
+    artifact: {
+      path: exactRepoPath(artifact.path, `${label}.artifact.path`),
+      format: boundedExactText(artifact.format, `${label}.artifact.format`, 256),
+      baseSha,
+      sha256: prefixedHash(artifact.sha256, `${label}.artifact.sha256`),
+      byteCount: parsePositiveInteger(artifact.byteCount, `${label}.artifact.byteCount`, 0, 64 * 1024 * 1024),
+    },
+    execution: { command },
+    workerMutationAllowed: false,
+  };
+}
+
+function validateIntegrationOnly(value: unknown, label: string): ReleasePlanIssueV2["integrationOnly"] {
+  if (value === null) return null;
+  const object = expectObject(value, label);
+  expectExactKeys(object, ["missingBehavior", "noDuplicatedProductionLogic", "noNewProductBehavior", "noSchemaChanges"], label);
+  if (object.noNewProductBehavior !== true || object.noSchemaChanges !== true
+    || object.noDuplicatedProductionLogic !== true || object.missingBehavior !== "REPLAN_REQUIRED") {
+    throw new Error(`${label} is invalid`);
+  }
+  return {
+    noNewProductBehavior: true,
+    noSchemaChanges: true,
+    noDuplicatedProductionLogic: true,
+    missingBehavior: "REPLAN_REQUIRED",
+  };
+}
+
+function array(value: unknown, label: string, minimum: number, maximum: number): unknown[] {
+  if (!Array.isArray(value) || value.length < minimum || value.length > maximum) {
+    throw new Error(`${label} must contain ${minimum} to ${maximum} entries`);
+  }
+  return value;
+}
+
+function digestArray(value: unknown, label: string, maximum: number): string[] {
+  if (!Array.isArray(value) || value.length > maximum) throw new Error(`${label} is invalid`);
+  const result = value.map((entry, index) => prefixedHash(entry, `${label}[${index}]`));
+  if (new Set(result).size !== result.length) throw new Error(`${label} contains duplicates`);
+  return result;
+}
+
+function pathArray(value: unknown, label: string, minimum: number, maximum: number, allowGlob: boolean): string[] {
+  return array(value, label, minimum, maximum).map((entry, index) => (
+    allowGlob ? expectedRepoPath(entry, `${label}[${index}]`) : exactRepoPath(entry, `${label}[${index}]`)
+  )).filter((entry, index, entries) => {
+    if (entries.indexOf(entry) !== index) throw new Error(`${label} contains duplicates`);
+    return true;
+  });
+}
+
+function exactRepoPath(value: unknown, label: string): string {
+  const text = boundedExactText(value, label, 2_048);
+  const segments = text.split("/");
+  if (text.startsWith("/") || /^[A-Za-z]:/.test(text) || text.includes("\\")
+    || segments.some((segment) => !segment || segment === "." || segment === "..")
+    || /[*?[\]{}\u0000\r\n]/.test(text)) throw new Error(`${label} is unsafe`);
+  return text;
+}
+
+function expectedRepoPath(value: unknown, label: string): string {
+  const text = boundedExactText(value, label, 2_048);
+  const segments = text.split("/");
+  if (text.startsWith("/") || /^[A-Za-z]:/.test(text) || text.includes("\\")
+    || segments.some((segment) => !segment || segment === "." || segment === "..")
+    || /[?[\]{}\u0000\r\n]/.test(text) || text.includes("**")) {
+    throw new Error(`${label} is unsafe`);
+  }
+  return text;
 }
 
 function validateIssueCommon(object: Record<string, unknown>, label: string): Pick<

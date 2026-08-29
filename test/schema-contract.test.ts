@@ -49,6 +49,7 @@ test("v2 fixed fixtures agree across JSON Schema, validatePlan, and CLI plan val
       { name: "extra source key", valid: false, mutate: (plan) => { plan.source.extra = true; } },
       { name: "extra Issue key", valid: false, mutate: (plan) => { plan.issues[0].extra = true; } },
       { name: "wrong hash", valid: false, mutate: (plan) => { plan.issues[0].expectedBodyHash = "sha256:not-a-hash"; } },
+      { name: "legacy v2 without runtime contract", valid: false, mutate: (plan) => { delete plan.issues[0].oracleBindings; } },
     ];
 
     for (const fixture of fixtures) {
