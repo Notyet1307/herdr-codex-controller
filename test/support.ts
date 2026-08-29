@@ -45,9 +45,10 @@ export function createTestRepo(): TestRepo {
   git(source, ["config", "user.name", "Herdr Test"]);
   git(source, ["config", "user.email", "herdr@example.invalid"]);
   writeFileSync(join(source, "README.md"), "# Fixture\n", "utf8");
+  writeFileSync(join(source, "package.json"), `${JSON.stringify({ scripts: { "verify:oracle": "node -e \"\"" } })}\n`, "utf8");
   mkdirSync(join(source, "fixtures"), { mode: 0o700 });
   writeFileSync(join(source, "fixtures", "oracle.json"), "{\"ok\":true}\n", "utf8");
-  git(source, ["add", "README.md", "fixtures/oracle.json"]);
+  git(source, ["add", "README.md", "package.json", "fixtures/oracle.json"]);
   git(source, ["commit", "-m", "initial"]);
   git(source, ["branch", "-M", "main"]);
   git(source, ["remote", "add", "origin", remote]);
@@ -107,7 +108,11 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
       pollIntervalMs: 1_000,
     },
   };
-  return deepMerge(base, overrides);
+  const merged = deepMerge(base, overrides);
+  if (!merged.validation.release.some(({ command }) => command === "npm run verify:oracle")) {
+    merged.validation.release.unshift({ command: "npm run verify:oracle" });
+  }
+  return merged;
 }
 
 export function testPlan(issueNumbers = [1, 2]): ReleasePlan {

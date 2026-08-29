@@ -86,6 +86,17 @@ export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: Contro
       "Release Plan v2 source.baseRef does not exactly match config.baseRef.",
     );
   }
+  const releaseCommands = new Set(config.validation.release.map(({ command }) => command));
+  for (const issue of plan.issues) {
+    for (const binding of issue.oracleBindings) {
+      if (!releaseCommands.has(binding.execution.command)) {
+        throw new ControllerError(
+          "oracle_validation_command_missing",
+          `Issue #${issue.number} Oracle ${binding.id} command is absent from config.validation.release.`,
+        );
+      }
+    }
+  }
 }
 
 function validatePlanV1(object: Record<string, unknown>): ReleasePlanV1 {
