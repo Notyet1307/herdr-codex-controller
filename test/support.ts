@@ -105,10 +105,16 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
       autoMerge: false,
       mergeMethod: "squash",
       allowNoChecks: false,
+      requiredChecks: [],
       pollIntervalMs: 1_000,
     },
   };
   const merged = deepMerge(base, overrides);
+  if (merged.executionMode === "release-plan-v2-direct" && overrides.delivery === undefined) {
+    merged.delivery.createPullRequest = true;
+    merged.delivery.allowNoChecks = false;
+    merged.delivery.requiredChecks = ["verify"];
+  }
   if (!merged.validation.release.some(({ command }) => command === "npm run verify:oracle")) {
     merged.validation.release.unshift({ command: "npm run verify:oracle" });
   }
@@ -232,6 +238,7 @@ export class FakeGitHub implements GitHubPort {
   async findPullRequest(_job: JobState): Promise<PullRequestState | null> { return null; }
   async createPullRequest(_job: JobState, _deliveryRoot: string): Promise<PullRequestState> { throw new Error("not used"); }
   async inspectPullRequest(_number: number): Promise<{ pullRequest: PullRequestState; checks: any; mergedAt: string | null }> { throw new Error("not used"); }
+  async baseAllowsUpToDateAutoMerge(): Promise<boolean> { return true; }
   async enableAutoMerge(_number: number, _candidateSha: string): Promise<void> { throw new Error("not used"); }
   async currentLogin(): Promise<string> { return "test-user"; }
   async listSubIssues(_parentIssue: number): Promise<QueueIssue[]> { return []; }

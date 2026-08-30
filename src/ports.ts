@@ -17,6 +17,12 @@ export interface GitPort {
   preflight(): Promise<void>;
   fetchBase(): Promise<string>;
   isAncestorOfRemoteBase(sha: string): Promise<boolean>;
+  verifyMergeResult(input: {
+    mergeSha: string;
+    candidateSha: string;
+    baseSha: string;
+    mergeMethod: "merge" | "squash" | "rebase";
+  }): Promise<"verified" | "base_mismatch" | "candidate_mismatch">;
   ensureWorktree(job: JobState): Promise<void>;
   verifyWorktree(job: JobState): Promise<void>;
   head(cwd: string): Promise<string>;
@@ -48,6 +54,7 @@ export interface GitHubPort {
     checks: GhCheckSummary;
     mergedAt: string | null;
   }>;
+  baseAllowsUpToDateAutoMerge(): Promise<boolean>;
   enableAutoMerge(number: number, candidateSha: string): Promise<void>;
   currentLogin(): Promise<string>;
   listSubIssues(parentIssue: number): Promise<QueueIssue[]>;

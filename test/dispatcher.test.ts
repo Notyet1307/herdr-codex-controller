@@ -192,7 +192,7 @@ class QueueGitHub extends FakeGitHub {
   override async inspectPullRequest(_number: number) {
     const job = this.lastJob;
     if (!job?.pullRequest) throw new Error("fixture PR missing");
-    return { pullRequest: job.pullRequest, checks: { state: "success" as const, failures: [], pending: [] }, mergedAt: nowIso() };
+    return { pullRequest: job.pullRequest, checks: { state: "success" as const, missing: [], failures: [], pending: [] }, mergedAt: nowIso() };
   }
   override async inspectWorkflowGate(sha: string, requiredWorkflows: string[]): Promise<WorkflowGateSummary> {
     return {

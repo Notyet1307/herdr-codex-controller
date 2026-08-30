@@ -34,6 +34,8 @@ test("execution mode defaults to v2 direct and legacy paths require explicit opt
   const repo = createTestRepo();
   try {
     const raw: any = testConfig(repo);
+    raw.delivery.createPullRequest = true;
+    raw.delivery.requiredChecks = ["verify"];
     delete raw.executionMode;
     const direct = validateConfig(raw);
     assert.equal(direct.executionMode, "release-plan-v2-direct");
@@ -48,6 +50,28 @@ test("execution mode defaults to v2 direct and legacy paths require explicit opt
       () => validateConfig({ ...raw, executionMode: "qualified-dispatcher" }),
       /config\.executionMode/,
     );
+  } finally { repo.cleanup(); }
+});
+
+test("production direct delivery policy requires a PR and exact non-empty checks", () => {
+  const repo = createTestRepo();
+  try {
+    const valid = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    assert.doesNotThrow(() => validateConfig(valid));
+    const cases: Array<(config: any) => void> = [
+      (config) => { config.delivery.createPullRequest = false; },
+      (config) => { config.delivery.allowNoChecks = true; },
+      (config) => { config.delivery.requiredChecks = []; },
+      (config) => { config.delivery.requiredChecks = ["verify", "verify"]; },
+    ];
+    for (const mutate of cases) {
+      const config = structuredClone(valid) as any;
+      mutate(config);
+      assert.throws(
+        () => validateConfig(config),
+        (error: any) => error?.code === "production_delivery_policy_invalid",
+      );
+    }
   } finally { repo.cleanup(); }
 });
 

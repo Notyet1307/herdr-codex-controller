@@ -50,6 +50,7 @@
     "autoMerge": false,
     "mergeMethod": "squash",
     "allowNoChecks": false,
+    "requiredChecks": ["verify"],
     "pollIntervalMs": 15000
   }
 }

@@ -74,17 +74,44 @@
     "delivery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["createPullRequest", "draft", "autoMerge", "mergeMethod", "allowNoChecks", "pollIntervalMs"],
+      "required": ["createPullRequest", "draft", "autoMerge", "mergeMethod", "allowNoChecks", "requiredChecks", "pollIntervalMs"],
       "properties": {
         "createPullRequest": { "type": "boolean" },
         "draft": { "type": "boolean" },
         "autoMerge": { "type": "boolean" },
         "mergeMethod": { "enum": ["merge", "squash", "rebase"] },
         "allowNoChecks": { "type": "boolean" },
+        "requiredChecks": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
         "pollIntervalMs": { "type": "integer", "minimum": 1000 }
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "anyOf": [
+          { "required": ["executionMode"], "properties": { "executionMode": { "const": "release-plan-v2-direct" } } },
+          { "not": { "required": ["executionMode"] } }
+        ]
+      },
+      "then": {
+        "properties": {
+          "delivery": {
+            "properties": {
+              "createPullRequest": { "const": true },
+              "allowNoChecks": { "const": false },
+              "requiredChecks": { "minItems": 1 }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "commands": {
       "type": "array",

@@ -94,9 +94,42 @@ export class GitHubClient {
     const pullRequest = parsePullRequestValue(value);
     return {
       pullRequest,
-      checks: summarizeChecks(value.statusCheckRollup),
+      checks: summarizeChecks(value.statusCheckRollup, this.config.delivery.requiredChecks),
       mergedAt: value.mergedAt === null ? null : expectString(value.mergedAt, "pr.mergedAt"),
     };
+  }
+
+  async baseAllowsUpToDateAutoMerge(): Promise<boolean> {
+    const branch = encodeURIComponent(this.config.baseRef);
+    const rules = await this.readApi(`repos/${this.config.repo}/rules/branches/${branch}`);
+    const protection = await this.readApi(`repos/${this.config.repo}/branches/${branch}/protection`);
+    let pullRequestsRequired = false;
+    const strictChecks = new Set<string>();
+
+    if (Array.isArray(rules)) {
+      for (const raw of rules) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const rule = raw as Record<string, unknown>;
+        if (rule.type === "pull_request") pullRequestsRequired = true;
+        if (rule.type !== "required_status_checks") continue;
+        const parameters = objectOrNull(rule.parameters);
+        if (parameters?.strict_required_status_checks_policy !== true) continue;
+        addRequiredCheckContexts(strictChecks, parameters.required_status_checks);
+      }
+    }
+
+    const classic = objectOrNull(protection);
+    if (classic) {
+      if (objectOrNull(classic.required_pull_request_reviews)) pullRequestsRequired = true;
+      const statusChecks = objectOrNull(classic.required_status_checks);
+      if (statusChecks?.strict === true) {
+        addRequiredCheckContexts(strictChecks, statusChecks.contexts);
+        addRequiredCheckContexts(strictChecks, statusChecks.checks);
+      }
+    }
+
+    return pullRequestsRequired
+      && this.config.delivery.requiredChecks.every((name) => strictChecks.has(name));
   }
 
   async enableAutoMerge(number: number, candidateSha: string): Promise<void> {
@@ -186,6 +219,11 @@ export class GitHubClient {
       timeoutMs,
       maxTailBytes: GH_OUTPUT_BYTES,
     });
+  }
+
+  private async readApi(endpoint: string): Promise<unknown | null> {
+    const result = await this.run(["api", endpoint]);
+    return result.exitCode === 0 ? parseJson(result.stdoutTail, endpoint) : null;
   }
 }
 
@@ -289,35 +327,59 @@ function parseWorkflowRun(value: unknown, index: number): {
   };
 }
 
-function summarizeChecks(value: unknown): GhCheckSummary {
-  if (!Array.isArray(value) || value.length === 0) return { state: "none", failures: [], pending: [] };
+export function summarizeChecks(value: unknown, requiredChecks: string[] = []): GhCheckSummary {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { state: "none", missing: [...requiredChecks], failures: [], pending: [] };
+  }
   const failures: GhCheckSummary["failures"] = [];
   const pending: GhCheckSummary["pending"] = [];
+  const observed = new Set<string>();
   for (const raw of value) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const check = raw as Record<string, unknown>;
     const name = stringOr(check.name, stringOr(check.context, "unnamed check"));
+    observed.add(name);
     const link = typeof check.detailsUrl === "string" ? check.detailsUrl
       : typeof check.targetUrl === "string" ? check.targetUrl
         : null;
     const conclusion = stringOr(check.conclusion, "").toUpperCase();
     const status = stringOr(check.status, stringOr(check.state, "UNKNOWN")).toUpperCase();
     const effective = conclusion || status;
-    if (["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(effective)) {
+    if (["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE", "NEUTRAL", "SKIPPED"].includes(effective)) {
       failures.push({ name, state: effective, link });
-    } else if (!["SUCCESS", "NEUTRAL", "SKIPPED"].includes(effective)) {
+    } else if (effective !== "SUCCESS") {
       pending.push({ name, state: effective || "PENDING", link });
     }
   }
+  const missing = requiredChecks.filter((name) => !observed.has(name));
   return failures.length > 0
-    ? { state: "failure", failures, pending }
-    : pending.length > 0
-      ? { state: "pending", failures, pending }
-      : { state: "success", failures, pending };
+    ? { state: "failure", missing, failures, pending }
+    : pending.length > 0 || missing.length > 0
+      ? { state: "pending", missing, failures, pending }
+      : { state: "success", missing, failures, pending };
 }
 
-function renderPullRequestBody(job: JobState): string {
-  const issues = job.issues.map((issue) => `- Closes #${issue.number}`).join("\n");
+function objectOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function addRequiredCheckContexts(target: Set<string>, value: unknown): void {
+  if (!Array.isArray(value)) return;
+  for (const entry of value) {
+    if (typeof entry === "string") target.add(entry);
+    else {
+      const object = objectOrNull(entry);
+      if (typeof object?.context === "string") target.add(object.context);
+    }
+  }
+}
+
+export function renderPullRequestBody(job: JobState): string {
+  const issues = job.issues
+    .map((issue) => `- ${job.plan.version === 2 ? "Issue" : "Closes"} #${issue.number}`)
+    .join("\n");
   const criteria = job.plan.releaseAcceptanceCriteria.length > 0
     ? job.plan.releaseAcceptanceCriteria.map((item) => `- ${item}`).join("\n")
     : "- No additional release-level acceptance criteria were declared.";
