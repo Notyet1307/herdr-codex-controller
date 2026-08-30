@@ -92,6 +92,7 @@ test("worker blockedKind is required and closed", () => {
   assert.equal(validateWorkerResult(blocked).blockedKind, "replan_required");
   assert.throws(() => validateWorkerResult({ ...blocked, blockedKind: "guess" }), /blockedKind is invalid/);
   assert.throws(() => validateWorkerResult({ ...blocked, observedRiskClasses: ["not-valid"] }), /observedRiskClasses is invalid/);
+  assert.throws(() => validateWorkerResult({ ...blocked, observedRiskClasses: ["AUTHORITY_BOUNDARY", "AUTHORITY_BOUNDARY"] }), /observedRiskClasses is invalid/);
   assert.throws(() => validateWorkerResult({ ...blocked, blockedKind: null }), /requires blockedReason and blockedKind/);
   assert.throws(() => validateWorkerResult({ ...blocked, status: "completed" }), /cannot include blockedReason or blockedKind/);
 });

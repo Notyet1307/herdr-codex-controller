@@ -45,7 +45,6 @@
     "observedRiskClasses": {
       "type": "array",
       "maxItems": 16,
-      "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" }
     },
     "blockedReason": { "type": ["string", "null"], "maxLength": 2000 },
