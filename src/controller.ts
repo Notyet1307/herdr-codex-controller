@@ -17,6 +17,7 @@ import type {
 } from "./types.js";
 import type { CodexPort, GitHubPort, GitPort, ValidationPort } from "./ports.js";
 import { ControllerError, asControllerError } from "./errors.js";
+import { createCompletionEvidence } from "./completion-export.js";
 import { CommandInterruptedError } from "./command.js";
 import { JobStore, blockJob, currentIssue, nextPendingIssue } from "./state.js";
 import { readJsonFile, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
@@ -26,6 +27,7 @@ import {
   isReleasePlanV2,
   oracleVerifierProtectedPaths,
 } from "./plan.js";
+import { assertValidationReceipt } from "./validator.js";
 import {
   renderIssueWorkerPrompt,
   renderReleaseHardeningPrompt,
@@ -1039,6 +1041,17 @@ export class ReleaseController {
       if (error instanceof ControllerError) throw error;
       throw new ControllerError("merge_commit_unverified", "The merge commit cannot be read from Git or is not an ancestor of the current remote base.");
     }
+    if (isReleasePlanV2(job.plan)
+      && this.deps.store.config.executionMode === "release-plan-v2-direct"
+      && this.deps.store.config.review.enabled) {
+      job.completion = createCompletionEvidence({
+        job,
+        config: this.deps.store.config,
+        jobRoot: this.deps.store.root(job.id),
+        mergedAt,
+        mergedMainSha: job.pullRequest.mergeSha,
+      });
+    }
     job.status = "completed";
     job.phase = "complete";
     job.blocked = null;
@@ -1265,45 +1278,6 @@ function renderReviewFailure(review: ReviewResult): string {
 function blockingFindings(review: ReviewResult, severities: Array<"critical" | "major">) {
   const allowed = new Set(severities);
   return review.findings.filter((finding) => allowed.has(finding.severity as "critical" | "major"));
-}
-
-function assertValidationReceipt(receipt: ValidationReceipt): void {
-  if (!receipt || receipt.version !== 2
-    || !receipt.id
-    || !["setup", "issue", "release"].includes(receipt.scope)
-    || (receipt.scope === "issue"
-      ? !Number.isSafeInteger(receipt.issueNumber) || Number(receipt.issueNumber) < 1
-      : receipt.issueNumber !== null)
-    || !/^[a-f0-9]{40}$/.test(receipt.candidateSha)
-    || !/^[a-f0-9]{64}$/.test(receipt.sourceWorktreeDigest)
-    || !Number.isSafeInteger(receipt.commandCount)
-    || receipt.commandCount < 0
-    || !Array.isArray(receipt.commands)
-    || !Number.isFinite(Date.parse(receipt.createdAt))) {
-    throw new ControllerError("validation_receipt_invalid", "Validation receipt structure is invalid.");
-  }
-  for (const command of receipt.commands) {
-    if (!command.command
-      || !Array.isArray(command.oracles)
-      || !Number.isSafeInteger(command.timeoutMs)
-      || command.timeoutMs < 1_000
-      || command.oracles.some((oracle) => !Number.isSafeInteger(oracle.issueNumber) || oracle.issueNumber < 1 || !oracle.oracleId)
-      || !/^sha256:[a-f0-9]{64}$/.test(command.stdoutSha256)
-      || !/^sha256:[a-f0-9]{64}$/.test(command.stderrSha256)
-      || !command.stdoutPath
-      || !command.stderrPath
-      || !Number.isFinite(Date.parse(command.verifiedAt))) {
-      throw new ControllerError("validation_receipt_invalid", `Validation receipt ${receipt.id} command evidence is invalid.`);
-    }
-  }
-  const commandsPassed = receipt.commands.length === receipt.commandCount && receipt.commands.every((command) => (
-    command.exitCode === 0 && command.signal === null && !command.timedOut
-  ));
-  if (receipt.passed !== commandsPassed) {
-    throw new ControllerError("validation_receipt_invalid", `Validation receipt ${receipt.id} pass state is invalid.`);
-  }
-  const { digest, ...identity } = receipt;
-  if (digest !== digestJson(identity)) throw new ControllerError("validation_receipt_invalid", `Validation receipt ${receipt.id} failed its self-digest.`);
 }
 
 function stepResult(action: string, progressed: boolean, terminal: boolean, retryAfterMs: number | null, message: string): StepResult {

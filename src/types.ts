@@ -453,6 +453,57 @@ export type DispatcherStepResult = {
   jobId: string | null;
 };
 
+export type JobCompletionEvidence = {
+  version: 1;
+  planDigest: string;
+  controllerProvenanceDigest: string;
+  sourceBaseSha: string;
+  candidateSha: string;
+  issueCommits: Array<{ issueNumber: number; sha: string }>;
+  releaseValidationDigest: string;
+  reviewResultDigest: string;
+  pullRequest: {
+    number: number;
+    headRef: string;
+    baseRef: string;
+    headSha: string;
+    mergeSha: string;
+    mergedAt: string;
+  };
+  mergedMainSha: string;
+  requiredChecks: string[];
+  dependencyHandoffDigests: string[];
+  completedAt: string;
+  digest: string;
+};
+
+export type ReleaseCompletionV1 = {
+  schema: "herdr-codex-controller:release-completion:v1";
+  releaseId: string;
+  repo: string;
+  baseRef: string;
+  planDigest: string;
+  sourceBaseSha: string;
+  candidateSha: string;
+  issueCommits: Array<{ issueNumber: number; sha: string }>;
+  releaseValidationDigest: string;
+  reviewResultDigest: string;
+  pullRequest: {
+    number: number;
+    headRef: string;
+    headSha: string;
+    baseRef: string;
+    mergeSha: string;
+    mergedAt: string;
+  };
+  requiredChecks: string[];
+  mergedMainSha: string;
+  dependencyHandoffDigests: string[];
+  controllerProvenance: ControllerProvenance;
+  completedAt: string;
+  digest: string;
+};
+
 export type JobState = {
   version: 2;
   id: string;
@@ -495,6 +546,7 @@ export type JobState = {
   lastReviewPath: string | null;
   hardeningReasonPath: string | null;
   pullRequest: PullRequestState | null;
+  completion: JobCompletionEvidence | null;
   blocked: BlockedState | null;
   retryAuthorizations: RetryAuthorization[];
   createdAt: string;

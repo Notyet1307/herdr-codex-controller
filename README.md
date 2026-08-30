@@ -25,7 +25,11 @@ node dist/src/cli.js start \
 
 The Job atomically snapshots the Controller commit, canonical tracked-source manifest digest, executable build/package digest, execution mode, config digest, and Release Plan version/digest. Every execution step compares the current identity with that snapshot and blocks on drift. `config validate`, `doctor`, `start`, and `status` expose the relevant identity; `status.provenanceMatches` is the readback comparison.
 
-The pinned schemas are [`release-plan-v1.schema.json`](./schemas/release-plan-v1.schema.json), [`release-plan-v2.schema.json`](./schemas/release-plan-v2.schema.json), and the [`oneOf` aggregate entry point](./schemas/release-plan.schema.json). No Planner/Controller cross-repository canary is claimed by this repository change alone.
+The pinned schemas are [`release-plan-v1.schema.json`](./schemas/release-plan-v1.schema.json), [`release-plan-v2.schema.json`](./schemas/release-plan-v2.schema.json), the [`oneOf` aggregate entry point](./schemas/release-plan.schema.json), and the public [`release-completion-v1.schema.json`](./schemas/release-completion-v1.schema.json). A verified merged Job exports deterministic completion proof without exposing private `job.json`:
+
+```bash
+node dist/src/cli.js completion export --config /private/controller.json --job RELEASE_ID --out /public/release-completion.json --json
+```
 
 The v2 example contains format-valid placeholder hashes; replace every source/expected value with the approved Planner handoff rather than attempting to run it unchanged.
 

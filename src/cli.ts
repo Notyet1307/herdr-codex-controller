@@ -25,6 +25,7 @@ import { assertDispatcherCompatible, loadDispatcherConfig } from "./dispatcher-c
 import { IssueDispatcher } from "./dispatcher.js";
 import type { DispatcherStepResult } from "./types.js";
 import { createControllerProvenance, readControllerIdentity } from "./provenance.js";
+import { exportReleaseCompletion } from "./completion-export.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -153,6 +154,17 @@ async function main(): Promise<void> {
       : summarizeJob(job, currentProvenance));
     return;
   }
+  if (args.command === "completion-export") {
+    const artifact = await withControllerLock(store.repositoryLockPath(), () => exportReleaseCompletion({
+      store,
+      git,
+      github,
+      jobId,
+      outputPath: requiredOption(args, "out"),
+    }));
+    output(args, artifact);
+    return;
+  }
 
   await withControllerLock(store.repositoryLockPath(), async () => {
     if (args.command !== "cleanup") {
@@ -246,7 +258,7 @@ async function main(): Promise<void> {
 }
 
 type ParsedArgs = {
-  command: "help" | "config-validate" | "plan-validate" | "doctor" | "start" | "status" | "step" | "run" | "retry" | "abort" | "cleanup" | "dispatch" | "dispatch-status" | "dispatch-retry";
+  command: "help" | "config-validate" | "plan-validate" | "completion-export" | "doctor" | "start" | "status" | "step" | "run" | "retry" | "abort" | "cleanup" | "dispatch" | "dispatch-status" | "dispatch-retry";
   options: Record<string, string | boolean>;
 };
 
@@ -256,6 +268,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let offset = 1;
   if (argv[0] === "config" && argv[1] === "validate") { command = "config-validate"; offset = 2; }
   else if (argv[0] === "plan" && argv[1] === "validate") { command = "plan-validate"; offset = 2; }
+  else if (argv[0] === "completion" && argv[1] === "export") { command = "completion-export"; offset = 2; }
   else if (argv[0] === "dispatch" && argv[1] === "status") { command = "dispatch-status"; offset = 2; }
   else if (argv[0] === "dispatch" && argv[1] === "retry") { command = "dispatch-retry"; offset = 2; }
   else if (argv[0] === "dispatch") { command = "dispatch"; offset = 1; }
@@ -457,7 +470,7 @@ function nextAction(job: JobState): string {
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate  --config PATH [--json]\n  plan validate    --config PATH --plan PATH [--json]\n  doctor           --config PATH [--json]\n  start            --config PATH --plan PATH [--json]\n                   v2 requires --expected-config-digest 64HEX --expected-controller-revision 40HEX --expected-controller-provenance-digest 64HEX\n  status           --config PATH --job ID [--operator] [--json]\n  step             --config PATH --job ID [--json]\n  run              --config PATH --job ID [--max-steps N] [--json]\n  retry            --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort            --config PATH --job ID --reason TEXT [--json]\n  cleanup          --config PATH --job ID [--json]\n  dispatch         --config PATH --dispatcher PATH [--max-steps N] [--json]\n  dispatch status  --config PATH --dispatcher PATH [--json]\n  dispatch retry   --config PATH --dispatcher PATH --reason TEXT [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate    --config PATH [--json]\n  plan validate      --config PATH --plan PATH [--json]\n  completion export  --config PATH --job ID --out FILE [--json]\n  doctor             --config PATH [--json]\n  start              --config PATH --plan PATH [--json]\n                     v2 requires --expected-config-digest 64HEX --expected-controller-revision 40HEX --expected-controller-provenance-digest 64HEX\n  status             --config PATH --job ID [--operator] [--json]\n  step               --config PATH --job ID [--json]\n  run                --config PATH --job ID [--max-steps N] [--json]\n  retry              --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort              --config PATH --job ID --reason TEXT [--json]\n  cleanup            --config PATH --job ID [--json]\n  dispatch           --config PATH --dispatcher PATH [--max-steps N] [--json]\n  dispatch status    --config PATH --dispatcher PATH [--json]\n  dispatch retry     --config PATH --dispatcher PATH --reason TEXT [--json]\n`);
 }
 
 main().catch((error) => {

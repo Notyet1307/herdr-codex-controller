@@ -287,6 +287,16 @@ node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE
 
 `status` 同时返回 Job 的 exact `provenance`、当前 `currentProvenance` 和 `provenanceMatches`。Planner 集成应调用这些公开 CLI，而不是读取 Controller 私有 `job.json`；Controller 也不会让 Planner 读取任何 Job 私有状态。
 
+verified merged Job 可导出 deterministic public completion artifact；命令会重新验证 private receipt/review、PR/checks、merge 与 provenance，输出不含私有路径、日志或 Issue body：
+
+```bash
+node dist/src/cli.js completion export \
+  --config /PRIVATE/PATH/controller.json \
+  --job RELEASE_ID \
+  --out /PUBLIC/PATH/release-completion.json \
+  --json
+```
+
 ## 人工操作
 
 Job blocked 后，先处理真实原因，再显式授权一次 fresh retry：

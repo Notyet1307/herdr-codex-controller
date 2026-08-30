@@ -857,7 +857,11 @@ test("production v2 completes only after exact candidate, required checks, and m
     github.merged = true;
     const result = await controller.step(job.id);
     assert.equal(result.action, "release_merged");
-    assert.equal(store.load(job.id).status, "completed");
+    const completed = store.load(job.id);
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.completion?.candidateSha, completed.candidateSha);
+    assert.equal(completed.completion?.pullRequest.mergeSha, github.mergeSha);
+    assert.deepEqual(completed.completion?.requiredChecks, ["verify"]);
   } finally { repo.cleanup(); }
 });
 

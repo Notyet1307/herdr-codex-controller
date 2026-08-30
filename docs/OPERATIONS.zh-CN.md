@@ -133,6 +133,8 @@ Job blocked 时可以人工修复，但必须：
 
 Release validation 或 aggregate review 完成后，Controller 按以下 durability 顺序处理：先落盘 receipt/result，再将 path、digest、candidate SHA、Codex run record、review round/last review path 原子 checkpoint 到 `job.json`，最后判断 Worktree/diff policy、Review 结论或 hardening budget。进程在 checkpoint 后退出时，重启会保留这些 binding，不会把 round 或 last evidence 回退到上一轮。
 
+verified merge 完成时还会原子保存 immutable completion checkpoint，绑定 exact candidate、Issue commits、release validation/review digest、PR/merge/checks、与 verified merge SHA 相同的 exact merged main、handoff digests 和 provenance。`completion export` 只从该 checkpoint 与重新验证的 private evidence 生成 public allowlist artifact；旧的 local-only 或无 checkpoint Job 不可导出。
+
 `release_hardening_exhausted` 由 `scheduleHardening` 直接保存为 `replan_required`，不依赖异常后的 reload。排查时应同时核对：
 
 - `blocked.detailsPath` 是本轮 exact receipt/result；
