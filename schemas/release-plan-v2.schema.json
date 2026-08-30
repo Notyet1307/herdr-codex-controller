@@ -182,7 +182,7 @@
     "oracleBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "id", "owner", "artifact", "execution", "workerMutationAllowed"],
+      "required": ["schema", "id", "owner", "artifact", "execution", "verifier", "workerMutationAllowed"],
       "properties": {
         "schema": { "const": "pi-ticket-planning:oracle-binding:v1" },
         "id": { "type": "string", "pattern": "^O(?:0[1-9][0-9]*|[1-9][0-9]*)$" },
@@ -215,7 +215,44 @@
             "command": { "type": "string", "pattern": "^npm run verify:[A-Za-z0-9:_-]+$", "maxLength": 512 }
           }
         },
+        "verifier": { "$ref": "#/$defs/oracleVerifierManifest" },
         "workerMutationAllowed": { "const": false }
+      }
+    },
+    "oracleVerifierManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "oracleId", "command", "packageScript", "files", "digest"],
+      "properties": {
+        "schema": { "const": "herdr-codex-controller:oracle-verifier-manifest:v1" },
+        "oracleId": { "type": "string", "pattern": "^O(?:0[1-9][0-9]*|[1-9][0-9]*)$" },
+        "command": { "type": "string", "pattern": "^npm run verify:[A-Za-z0-9:_-]+$", "maxLength": 512 },
+        "packageScript": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "definitionSha256"],
+          "properties": {
+            "name": { "type": "string", "pattern": "^verify:[A-Za-z0-9:_-]+$", "maxLength": 256 },
+            "definitionSha256": { "$ref": "#/$defs/prefixedSha256" }
+          }
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256", "byteCount"],
+            "properties": {
+              "path": { "$ref": "#/$defs/repoPath" },
+              "sha256": { "$ref": "#/$defs/prefixedSha256" },
+              "byteCount": { "type": "integer", "minimum": 0, "maximum": 67108864 }
+            }
+          }
+        },
+        "digest": { "$ref": "#/$defs/prefixedSha256" }
       }
     }
   }

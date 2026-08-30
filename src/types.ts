@@ -134,7 +134,24 @@ export type OracleBindingV1 = {
   execution: {
     command: string;
   };
+  verifier: OracleVerifierManifestV1;
   workerMutationAllowed: false;
+};
+
+export type OracleVerifierManifestV1 = {
+  schema: "herdr-codex-controller:oracle-verifier-manifest:v1";
+  oracleId: string;
+  command: string;
+  packageScript: {
+    name: string;
+    definitionSha256: string;
+  };
+  files: Array<{
+    path: string;
+    sha256: string;
+    byteCount: number;
+  }>;
+  digest: string;
 };
 
 export type ScopeBudget = {
@@ -232,23 +249,44 @@ export type ReviewResult = {
 
 export type ValidationCommandResult = {
   command: string;
+  oracles: OracleExecutionRef[];
+  timeoutMs: number;
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
   durationMs: number;
   stdoutPath: string;
   stderrPath: string;
+  stdoutSha256: string;
+  stderrSha256: string;
   stdoutTail: string;
   stderrTail: string;
+  verifiedAt: string;
+};
+
+export type OracleExecutionRef = {
+  issueNumber: number;
+  oracleId: string;
+};
+
+export type ValidationCommandConfig = CommandConfig & {
+  oracles?: OracleExecutionRef[];
+};
+
+export type RepositoryFileSnapshot = {
+  sha256: string;
+  byteCount: number;
+  bytes: Uint8Array;
 };
 
 export type ValidationReceipt = {
-  version: 1;
+  version: 2;
   id: string;
   scope: "setup" | "issue" | "release";
   issueNumber: number | null;
   candidateSha: string;
   sourceWorktreeDigest: string;
+  commandCount: number;
   passed: boolean;
   commands: ValidationCommandResult[];
   createdAt: string;

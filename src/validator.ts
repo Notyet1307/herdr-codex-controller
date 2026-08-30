@@ -1,14 +1,15 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
-  CommandConfig,
   ControllerConfig,
   JobState,
+  ValidationCommandConfig,
   ValidationCommandResult,
   ValidationReceipt,
 } from "./types.js";
 import { runCommand } from "./command.js";
 import { ensurePrivateDir, writeJsonAtomic } from "./fs-atomic.js";
-import { digestJson, newId, nowIso } from "./util.js";
+import { digestJson, newId, nowIso, sha256 } from "./util.js";
 
 export class Validator {
   constructor(private readonly config: ControllerConfig) {}
@@ -17,7 +18,7 @@ export class Validator {
     job: JobState;
     scope: "setup" | "issue" | "release";
     issueNumber: number | null;
-    commands: CommandConfig[];
+    commands: ValidationCommandConfig[];
     validationsRoot: string;
     sourceHeadSha: string;
     sourceWorktreeDigest: string;
@@ -25,15 +26,19 @@ export class Validator {
     const id = newId(`${input.scope}-validation`);
     const root = ensurePrivateDir(join(input.validationsRoot, id));
     const results: ValidationCommandResult[] = [];
+    let oracleFailed = false;
     for (let index = 0; index < input.commands.length; index += 1) {
       const command = input.commands[index]!;
+      const oracles = command.oracles ?? [];
+      const timeoutMs = command.timeoutMs ?? 30 * 60_000;
+      if (oracleFailed && oracles.length === 0) break;
       const stdoutPath = join(root, `${String(index + 1).padStart(2, "0")}.stdout.log`);
       const stderrPath = join(root, `${String(index + 1).padStart(2, "0")}.stderr.log`);
       const result = await runCommand({
         command: this.config.shell,
         args: ["-lc", command.command],
         cwd: input.job.worktreePath,
-        timeoutMs: command.timeoutMs ?? 30 * 60_000,
+        timeoutMs,
         terminationGraceMs: this.config.codex.terminationGraceMs,
         stdoutPath,
         stderrPath,
@@ -46,24 +51,33 @@ export class Validator {
       });
       results.push({
         command: command.command,
+        oracles,
+        timeoutMs,
         exitCode: result.exitCode,
         signal: result.signal,
         timedOut: result.timedOut,
         durationMs: result.durationMs,
         stdoutPath,
         stderrPath,
+        stdoutSha256: `sha256:${sha256(readFileSync(stdoutPath))}`,
+        stderrSha256: `sha256:${sha256(readFileSync(stderrPath))}`,
         stdoutTail: result.stdoutTail,
         stderrTail: result.stderrTail,
+        verifiedAt: nowIso(),
       });
-      if (result.exitCode !== 0 || result.signal !== null || result.timedOut) break;
+      if (result.exitCode !== 0 || result.signal !== null || result.timedOut) {
+        if (oracles.length === 0) break;
+        oracleFailed = true;
+      }
     }
     const identity = {
-      version: 1 as const,
+      version: 2 as const,
       id,
       scope: input.scope,
       issueNumber: input.issueNumber,
       candidateSha: input.sourceHeadSha,
       sourceWorktreeDigest: input.sourceWorktreeDigest,
+      commandCount: input.commands.length,
       passed: results.length === input.commands.length && results.every((entry) => (
         entry.exitCode === 0 && entry.signal === null && !entry.timedOut
       )),

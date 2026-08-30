@@ -48,6 +48,33 @@
             "byteCount": 128
           },
           "execution": { "command": "npm run verify:oracle:o01" },
+          "verifier": {
+            "schema": "herdr-codex-controller:oracle-verifier-manifest:v1",
+            "oracleId": "O01",
+            "command": "npm run verify:oracle:o01",
+            "packageScript": {
+              "name": "verify:oracle:o01",
+              "definitionSha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+            },
+            "files": [
+              {
+                "path": "schemas/o01.schema.json",
+                "sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+                "byteCount": 256
+              },
+              {
+                "path": "scripts/lib/o01-helper.mjs",
+                "sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                "byteCount": 512
+              },
+              {
+                "path": "scripts/verify-o01.mjs",
+                "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "byteCount": 384
+              }
+            ],
+            "digest": "sha256:6c43ef7bfcc6cf0a29a784301ab25013fd758d53d8ccca44158aa7e97636789e"
+          },
           "workerMutationAllowed": false
         }
       ],

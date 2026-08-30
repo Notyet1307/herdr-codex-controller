@@ -26,6 +26,7 @@
       { "command": "npm run typecheck", "timeoutMs": 900000 }
     ],
     "release": [
+      { "command": "npm run verify:oracle:o01", "timeoutMs": 900000 },
       { "command": "npm run typecheck", "timeoutMs": 900000 },
       { "command": "npm test", "timeoutMs": 1800000 },
       { "command": "npm run build", "timeoutMs": 900000 }

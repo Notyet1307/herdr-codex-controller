@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { ControllerConfig, JobState } from "./types.js";
+import type { ControllerConfig, JobState, RepositoryFileSnapshot } from "./types.js";
 import { runCommand, requireCommandSuccess } from "./command.js";
 import { ensurePrivateDir } from "./fs-atomic.js";
 import { digestJson, pathWithin, sha256 } from "./util.js";
@@ -126,7 +126,7 @@ export class GitClient {
     return [...new Set(`${tracked}\0${untracked}`.split("\0").filter(Boolean))].sort();
   }
 
-  async fileAtRevision(revision: string, path: string): Promise<{ sha256: string; byteCount: number }> {
+  async fileAtRevision(revision: string, path: string): Promise<RepositoryFileSnapshot> {
     assertSha(revision);
     assertSafeRepoPath(path);
     const tree = await this.textRawBounded(this.config.localPath, ["ls-tree", "-z", revision, "--", path], 8_192);
@@ -135,7 +135,7 @@ export class GitClient {
     return fileBinding(gitBytes(this.config.localPath, ["show", `${revision}:${path}`]));
   }
 
-  async fileInWorktree(job: JobState, path: string): Promise<{ sha256: string; byteCount: number }> {
+  async fileInWorktree(job: JobState, path: string): Promise<RepositoryFileSnapshot> {
     assertSafeRepoPath(path);
     const root = realpathSync(job.worktreePath);
     let current = root;
@@ -209,6 +209,13 @@ export class GitClient {
     ].join("\n");
     await this.success(job.worktreePath, ["commit", "-m", subject, "-m", body], "git commit issue");
     return { sha: await this.head(job.worktreePath), created: true };
+  }
+
+  async commitParent(job: JobState, sha: string): Promise<string> {
+    assertSha(sha);
+    const parent = await this.text(job.worktreePath, ["rev-parse", `${sha}^1`]);
+    assertSha(parent);
+    return parent;
   }
 
   async salvageIssueCommitAtHead(job: JobState, issueNumber: number): Promise<string | null> {
@@ -344,9 +351,9 @@ function assertSafeRepoPath(value: string): void {
   }
 }
 
-function fileBinding(bytes: Uint8Array): { sha256: string; byteCount: number } {
+function fileBinding(bytes: Uint8Array): RepositoryFileSnapshot {
   if (bytes.byteLength > ORACLE_MAX_BYTES) throw new Error("Oracle artifact exceeds the byte bound");
-  return { sha256: `sha256:${sha256(bytes)}`, byteCount: bytes.byteLength };
+  return { sha256: `sha256:${sha256(bytes)}`, byteCount: bytes.byteLength, bytes };
 }
 
 function gitBytes(cwd: string, args: string[]): Uint8Array {

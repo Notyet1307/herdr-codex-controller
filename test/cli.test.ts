@@ -124,9 +124,9 @@ test("CLI plan validate and start reject an uncovered Oracle command", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    config.validation.release = config.validation.release
-      .filter(({ command }) => command !== "npm run verify:oracle");
     const plan = testPlanV2(repo, [1]);
+    config.validation.release = config.validation.release
+      .filter(({ command }) => command !== plan.issues[0]!.oracleBindings[0]!.execution.command);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const cli = resolve("dist/src/cli.js");
     for (const command of [["plan", "validate"], ["start"]]) {

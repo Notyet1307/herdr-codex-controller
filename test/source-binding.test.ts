@@ -452,8 +452,28 @@ test("every v2 Issue commit enforces its scope budget, including crash salvage",
         job.currentIssueNumber = 1;
         job.issues[0]!.status = "running";
         writeFileSync(join(job.worktreePath, "issue-1.txt"), "one\ntwo\n", "utf8");
-        await git.commitIssue(job, 1, "Issue 1", false);
+        const binding = plan.issues[0]!.oracleBindings[0]!;
+        const command = config.validation.release.find((entry) => entry.command === binding.execution.command)!;
+        const validation = await new Validator(config).run({
+          job,
+          scope: "issue",
+          issueNumber: 1,
+          commands: [{ ...command, oracles: [{ issueNumber: 1, oracleId: binding.id }] }],
+          validationsRoot: store.validationsRoot(job.id),
+          sourceHeadSha: await git.head(job.worktreePath),
+          sourceWorktreeDigest: await git.worktreeDigest(job.worktreePath),
+        });
+        job.validations.push({
+          id: validation.receipt.id,
+          scope: "issue",
+          issueNumber: 1,
+          path: validation.path,
+          passed: true,
+          digest: validation.receipt.digest,
+        });
+        job.issues[0]!.lastValidationId = validation.receipt.id;
         store.save(job);
+        await git.commitIssue(job, 1, "Issue 1", false);
       } else {
         assert.equal((await controller.step(created.id)).action, "worker_completed");
       }
