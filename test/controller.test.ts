@@ -191,7 +191,7 @@ test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", asy
             selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
             testsRun: [],
             residualRisks: [],
-            observedRiskClasses: ["FIXTURE_BEHAVIOR"],
+            observedRiskClasses: ["BOUNDED_BEHAVIOR_CHANGE"],
             blockedReason: "Repair requires changing accepted ADR, Issue scope, and dependency handoff.",
             blockedKind: "replan_required",
           },

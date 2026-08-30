@@ -78,7 +78,7 @@ v2 Job 的第一次 `step` 只在 Controller provenance、git/GitHub/Codex prefl
 
 blocked 分为两类：
 
-- `replan_required`：当前 Job 的终态阻断。`blocked.message` 保留原始 cause code；至少包括 `release_hardening_exhausted`、`release_diff_too_large`、source-bound Plan/Parent/Child drift、`oracle_binding_drift`、`protected_path_changed`、`issue_scope_budget_exceeded`、`issue_scope_path_drift`、`hardening_scope_unattributed`、`issue_risk_class_drift`，以及 Worker 确认必须改变未包含 Issue scope、accepted ADR、source-bound Plan 或 dependency handoff 的 finding。同一 Job 禁止 retry；必须保存证据、`abort`，回到 Planner 生成并批准新的公开 Release Plan v2，再用新 Release ID 启动新 Job。
+- `replan_required`：当前 Job 的终态阻断。`blocked.message` 保留原始 cause code；至少包括 `release_hardening_exhausted`、`release_diff_too_large`、source-bound Plan/Parent/Child drift、`oracle_binding_drift`、`protected_path_changed`、`issue_scope_budget_exceeded`、`issue_scope_path_drift`、`hardening_scope_unattributed`、`unknown_risk_class`、`issue_risk_class_drift`，以及 Worker 确认必须改变未包含 Issue scope、accepted ADR、source-bound Plan 或 dependency handoff 的 finding。同一 Job 禁止 retry；必须保存证据、`abort`，回到 Planner 生成并批准新的公开 Release Plan v2，再用新 Release ID 启动新 Job。
 - 可恢复阻断：不改变 product scope、Plan、base SHA、Issue snapshot、ADR 或 dependency handoff 的暂态事实，例如基础设施/Provider 故障、凭据重新登录、恢复 exact config，或已修复的本地依赖。只有这类阻断可 retry。
 
 常见 cause/recoverable code：

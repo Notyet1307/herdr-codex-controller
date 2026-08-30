@@ -357,6 +357,39 @@ test("v2 config drift blocks before source verification side effects", async () 
   } finally { repo.cleanup(); }
 });
 
+test("persisted v2 Jobs revalidate canonical risks and expected paths before later-phase side effects", async () => {
+  for (const [kind, mutate, cause] of [
+    ["risk", (plan: any) => { plan.issues[0].riskClasses = ["BOUNDED_CHANGE"]; }, "unknown_risk_class"],
+    ["path", (plan: any) => { plan.issues[0].expectedPaths = ["*.ts"]; }, "invalid_expected_path_pattern"],
+  ] as const) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const plan = testPlanV2(repo, [1]);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const git = new CountingGit(config);
+      const validator = new CountingValidator(config);
+      const codex = new FakeCodex(git);
+      const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      const job = store.load(created.id);
+      mutate(job.plan);
+      job.planDigest = digestJson(job.plan);
+      job.provenance = store.currentProvenance(job.plan);
+      job.phase = "release_validate";
+      job.status = "running";
+      store.save(job);
+      const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator });
+      assert.equal((await controller.step(job.id)).action, "blocked", kind);
+      const blocked = store.load(job.id);
+      assert.equal(blocked.blocked?.code, "replan_required", kind);
+      assert.match(blocked.blocked?.message ?? "", new RegExp(cause), kind);
+      assert.equal(validator.calls, 0, kind);
+      assert.equal(codex.calls.length, 0, kind);
+    } finally { repo.cleanup(); }
+  }
+});
+
 test("Controller source or build provenance drift blocks before source verification side effects", async () => {
   for (const field of ["sourceManifestDigest", "buildDigest"] as const) {
     const repo = createTestRepo();
@@ -398,8 +431,8 @@ test("Controller source or build provenance drift blocks before source verificat
   }
 });
 
-test("v2 Worker Oracle or risk drift is terminal REPLAN_REQUIRED before validation or commit", async () => {
-  for (const kind of ["oracle", "risk"] as const) {
+test("v2 Worker Oracle, risk-set drift, or unknown risk is terminal REPLAN_REQUIRED before validation or commit", async () => {
+  for (const kind of ["oracle", "risk", "unknown"] as const) {
     const repo = createTestRepo();
     try {
       const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
@@ -411,7 +444,12 @@ test("v2 Worker Oracle or risk drift is terminal REPLAN_REQUIRED before validati
         if (runKind !== "worker") return {};
         if (kind === "oracle") writeFileSync(join(job.worktreePath, "fixtures/oracle.json"), "{\"ok\":false}\n", "utf8");
         else writeFileSync(join(job.worktreePath, "issue-1.txt"), "implemented\n", "utf8");
-        return { worker: completedWorker("done", kind === "risk" ? ["FIXTURE_BEHAVIOR", "NEW_BOUNDARY"] : ["FIXTURE_BEHAVIOR"]) };
+        const observed = kind === "risk"
+          ? ["BOUNDED_BEHAVIOR_CHANGE", "AUTHORITY_BOUNDARY"]
+          : kind === "unknown"
+            ? ["BOUNDED_BEHAVIOR_CHANGE", "NEW_BOUNDARY"]
+            : ["BOUNDED_BEHAVIOR_CHANGE"];
+        return { worker: completedWorker("done", observed) };
       });
       const validator = new CountingValidator(config);
       const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator });
@@ -420,7 +458,7 @@ test("v2 Worker Oracle or risk drift is terminal REPLAN_REQUIRED before validati
       assert.equal((await controller.step(created.id)).action, "blocked");
       const blocked = store.load(created.id);
       assert.equal(blocked.blocked?.code, "replan_required");
-      assert.match(blocked.blocked?.message ?? "", kind === "oracle" ? /oracle_binding_drift/ : /issue_risk_class_drift/);
+      assert.match(blocked.blocked?.message ?? "", kind === "oracle" ? /oracle_binding_drift/ : kind === "unknown" ? /unknown_risk_class/ : /issue_risk_class_drift/);
       assert.equal(validator.calls, 1);
       assert.equal(git.commitCalls, 0);
       assert.throws(() => retryBlockedJob(blocked), (error: any) => error?.code === "replan_required");
@@ -441,7 +479,7 @@ test("every v2 Issue commit enforces its scope budget, including crash salvage",
       const codex = new FakeCodex(git, async ({ job, kind }) => {
         if (kind !== "worker") return {};
         writeFileSync(join(job.worktreePath, "issue-1.txt"), "one\ntwo\n", "utf8");
-        return { worker: completedWorker("done", ["FIXTURE_BEHAVIOR"]) };
+        return { worker: completedWorker("done", ["BOUNDED_BEHAVIOR_CHANGE"]) };
       });
       const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator: new Validator(config) });
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -502,7 +540,7 @@ test("v2 release hardening cannot modify a protected Oracle or bypass replan", a
       if (kind === "review") return { review: { status: "changes", summary: "hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fixture", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
       if (kind === "release-harden") {
         writeFileSync(join(job.worktreePath, "fixtures/oracle.json"), "{\"changed\":true}\n", "utf8");
-        return { worker: completedWorker("hardening", ["FIXTURE_BEHAVIOR"]) };
+        return { worker: completedWorker("hardening", ["BOUNDED_BEHAVIOR_CHANGE"]) };
       }
       return {};
     });
@@ -533,7 +571,7 @@ test("binary Issue changes cannot count as zero changed lines", async () => {
     const codex = new FakeCodex(git, async ({ job, kind }) => {
       if (kind !== "worker") return {};
       writeFileSync(join(job.worktreePath, "asset.bin"), new Uint8Array([0, 1, 2]));
-      return { worker: completedWorker("binary", ["FIXTURE_BEHAVIOR"]) };
+      return { worker: completedWorker("binary", ["BOUNDED_BEHAVIOR_CHANGE"]) };
     });
     const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator: new Validator(config) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -562,7 +600,7 @@ test("v2 hardening aggregate budget applies to normal and every salvage path", a
         if (kind === "review") return { review: { status: "changes", summary: "hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fixture", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
         if (kind === "release-harden") {
           writeFileSync(join(job.worktreePath, "issue-1.txt"), "issue 1\nhardened\n", "utf8");
-          return { worker: completedWorker("hardening", ["FIXTURE_BEHAVIOR"]) };
+          return { worker: completedWorker("hardening", ["BOUNDED_BEHAVIOR_CHANGE"]) };
         }
         return {};
       });

@@ -133,6 +133,8 @@ test("Release Plan v2 rejects every closed source-contract shape", () => {
       { name: "parent mismatch", mutate: (plan) => { plan.source.parentBinding.number += 1; }, pattern: /must equal plan\.parentIssue/ },
       { name: "validation commands", mutate: (plan) => { plan.issues[0].suggestedValidation = [{ command: "npm test" }]; }, pattern: /exactly \[\]/ },
       { name: "allow no-op", mutate: (plan) => { plan.issues[0].allowNoop = true; }, pattern: /must be false/ },
+      { name: "unknown risk class", mutate: (plan) => { plan.issues[0].riskClasses = ["BOUNDED_CHANGE"]; }, pattern: /unknown_risk_class/ },
+      { name: "root wildcard expected path", mutate: (plan) => { plan.issues[0].expectedPaths = ["*.ts"]; }, pattern: /invalid_expected_path_pattern/ },
       { name: "null objective", mutate: (plan) => { plan.issues[0].objective = null; }, pattern: /must be a string/ },
       { name: "too few criteria", mutate: (plan) => { plan.issues[0].acceptanceCriteria = ["one", "two"]; }, pattern: /3 to 8/ },
       { name: "too many criteria", mutate: (plan) => { plan.issues[0].acceptanceCriteria = Array.from({ length: 9 }, (_, index) => `criterion ${index}`); }, pattern: /at most 8/ },
@@ -146,6 +148,9 @@ test("Release Plan v2 rejects every closed source-contract shape", () => {
       fixture.mutate(plan);
       assert.throws(() => validatePlan(plan), fixture.pattern, fixture.name);
     }
+    const boundedWildcard = structuredClone(testPlanV2(repo)) as any;
+    boundedWildcard.issues[0].expectedPaths = ["src/*.ts"];
+    assert.doesNotThrow(() => validatePlan(boundedWildcard));
   } finally { repo.cleanup(); }
 });
 

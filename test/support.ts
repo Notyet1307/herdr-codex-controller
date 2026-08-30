@@ -224,7 +224,7 @@ export function testPlanV2(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlanV2
         verifier: oracleVerifierManifest(index),
         workerMutationAllowed: false,
       }],
-      riskClasses: ["FIXTURE_BEHAVIOR"],
+      riskClasses: ["BOUNDED_BEHAVIOR_CHANGE"],
       scopeBudget: { maxFiles: 8, maxChangedLines: 1_500 },
       expectedPaths: [`issue-${number}.txt`],
       protectedPaths: ["fixtures/oracle.json"],

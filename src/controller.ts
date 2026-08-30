@@ -18,6 +18,7 @@ import type {
 import type { CodexPort, GitHubPort, GitPort, ValidationPort } from "./ports.js";
 import { ControllerError, asControllerError } from "./errors.js";
 import { createCompletionEvidence } from "./completion-export.js";
+import { unknownRiskClasses } from "./risk-classes.js";
 import { CommandInterruptedError } from "./command.js";
 import { JobStore, blockJob, currentIssue, nextPendingIssue } from "./state.js";
 import { readJsonFile, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
@@ -26,6 +27,7 @@ import {
   assertPlanCompatibleWithConfig,
   isReleasePlanV2,
   oracleVerifierProtectedPaths,
+  validatePlan,
 } from "./plan.js";
 import { assertValidationReceipt } from "./validator.js";
 import {
@@ -90,6 +92,16 @@ export class ReleaseController {
   }
 
   private assertCurrentInputs(job: JobState): void {
+    try { validatePlan(job.plan); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = message.includes("unknown_risk_class")
+        ? "unknown_risk_class"
+        : message.includes("invalid_expected_path_pattern")
+          ? "invalid_expected_path_pattern"
+          : "plan_drift";
+      throw new ControllerError(code, message);
+    }
     const currentConfigDigest = digestJson(this.deps.store.config);
     if (currentConfigDigest !== job.configDigest) {
       throw new ControllerError("config_drift", "The current Controller config differs from the job-bound config snapshot.");
@@ -489,6 +501,14 @@ export class ReleaseController {
     const expected = issueNumber === null
       ? [...new Set(job.plan.issues.flatMap((issue) => issue.riskClasses))]
       : job.plan.issues.find((issue) => issue.number === issueNumber)?.riskClasses;
+    const unknown = unknownRiskClasses([...(expected ?? []), ...observed]);
+    if (unknown.length > 0) {
+      throw new ControllerError(
+        "unknown_risk_class",
+        `The Worker or Release Plan reported unknown risk classes: ${unknown.join(", ")}.`,
+        detailsPath,
+      );
+    }
     if (!expected || !sameStringSet(expected, observed)) {
       throw new ControllerError(
         "issue_risk_class_drift",
@@ -1243,6 +1263,7 @@ function owningIssues(issues: ReleasePlanIssueV2[], path: string): ReleasePlanIs
 }
 
 function expectedPathMatches(pattern: string, path: string): boolean {
+  if (pattern.split("/", 1)[0]?.includes("*")) return false;
   const source = pattern.split("*").map((part) => part.replace(/[|\\{}()[\]^$+?.]/gu, "\\$&")).join("[^/]*");
   return new RegExp(`^${source}$`, "u").test(path);
 }

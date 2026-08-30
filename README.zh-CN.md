@@ -174,7 +174,7 @@ Dispatcher 则只能使用 `dispatcher-experimental`；两种 opt-in 都不会�
 ## Release Plan v1 / v2
 
 - v1 是手工计划和旧集成的兼容格式；`parentIssue` 可为 `null`，Issue `objective` 可为 `null`，并保留既有 `suggestedValidation`、`allowNoop` 语义。
-- v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent/Child 精确 title/body hash、decision/predecessor/dependency digests，以及每个 Child 的 immutable Oracle、closed verifier manifest、risk classes、scope budget、expected write paths、protected paths 和 replan triggers。
+- v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent/Child 精确 title/body hash、decision/predecessor/dependency digests，以及每个 Child 的 immutable Oracle、closed verifier manifest、镜像 registry 中的 canonical risk classes、scope budget、首段无 wildcard 的 expected write paths、protected paths 和 replan triggers。
 - `release-plan-v2-direct` 拒绝 v1；v1 只有在 `release-plan-v1-compatibility` 或 Dispatcher 内部的 `dispatcher-experimental` 路径才可创建 Job。
 - Controller 不读取 Planner 的 Planning Case、Handoff 私有 artifact 或 Delivery Graph；v2 文件本身就是完整公开契约。
 
