@@ -50,6 +50,9 @@ test("v2 fixed fixtures agree across JSON Schema, validatePlan, and CLI plan val
       { name: "extra Issue key", valid: false, mutate: (plan) => { plan.issues[0].extra = true; } },
       { name: "wrong hash", valid: false, mutate: (plan) => { plan.issues[0].expectedBodyHash = "sha256:not-a-hash"; } },
       { name: "legacy v2 without runtime contract", valid: false, mutate: (plan) => { delete plan.issues[0].oracleBindings; } },
+      { name: "missing verifier manifest", valid: false, mutate: (plan) => { delete plan.issues[0].oracleBindings[0].verifier; } },
+      { name: "open verifier manifest", valid: false, mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.extra = true; } },
+      { name: "open verifier file", valid: false, mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.files[0].extra = true; } },
     ];
 
     for (const fixture of fixtures) {

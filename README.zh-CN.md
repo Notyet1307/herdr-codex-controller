@@ -174,7 +174,7 @@ Dispatcher 则只能使用 `dispatcher-experimental`；两种 opt-in 都不会�
 ## Release Plan v1 / v2
 
 - v1 是手工计划和旧集成的兼容格式；`parentIssue` 可为 `null`，Issue `objective` 可为 `null`，并保留既有 `suggestedValidation`、`allowNoop` 语义。
-- v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent/Child 精确 title/body hash、decision/predecessor/dependency digests，以及每个 Child 的 immutable Oracle、risk classes、scope budget、expected write paths、protected paths 和 replan triggers。
+- v2 只表示 `source.planner="pi-ticket-planning"` 的 exact source-bound handoff。它必须绑定 `repo`、`baseRef`、40 位小写 `baseSha`、Parent/Child 精确 title/body hash、decision/predecessor/dependency digests，以及每个 Child 的 immutable Oracle、closed verifier manifest、risk classes、scope budget、expected write paths、protected paths 和 replan triggers。
 - `release-plan-v2-direct` 拒绝 v1；v1 只有在 `release-plan-v1-compatibility` 或 Dispatcher 内部的 `dispatcher-experimental` 路径才可创建 Job。
 - Controller 不读取 Planner 的 Planning Case、Handoff 私有 artifact 或 Delivery Graph；v2 文件本身就是完整公开契约。
 
@@ -191,6 +191,8 @@ schemas/dispatcher-config.schema.json  # experimental Dispatcher policy
 
 config/plan digest 的算法为：先验证并构造 Controller 返回的对象；递归排序每个 object 的 key，保留 array 顺序；对 `JSON.stringify` 结果计算 SHA-256，输出 64 位小写 hex。`config validate` 和 `plan validate` 返回的 digest 是启动时应使用和记录的权威值。
 
+`verifier.packageScript.definitionSha256` 对 `package.json` 中对应 npm script 的精确 UTF-8 字符串计算 SHA-256。verifier manifest digest 使用同一 canonical `digestJson`，preimage 不含自身 `digest` 字段，输出带 `sha256:` 前缀；`files` 必须按 path 字典序提供。
+
 Controller runtime identity 由三项组成：Controller checkout 的 40 位 `HEAD` commit；当前 checkout 每个 tracked regular file 的 path/mode/bytes/SHA-256 所形成的规范 manifest digest；实际 `dist/src/**/*.js`、`package.json`、`package-lock.json` 所形成的 build digest。Job provenance 再绑定 `executionMode`、config digest、Release Plan version/digest，并对完整对象 self-digest。`job.json` 以一次原子替换保存该 snapshot；每个 Controller step 都重新计算并比较，source/build/config/plan 任一漂移都会 fail closed。
 
 v2 prepare 严格按以下顺序执行：
@@ -203,14 +205,14 @@ git preflight
 → baseSha exact gate
 → fetch + verify Parent OPEN/title/body
 → fetch + verify 全部 Child OPEN/title/body
-→ verify reviewed-base Oracle regular-file bytes
-→ ensureWorktree + clean gate + verify Oracle bytes again
+→ verify reviewed-base Oracle data、verifier files 和 package script definition
+→ ensureWorktree + clean gate + verify Oracle/verifier bytes again
 → 写入 snapshots
 → setup validation
 → implement
 ```
 
-每个 writing Worker 前后都会重新验证 Oracle/protected paths；每个 Issue commit（包括 crash salvage）都会检查 exact write paths 与 file/changed-line budget。hardening 的每个路径必须唯一归属一个 Ticket，并按完整 aggregate diff 重新核算；binary diff 不会按 0 行放行。任何偏离都进入不可 retry 的 `replan_required`。
+每个 writing Worker 前后都会全局重新验证所有 Oracle data、verifier source/helper/schema 与 `package.json`；每张 Ticket 的 exact Oracle commands 必须在 commit 前执行，Validation Receipt v2 绑定 Issue/Oracle、timeout、candidate HEAD、worktree digest、process result 与 stdout/stderr digest/path。Release validation 再运行全部 Oracle。每个 Issue commit（包括 crash salvage）仍检查 exact write paths 与 file/changed-line budget；hardening 后也重验 verifier closure。任何偏离都进入不可 retry 的 `replan_required`。
 
 `plan_base_drift`、`plan_parent_not_open`、`plan_parent_drift`、`plan_issue_not_open`、`plan_issue_drift` 都发生在 Worktree、setup 和 Codex run 之前。Controller 不自动更新漂移的 Plan；应停止旧 Job，回到 Planner 生成并批准新的 v2 Plan。
 

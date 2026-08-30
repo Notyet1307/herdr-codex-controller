@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { IssueExecution, JobState, ReleasePlanIssue, ValidationReceipt } from "./types.js";
 import { sha256 } from "./util.js";
-import { isReleasePlanV2 } from "./plan.js";
+import { isReleasePlanV2, oracleVerifierProtectedPaths } from "./plan.js";
 
 function executionContract(job: JobState, issueNumber: number | null): string {
   if (!isReleasePlanV2(job.plan)) return "Planned risk classes: []\nReturn observedRiskClasses=[] in the structured result.";
@@ -9,17 +9,20 @@ function executionContract(job: JobState, issueNumber: number | null): string {
     ? job.plan.issues
     : job.plan.issues.filter((issue) => issue.number === issueNumber);
   const risks = [...new Set(entries.flatMap((issue) => issue.riskClasses))].sort();
-  const protectedPaths = [...new Set(entries.flatMap((issue) => issue.protectedPaths))].sort();
+  const protectedPaths = [...new Set([
+    ...job.plan.issues.flatMap((issue) => issue.protectedPaths),
+    ...oracleVerifierProtectedPaths(job.plan),
+  ])].sort();
   const budgets = entries.map((issue) => `- #${issue.number}: ${issue.scopeBudget.maxFiles} files / ${issue.scopeBudget.maxChangedLines} changed lines`).join("\n");
   const paths = entries.map((issue) => `- #${issue.number}: ${issue.expectedPaths.join(", ")}`).join("\n");
   return `Planned risk classes: ${JSON.stringify(risks)}
-Protected Oracle paths: ${JSON.stringify(protectedPaths)}
+Protected Oracle and verifier paths: ${JSON.stringify(protectedPaths)}
 Scope budgets:
 ${budgets}
 Bound write path families:
 ${paths}
 
-- Never modify a protected Oracle path.
+- Never modify a protected Oracle data, verifier, helper, schema, or package.json path.
 - Do not write outside the current Issue's bound path families.
 - Keep each Issue commit inside its stated file/changed-line budget.
 - Return observedRiskClasses as the complete planned set above when no new independent risk class was discovered.

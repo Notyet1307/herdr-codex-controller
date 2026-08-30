@@ -13,6 +13,7 @@ import {
   boundedExactText,
   boundedStringArray,
   boundedText,
+  digestJson,
   parsePositiveInteger,
   safeToken,
 } from "./util.js";
@@ -64,6 +65,16 @@ export function isReleasePlanV2(plan: ReleasePlan): plan is ReleasePlanV2 {
   return plan.version === 2;
 }
 
+export function oracleVerifierProtectedPaths(plan: ReleasePlan): string[] {
+  if (!isReleasePlanV2(plan)) return [];
+  return [...new Set([
+    "package.json",
+    ...plan.issues.flatMap((issue) => issue.oracleBindings.flatMap((binding) => (
+      binding.verifier.files.map(({ path }) => path)
+    ))),
+  ])].sort();
+}
+
 export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: ControllerConfig): void {
   assertProductionDeliveryPolicy(config);
   if (!isReleasePlanV2(plan)) {
@@ -87,13 +98,19 @@ export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: Contro
       "Release Plan v2 source.baseRef does not exactly match config.baseRef.",
     );
   }
-  const releaseCommands = new Set(config.validation.release.map(({ command }) => command));
   for (const issue of plan.issues) {
     for (const binding of issue.oracleBindings) {
-      if (!releaseCommands.has(binding.execution.command)) {
+      const matches = config.validation.release.filter(({ command }) => command === binding.execution.command);
+      if (matches.length === 0) {
         throw new ControllerError(
           "oracle_validation_command_missing",
           `Issue #${issue.number} Oracle ${binding.id} command is absent from config.validation.release.`,
+        );
+      }
+      if (matches.length !== 1) {
+        throw new ControllerError(
+          "oracle_validation_command_ambiguous",
+          `Issue #${issue.number} Oracle ${binding.id} command has multiple config.validation.release definitions.`,
         );
       }
     }
@@ -142,6 +159,7 @@ function validatePlanV2(object: Record<string, unknown>): ReleasePlanV2 {
   if (issues.some((issue) => issue.oracleBindings.some((binding) => binding.artifact.baseSha !== source.baseSha))) {
     throw new Error("plan Oracle artifact baseSha must equal plan.source.baseSha");
   }
+  assertVerifierBindingsConsistent(issues);
   return {
     version: 2,
     source,
@@ -289,7 +307,7 @@ function validateIssueV2(value: unknown, index: number): ReleasePlanIssueV2 {
 
 function validateOracleBinding(value: unknown, label: string): ReleasePlanIssueV2["oracleBindings"][number] {
   const object = expectObject(value, label);
-  expectExactKeys(object, ["artifact", "execution", "id", "owner", "schema", "workerMutationAllowed"], label);
+  expectExactKeys(object, ["artifact", "execution", "id", "owner", "schema", "verifier", "workerMutationAllowed"], label);
   if (object.schema !== "pi-ticket-planning:oracle-binding:v1" || object.workerMutationAllowed !== false) {
     throw new Error(`${label} is not an immutable Oracle binding`);
   }
@@ -306,6 +324,7 @@ function validateOracleBinding(value: unknown, label: string): ReleasePlanIssueV
   if (!/^npm run verify:[A-Za-z0-9:_-]+$/.test(command)) throw new Error(`${label}.execution.command is invalid`);
   const baseSha = boundedExactText(artifact.baseSha, `${label}.artifact.baseSha`, 40);
   if (!/^[a-f0-9]{40}$/.test(baseSha)) throw new Error(`${label}.artifact.baseSha is invalid`);
+  const verifier = validateOracleVerifier(object.verifier, `${label}.verifier`, id, command);
   return {
     schema: "pi-ticket-planning:oracle-binding:v1",
     id,
@@ -321,8 +340,83 @@ function validateOracleBinding(value: unknown, label: string): ReleasePlanIssueV
       byteCount: parsePositiveInteger(artifact.byteCount, `${label}.artifact.byteCount`, 0, 64 * 1024 * 1024),
     },
     execution: { command },
+    verifier,
     workerMutationAllowed: false,
   };
+}
+
+function validateOracleVerifier(
+  value: unknown,
+  label: string,
+  oracleId: string,
+  command: string,
+): ReleasePlanIssueV2["oracleBindings"][number]["verifier"] {
+  const object = expectObject(value, label);
+  expectExactKeys(object, ["command", "digest", "files", "oracleId", "packageScript", "schema"], label);
+  if (object.schema !== "herdr-codex-controller:oracle-verifier-manifest:v1"
+    || object.oracleId !== oracleId
+    || object.command !== command) {
+    throw new Error(`${label} does not bind its Oracle id and command`);
+  }
+  const packageScript = expectObject(object.packageScript, `${label}.packageScript`);
+  expectExactKeys(packageScript, ["definitionSha256", "name"], `${label}.packageScript`);
+  const scriptName = boundedExactText(packageScript.name, `${label}.packageScript.name`, 256);
+  if (scriptName !== command.slice("npm run ".length)) {
+    throw new Error(`${label}.packageScript.name does not match command`);
+  }
+  const files = array(object.files, `${label}.files`, 1, 100).map((entry, index) => {
+    const file = expectObject(entry, `${label}.files[${index}]`);
+    expectExactKeys(file, ["byteCount", "path", "sha256"], `${label}.files[${index}]`);
+    return {
+      path: exactRepoPath(file.path, `${label}.files[${index}].path`),
+      sha256: prefixedHash(file.sha256, `${label}.files[${index}].sha256`),
+      byteCount: parsePositiveInteger(file.byteCount, `${label}.files[${index}].byteCount`, 0, 64 * 1024 * 1024),
+    };
+  });
+  const paths = files.map(({ path }) => path);
+  if (paths.includes("package.json") || new Set(paths).size !== paths.length
+    || paths.join("\n") !== [...paths].sort().join("\n")) {
+    throw new Error(`${label}.files must be unique, sorted verifier paths excluding package.json`);
+  }
+  const identity = {
+    schema: "herdr-codex-controller:oracle-verifier-manifest:v1" as const,
+    oracleId,
+    command,
+    packageScript: {
+      name: scriptName,
+      definitionSha256: prefixedHash(
+        packageScript.definitionSha256,
+        `${label}.packageScript.definitionSha256`,
+      ),
+    },
+    files,
+  };
+  const digest = prefixedHash(object.digest, `${label}.digest`);
+  if (digest !== `sha256:${digestJson(identity)}`) throw new Error(`${label}.digest is invalid`);
+  return { ...identity, digest };
+}
+
+function assertVerifierBindingsConsistent(issues: ReleasePlanIssueV2[]): void {
+  const files = new Map<string, string>();
+  const scripts = new Map<string, string>();
+  for (const issue of issues) {
+    for (const binding of issue.oracleBindings) {
+      const script = binding.verifier.packageScript;
+      const previousScript = scripts.get(script.name);
+      if (previousScript && previousScript !== script.definitionSha256) {
+        throw new Error(`Oracle verifier package script ${script.name} has conflicting bindings`);
+      }
+      scripts.set(script.name, script.definitionSha256);
+      for (const file of binding.verifier.files) {
+        const identity = `${file.sha256}:${file.byteCount}`;
+        const previous = files.get(file.path);
+        if (previous && previous !== identity) {
+          throw new Error(`Oracle verifier file ${file.path} has conflicting bindings`);
+        }
+        files.set(file.path, identity);
+      }
+    }
+  }
 }
 
 function validateIntegrationOnly(value: unknown, label: string): ReleasePlanIssueV2["integrationOnly"] {

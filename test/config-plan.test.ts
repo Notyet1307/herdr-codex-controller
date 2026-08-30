@@ -119,6 +119,14 @@ test("Release Plan v2 rejects every closed source-contract shape", () => {
       { name: "invalid base SHA", mutate: (plan) => { plan.source.baseSha = "A".repeat(40); }, pattern: /lowercase hexadecimal/ },
       { name: "invalid body hash", mutate: (plan) => { plan.issues[0].expectedBodyHash = "sha256:ABC"; }, pattern: /must match sha256/ },
       { name: "missing Oracle", mutate: (plan) => { plan.issues[0].oracleBindings = []; }, pattern: /oracleBindings must contain 1 to 8/ },
+      { name: "missing verifier", mutate: (plan) => { delete plan.issues[0].oracleBindings[0].verifier; }, pattern: /missing keys/ },
+      { name: "verifier extra key", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.extra = true; }, pattern: /unknown keys/ },
+      { name: "verifier Oracle mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.oracleId = "O99"; }, pattern: /does not bind/ },
+      { name: "verifier command mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.command = "npm run verify:other"; }, pattern: /does not bind/ },
+      { name: "verifier script mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.packageScript.name = "verify:other"; }, pattern: /does not match/ },
+      { name: "verifier digest mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.digest = `sha256:${"0".repeat(64)}`; }, pattern: /digest is invalid/ },
+      { name: "verifier package path", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.files[0].path = "package.json"; }, pattern: /excluding package\.json/ },
+      { name: "duplicate verifier path", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.files.push(plan.issues[0].oracleBindings[0].verifier.files[0]); }, pattern: /unique, sorted/ },
       { name: "Oracle base mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].artifact.baseSha = "f".repeat(40); }, pattern: /Oracle artifact baseSha must equal/ },
       { name: "unprotected Oracle", mutate: (plan) => { plan.issues[0].protectedPaths = ["fixtures/other.json"]; }, pattern: /must include every Oracle/ },
       { name: "missing replan trigger", mutate: (plan) => { plan.issues[0].replanTriggers.pop(); }, pattern: /missing a controlled trigger/ },
@@ -157,10 +165,20 @@ test("Release Plan v2 config binding fails closed with stable error codes", () =
     );
     const missingOracleCommand = structuredClone(config);
     missingOracleCommand.validation.release = missingOracleCommand.validation.release
-      .filter(({ command }) => command !== "npm run verify:oracle");
+      .filter(({ command }) => command !== plan.issues[0]!.oracleBindings[0]!.execution.command);
     assert.throws(
       () => assertPlanCompatibleWithConfig(plan, missingOracleCommand),
       (error: any) => error?.code === "oracle_validation_command_missing",
+    );
+    const duplicateOracleCommand = structuredClone(config);
+    duplicateOracleCommand.validation.release.push(
+      duplicateOracleCommand.validation.release.find(({ command }) => (
+        command === plan.issues[0]!.oracleBindings[0]!.execution.command
+      ))!,
+    );
+    assert.throws(
+      () => assertPlanCompatibleWithConfig(plan, duplicateOracleCommand),
+      (error: any) => error?.code === "oracle_validation_command_ambiguous",
     );
   } finally { repo.cleanup(); }
 });

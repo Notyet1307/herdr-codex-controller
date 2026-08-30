@@ -10,7 +10,8 @@ import type {
   ValidationReceipt,
   WorkerResult,
   WorkflowGateSummary,
-  CommandConfig,
+  RepositoryFileSnapshot,
+  ValidationCommandConfig,
 } from "./types.js";
 
 export interface GitPort {
@@ -29,12 +30,13 @@ export interface GitPort {
   branch(cwd: string): Promise<string>;
   isClean(cwd: string): Promise<boolean>;
   changedPaths(cwd: string): Promise<string[]>;
-  fileAtRevision(revision: string, path: string): Promise<{ sha256: string; byteCount: number }>;
-  fileInWorktree(job: JobState, path: string): Promise<{ sha256: string; byteCount: number }>;
+  fileAtRevision(revision: string, path: string): Promise<RepositoryFileSnapshot>;
+  fileInWorktree(job: JobState, path: string): Promise<RepositoryFileSnapshot>;
   commitStats(job: JobState, sha: string): Promise<{ files: number; changedLines: number; paths: string[]; entries: Array<{ path: string; changedLines: number; binary: boolean }> }>;
   worktreeDigest(cwd: string): Promise<string>;
   assertAgentDidNotCommit(job: JobState, expectedHead: string): Promise<void>;
   commitIssue(job: JobState, issueNumber: number, title: string, allowNoop: boolean): Promise<{ sha: string; created: boolean }>;
+  commitParent(job: JobState, sha: string): Promise<string>;
   salvageIssueCommitAtHead(job: JobState, issueNumber: number): Promise<string | null>;
   salvageHardeningCommitAtHead(job: JobState, round: number): Promise<string | null>;
   commitHardening(job: JobState, reason: string): Promise<{ sha: string; created: boolean }>;
@@ -84,7 +86,7 @@ export interface ValidationPort {
     job: JobState;
     scope: "setup" | "issue" | "release";
     issueNumber: number | null;
-    commands: CommandConfig[];
+    commands: ValidationCommandConfig[];
     validationsRoot: string;
     sourceHeadSha: string;
     sourceWorktreeDigest: string;

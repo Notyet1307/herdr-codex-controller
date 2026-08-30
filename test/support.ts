@@ -31,6 +31,22 @@ export type TestRepo = {
   cleanup(): void;
 };
 
+const ORACLE_FIXTURES = [1, 2].map((number) => {
+  const suffix = String(number).padStart(2, "0");
+  const scriptName = `verify:oracle:o${suffix}`;
+  const definition = `node scripts/verify-o${suffix}.mjs`;
+  return {
+    command: `npm run ${scriptName}`,
+    scriptName,
+    definition,
+    files: [
+      { path: `schemas/o${suffix}.schema.json`, content: `{"oracle":"O${suffix}"}\n` },
+      { path: `scripts/lib/o${suffix}-helper.mjs`, content: `export const oracleId = "O${suffix}";\n` },
+      { path: `scripts/verify-o${suffix}.mjs`, content: `import { oracleId } from "./lib/o${suffix}-helper.mjs";\nif (oracleId !== "O${suffix}") process.exit(1);\n` },
+    ],
+  };
+});
+
 export function createTestRepo(): TestRepo {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-codex-test-")));
   const source = join(root, "source");
@@ -45,10 +61,17 @@ export function createTestRepo(): TestRepo {
   git(source, ["config", "user.name", "Herdr Test"]);
   git(source, ["config", "user.email", "herdr@example.invalid"]);
   writeFileSync(join(source, "README.md"), "# Fixture\n", "utf8");
-  writeFileSync(join(source, "package.json"), `${JSON.stringify({ scripts: { "verify:oracle": "node -e \"\"" } })}\n`, "utf8");
+  writeFileSync(join(source, "package.json"), `${JSON.stringify({
+    scripts: Object.fromEntries(ORACLE_FIXTURES.map(({ scriptName, definition }) => [scriptName, definition])),
+  })}\n`, "utf8");
   mkdirSync(join(source, "fixtures"), { mode: 0o700 });
+  mkdirSync(join(source, "schemas"), { mode: 0o700 });
+  mkdirSync(join(source, "scripts", "lib"), { recursive: true, mode: 0o700 });
   writeFileSync(join(source, "fixtures", "oracle.json"), "{\"ok\":true}\n", "utf8");
-  git(source, ["add", "README.md", "package.json", "fixtures/oracle.json"]);
+  for (const fixture of ORACLE_FIXTURES) {
+    for (const file of fixture.files) writeFileSync(join(source, file.path), file.content, "utf8");
+  }
+  git(source, ["add", "."]);
   git(source, ["commit", "-m", "initial"]);
   git(source, ["branch", "-M", "main"]);
   git(source, ["remote", "add", "origin", remote]);
@@ -87,7 +110,11 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
     validation: {
       setup: [],
       issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
-      release: [{ command: "test -f issue-1.txt && test -f issue-2.txt" }],
+      release: [
+        { command: ORACLE_FIXTURES[0]!.command, timeoutMs: 45_000 },
+        { command: ORACLE_FIXTURES[1]!.command, timeoutMs: 60_000 },
+        { command: "test -f issue-1.txt && test -f issue-2.txt" },
+      ],
       maxOutputBytes: 64 * 1024,
     },
     policy: {
@@ -115,8 +142,10 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
     merged.delivery.allowNoChecks = false;
     merged.delivery.requiredChecks = ["verify"];
   }
-  if (!merged.validation.release.some(({ command }) => command === "npm run verify:oracle")) {
-    merged.validation.release.unshift({ command: "npm run verify:oracle" });
+  for (const [index, fixture] of [...ORACLE_FIXTURES.entries()].reverse()) {
+    if (!merged.validation.release.some(({ command }) => command === fixture.command)) {
+      merged.validation.release.unshift({ command: fixture.command, timeoutMs: index === 0 ? 45_000 : 60_000 });
+    }
   }
   return merged;
 }
@@ -191,7 +220,8 @@ export function testPlanV2(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlanV2
           sha256: sha256PrefixedUtf8("{\"ok\":true}\n"),
           byteCount: Buffer.byteLength("{\"ok\":true}\n", "utf8"),
         },
-        execution: { command: "npm run verify:oracle" },
+        execution: { command: ORACLE_FIXTURES[index]!.command },
+        verifier: oracleVerifierManifest(index),
         workerMutationAllowed: false,
       }],
       riskClasses: ["FIXTURE_BEHAVIOR"],
@@ -210,6 +240,25 @@ export function testPlanV2(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlanV2
     releaseAcceptanceCriteria: ["All exact source-bound issue files exist."],
     reviewFocus: ["Cross-issue correctness."],
   };
+}
+
+function oracleVerifierManifest(index: number): ReleasePlanV2["issues"][number]["oracleBindings"][number]["verifier"] {
+  const fixture = ORACLE_FIXTURES[index]!;
+  const identity = {
+    schema: "herdr-codex-controller:oracle-verifier-manifest:v1" as const,
+    oracleId: `O0${index + 1}`,
+    command: fixture.command,
+    packageScript: {
+      name: fixture.scriptName,
+      definitionSha256: sha256PrefixedUtf8(fixture.definition),
+    },
+    files: fixture.files.map(({ path, content }) => ({
+      path,
+      sha256: sha256PrefixedUtf8(content),
+      byteCount: Buffer.byteLength(content, "utf8"),
+    })),
+  };
+  return { ...identity, digest: `sha256:${digestJson(identity)}` };
 }
 
 export function writeInputs(repo: TestRepo, config: ControllerConfig, plan: ReleasePlan): { configPath: string; planPath: string } {
