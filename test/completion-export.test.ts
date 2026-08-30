@@ -43,6 +43,7 @@ test("completion export CLI is public, restart-safe, and byte-idempotent", async
     assert.equal(artifact.schema, "herdr-codex-controller:release-completion:v1");
     assert.equal(artifact.candidateSha, fixture.candidateSha);
     assert.equal(artifact.pullRequest.mergeSha, fixture.mergeSha);
+    assert.equal(artifact.pullRequest.mergedAt, "2026-08-30T01:00:00.000Z");
     assert.equal(artifact.mergedMainSha, fixture.mergeSha);
     assert.notEqual(artifact.mergedMainSha, fixture.observedBaseSha);
     assert.deepEqual(artifact.requiredChecks, ["verify"]);
@@ -89,6 +90,16 @@ test("completion export rejects incomplete, drifted, private, and forged evidenc
     const mergedAt = fixture.github.mergedAt;
     fixture.github.mergedAt = null;
     await rejectsCode(run(join(publicRoot, "unmerged.json")), "completion_export_pr_identity_invalid");
+    fixture.github.mergedAt = mergedAt;
+    for (const [name, value] of ([
+      ["different-time", "2026-08-30T01:00:01Z"],
+      ["missing-zone", "2026-08-30T01:00:00"],
+      ["invalid-date", "2026-02-30T00:00:00Z"],
+      ["invalid-time", "not-a-time"],
+    ] as const)) {
+      fixture.github.mergedAt = value;
+      await rejectsCode(run(join(publicRoot, `${name}.json`)), "completion_export_pr_identity_invalid");
+    }
     fixture.github.mergedAt = mergedAt;
 
     const mergeSha = fixture.github.mergeSha;
@@ -224,7 +235,7 @@ async function completedFixture() {
   git(repo.source, ["merge", "--no-ff", candidateSha, "-m", "merge completion candidate"]);
   git(repo.source, ["push", "origin", "main"]);
   github.mergeSha = git(repo.source, ["rev-parse", "HEAD"]);
-  github.mergedAt = "2026-08-30T01:00:00.000Z";
+  github.mergedAt = "2026-08-30T01:00:00Z";
   writeFileSync(join(repo.source, "after-merge.txt"), "advance main before completion observation\n", "utf8");
   git(repo.source, ["add", "after-merge.txt"]);
   git(repo.source, ["commit", "-m", "advance main before completion observation"]);

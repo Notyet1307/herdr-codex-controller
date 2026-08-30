@@ -30,7 +30,8 @@ export function createCompletionEvidence(input: {
   mergedMainSha: string;
 }): JobCompletionEvidence {
   const proof = privateCompletionProof(input.job, input.config, input.jobRoot);
-  if (!input.job.pullRequest?.mergeSha || !canonicalTime(input.mergedAt) || !SHA.test(input.mergedMainSha)) {
+  const mergedAt = canonicalIso(input.mergedAt);
+  if (!input.job.pullRequest?.mergeSha || !mergedAt || !SHA.test(input.mergedMainSha)) {
     throw new ControllerError("completion_evidence_invalid", "Merged completion evidence is incomplete.");
   }
   const body = {
@@ -48,7 +49,7 @@ export function createCompletionEvidence(input: {
       baseRef: input.job.pullRequest.baseRef,
       headSha: input.job.pullRequest.headSha,
       mergeSha: input.job.pullRequest.mergeSha,
-      mergedAt: input.mergedAt,
+      mergedAt,
     },
     mergedMainSha: input.mergedMainSha,
     requiredChecks: [...input.config.delivery.requiredChecks],
@@ -81,7 +82,7 @@ export async function exportReleaseCompletion(input: {
   catch { throw new ControllerError("completion_export_pr_identity_invalid", "The completed pull request cannot be verified."); }
   const pullRequest = observed.pullRequest;
   const expected = job.completion.pullRequest;
-  if (pullRequest.state !== "MERGED" || observed.mergedAt !== expected.mergedAt
+  if (pullRequest.state !== "MERGED" || canonicalIso(observed.mergedAt) !== expected.mergedAt
     || pullRequest.number !== expected.number || pullRequest.headRef !== expected.headRef
     || pullRequest.baseRef !== expected.baseRef || pullRequest.headSha !== expected.headSha
     || pullRequest.mergeSha !== expected.mergeSha) {
@@ -320,5 +321,14 @@ function recordOrNull(value: unknown): Record<string, unknown> | null {
 }
 
 function canonicalTime(value: string): boolean {
-  return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  return canonicalIso(value) === value;
+}
+
+function canonicalIso(value: unknown): string | null {
+  const match = typeof value === "string"
+    ? value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/)
+    : null;
+  if (!match) return null;
+  const canonical = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}.${(match[7] ?? "").padEnd(3, "0")}Z`;
+  return Number.isFinite(Date.parse(canonical)) && new Date(canonical).toISOString() === canonical ? canonical : null;
 }
