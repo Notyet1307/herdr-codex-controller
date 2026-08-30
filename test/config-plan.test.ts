@@ -131,6 +131,13 @@ test("Release Plan v2 config binding fails closed with stable error codes", () =
       () => assertPlanCompatibleWithConfig({ ...plan, source: { ...plan.source, baseRef: "develop" } }, config),
       (error: any) => error?.code === "plan_source_base_ref_mismatch",
     );
+    const missingOracleCommand = structuredClone(config);
+    missingOracleCommand.validation.release = missingOracleCommand.validation.release
+      .filter(({ command }) => command !== "npm run verify:oracle");
+    assert.throws(
+      () => assertPlanCompatibleWithConfig(plan, missingOracleCommand),
+      (error: any) => error?.code === "oracle_validation_command_missing",
+    );
   } finally { repo.cleanup(); }
 });
 

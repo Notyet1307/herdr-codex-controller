@@ -120,6 +120,25 @@ test("CLI plan validate accepts v2 and rejects config source mismatches", () => 
   } finally { repo.cleanup(); }
 });
 
+test("CLI plan validate and start reject an uncovered Oracle command", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    config.validation.release = config.validation.release
+      .filter(({ command }) => command !== "npm run verify:oracle");
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const cli = resolve("dist/src/cli.js");
+    for (const command of [["plan", "validate"], ["start"]]) {
+      const result = spawnSync("node", [cli, ...command, "--config", configPath, "--plan", planPath, "--json"], {
+        cwd: resolve("."), encoding: "utf8",
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(String(result.stderr), /oracle_validation_command_missing/);
+    }
+  } finally { repo.cleanup(); }
+});
+
 test("CLI v2 start requires the exact approved config digest before Job creation", () => {
   const repo = createTestRepo();
   try {
