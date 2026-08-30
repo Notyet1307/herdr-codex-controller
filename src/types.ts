@@ -54,6 +54,7 @@ export type ControllerConfig = {
     autoMerge: boolean;
     mergeMethod: "merge" | "squash" | "rebase";
     allowNoChecks: boolean;
+    requiredChecks: string[];
     pollIntervalMs: number;
   };
 };
@@ -485,6 +486,7 @@ export type CommandResult = {
 
 export type GhCheckSummary = {
   state: "pending" | "success" | "failure" | "none";
+  missing: string[];
   failures: Array<{ name: string; state: string; link: string | null }>;
   pending: Array<{ name: string; state: string; link: string | null }>;
 };

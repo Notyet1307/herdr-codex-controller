@@ -12,13 +12,13 @@ import { createTestRepo, FakeCodex, FakeGitHub, testConfig, testPlan, testPlanV2
 import { createControllerProvenance, readControllerIdentity } from "../src/provenance.js";
 import type { ControllerConfig, ReleasePlan } from "../src/types.js";
 
-test("CLI starts and completes a release-plan-v2-direct Job with fake gh and Codex executables", () => {
+test("CLI release-plan-v2-direct Job stops at the exact manual merge gate", () => {
   const repo = createTestRepo();
   const bin = join(repo.root, "bin");
   mkdirSync(bin, { mode: 0o700 });
   try {
     const fakeGh = join(bin, "gh");
-    writeFileSync(fakeGh, `#!/usr/bin/env node\nconst a=process.argv.slice(2);\nif(a[0]==='auth'&&a[1]==='status') process.exit(0);\nif(a[0]==='repo'&&a[1]==='view'){console.log(JSON.stringify({nameWithOwner:'example/project'}));process.exit(0)}\nif(a[0]==='issue'&&a[1]==='view'){const n=Number(a[2]);console.log(JSON.stringify({number:n,title:'Issue '+n,body:'Create issue-'+n+'.txt.',state:'OPEN',labels:[{name:'ready'}],assignees:[],url:'https://github.com/example/project/issues/'+n}));process.exit(0)}\nconsole.error('unsupported gh '+a.join(' '));process.exit(2);\n`, "utf8");
+    writeFileSync(fakeGh, `#!/usr/bin/env node\nimport{execFileSync}from'node:child_process';\nconst a=process.argv.slice(2);\nif(a[0]==='auth'&&a[1]==='status') process.exit(0);\nif(a[0]==='repo'&&a[1]==='view'){console.log(JSON.stringify({nameWithOwner:'example/project'}));process.exit(0)}\nif(a[0]==='issue'&&a[1]==='view'){const n=Number(a[2]);console.log(JSON.stringify({number:n,title:'Issue '+n,body:'Create issue-'+n+'.txt.',state:'OPEN',labels:[{name:'ready'}],assignees:[],url:'https://github.com/example/project/issues/'+n}));process.exit(0)}\nif(a[0]==='pr'&&a[1]==='create'){console.log('https://github.com/example/project/pull/23');process.exit(0)}\nif(a[0]==='pr'&&a[1]==='view'){const branch='agent/release/release-fixture-v2';const head=execFileSync('git',['rev-parse',branch],{encoding:'utf8'}).trim();console.log(JSON.stringify({number:23,url:'https://github.com/example/project/pull/23',state:'OPEN',headRefName:branch,baseRefName:'main',headRefOid:head,mergedAt:null,mergeCommit:null,statusCheckRollup:[{name:'verify',status:'COMPLETED',conclusion:'SUCCESS'}]}));process.exit(0)}\nconsole.error('unsupported gh '+a.join(' '));process.exit(2);\n`, "utf8");
     chmodSync(fakeGh, 0o700);
     const fakeCodex = join(bin, "codex");
     writeFileSync(fakeCodex, `#!/usr/bin/env node\nimport fs from 'node:fs';import path from 'node:path';\nconst a=process.argv.slice(2);\nif(a[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(a[0]==='login'&&a[1]==='status'){console.log('logged in');process.exit(0)}\nlet prompt='';for await(const c of process.stdin)prompt+=c;\nconst out=a[a.indexOf('--output-last-message')+1];const review=a.includes('read-only');\nif(!review){const m=prompt.match(/Issue #(\\d+)/);if(m)fs.writeFileSync(path.join(process.cwd(),'issue-'+m[1]+'.txt'),'implemented\\n')}\nconst risks=JSON.parse(prompt.match(/Planned risk classes: (\\[[^\\n]*\\])/)?.[1]??'[]');\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],observedRiskClasses:risks,blockedReason:null,blockedKind:null};\nfs.writeFileSync(out,JSON.stringify(result));console.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
@@ -54,7 +54,7 @@ test("CLI starts and completes a release-plan-v2-direct Job with fake gh and Cod
     const status = spawnSync("node", [cli, "status", "--config", configPath, "--job", jobId, "--json"], { cwd: resolve("."), env, encoding: "utf8" });
     assert.equal(status.status, 0, status.stderr);
     const job = JSON.parse(String(status.stdout));
-    assert.equal(job.status, "completed");
+    assert.equal(job.status, "ready_to_merge");
     assert.deepEqual(job.issues.map((issue: any) => issue.status), ["committed", "committed"]);
     assert.equal(job.provenanceMatches, true);
     assert.deepEqual(job.provenance, job.currentProvenance);

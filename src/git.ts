@@ -42,6 +42,37 @@ export class GitClient {
     throw new Error(`cannot verify merged commit ancestry: ${result.stderrTail || result.stdoutTail}`);
   }
 
+  async verifyMergeResult(input: {
+    mergeSha: string;
+    candidateSha: string;
+    baseSha: string;
+    mergeMethod: "merge" | "squash" | "rebase";
+  }): Promise<"verified" | "base_mismatch" | "candidate_mismatch"> {
+    assertSha(input.mergeSha);
+    assertSha(input.candidateSha);
+    assertSha(input.baseSha);
+    const parents = (await this.text(this.config.localPath, ["rev-list", "--parents", "-n", "1", input.mergeSha])).split(" ").slice(1);
+    if (input.mergeMethod === "merge") {
+      if (parents[0] !== input.baseSha) return "base_mismatch";
+      if (parents.length !== 2 || parents[1] !== input.candidateSha) return "candidate_mismatch";
+    } else if (input.mergeMethod === "squash") {
+      if (parents[0] !== input.baseSha) return "base_mismatch";
+      if (parents.length !== 1) return "candidate_mismatch";
+    } else {
+      const candidateCountText = await this.text(this.config.localPath, [
+        "rev-list", "--count", "--first-parent", `${input.baseSha}..${input.candidateSha}`,
+      ]);
+      const candidateCount = Number(candidateCountText);
+      if (!Number.isSafeInteger(candidateCount) || candidateCount < 1) return "candidate_mismatch";
+      const rebasedBase = await this.text(this.config.localPath, ["rev-parse", `${input.mergeSha}~${candidateCount}`]);
+      if (rebasedBase !== input.baseSha) return "base_mismatch";
+    }
+
+    const mergeTree = await this.text(this.config.localPath, ["rev-parse", `${input.mergeSha}^{tree}`]);
+    const candidateTree = await this.text(this.config.localPath, ["rev-parse", `${input.candidateSha}^{tree}`]);
+    return mergeTree === candidateTree ? "verified" : "candidate_mismatch";
+  }
+
   async ensureWorktree(job: JobState): Promise<void> {
     if (!job.baseSha) throw new Error("job base SHA is missing");
     ensurePrivateDir(this.config.worktreeRoot);

@@ -16,7 +16,7 @@ import {
   parsePositiveInteger,
   safeToken,
 } from "./util.js";
-import { expectExactKeys, expectObject, validateCommands } from "./config.js";
+import { assertProductionDeliveryPolicy, expectExactKeys, expectObject, validateCommands } from "./config.js";
 import { ControllerError } from "./errors.js";
 
 const PLAN_KEYS_V1 = [
@@ -65,6 +65,7 @@ export function isReleasePlanV2(plan: ReleasePlan): plan is ReleasePlanV2 {
 }
 
 export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: ControllerConfig): void {
+  assertProductionDeliveryPolicy(config);
   if (!isReleasePlanV2(plan)) {
     if (config.executionMode === "release-plan-v2-direct") {
       throw new ControllerError(

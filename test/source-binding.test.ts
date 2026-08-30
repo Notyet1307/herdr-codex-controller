@@ -13,6 +13,7 @@ import {
   FakeGitHub,
   completedWorker,
   createTestRepo,
+  git,
   testConfig,
   testPlanV2,
   writeInputs,
@@ -79,6 +80,19 @@ class SourceGitHub extends FakeGitHub {
   override async createPullRequest(job: JobState, deliveryRoot: string) {
     this.createPullRequestCalls += 1;
     return super.createPullRequest(job, deliveryRoot);
+  }
+}
+
+class ObservingSourceGitHub extends SourceGitHub {
+  observedPullRequest: NonNullable<JobState["pullRequest"]> | null = null;
+
+  override async inspectPullRequest() {
+    if (!this.observedPullRequest) throw new Error("test pull request is missing");
+    return {
+      pullRequest: this.observedPullRequest,
+      checks: { state: "success" as const, missing: [], failures: [], pending: [] },
+      mergedAt: null,
+    };
   }
 }
 
@@ -196,6 +210,90 @@ test("every Release Plan v2 source drift fails with zero Worktree, setup, or Cod
       assert.equal(github.createPullRequestCalls, 0, scenario.name);
       assert.equal(existsSync(created.worktreePath), false, scenario.name);
       if (scenario.secretBody) assert.doesNotMatch(job.blocked?.message ?? "", new RegExp(scenario.secretBody));
+    } finally { repo.cleanup(); }
+  }
+});
+
+test("runtime base drift blocks Worker, Delivery, CI, and merge observation", async () => {
+  for (const phase of ["implement", "deliver", "ci", "awaiting_merge"] as const) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const plan = testPlanV2(repo, [1]);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const gitClient = new CountingGit(config);
+      const codex = new FakeCodex(gitClient);
+      const github = new ObservingSourceGitHub();
+      const controller = new ReleaseController({
+        store,
+        git: gitClient,
+        github,
+        codex,
+        validator: new CountingValidator(config),
+      });
+      const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      assert.equal((await controller.step(created.id)).action, "release_prepared");
+      const job = store.load(created.id);
+      job.phase = phase;
+      if (phase !== "implement") job.candidateSha = await gitClient.head(job.worktreePath);
+      if (phase === "ci" || phase === "awaiting_merge") {
+        job.pullRequest = {
+          number: 31,
+          url: "https://github.com/example/project/pull/31",
+          state: "OPEN",
+          headRef: job.branch,
+          baseRef: job.baseRef,
+          headSha: job.candidateSha!,
+          mergeSha: null,
+        };
+        github.observedPullRequest = job.pullRequest;
+        if (phase === "awaiting_merge") job.status = "ready_to_merge";
+      }
+      store.save(job);
+
+      writeFileSync(join(repo.source, "README.md"), "# Base moved\n", "utf8");
+      git(repo.source, ["add", "README.md"]);
+      git(repo.source, ["commit", "-m", "advance base"]);
+      git(repo.source, ["push", "origin", "main"]);
+
+      const result = await controller.step(created.id);
+      const blocked = store.load(created.id);
+      assert.equal(result.action, "blocked", phase);
+      assert.equal(blocked.blocked?.code, "replan_required", phase);
+      assert.match(blocked.blocked?.message ?? "", /runtime_source_base_drift/, phase);
+      assert.equal(codex.calls.length, 0, phase);
+      assert.equal(gitClient.pushCalls, 0, phase);
+    } finally { repo.cleanup(); }
+  }
+});
+
+test("runtime Parent or Child body drift blocks before a fresh Worker", async () => {
+  for (const issueNumber of [100, 1]) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const plan = testPlanV2(repo, [1]);
+      const changes = new Map<number, Partial<IssueSnapshot>>();
+      const github = new SourceGitHub(changes);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const gitClient = new CountingGit(config);
+      const codex = new FakeCodex(gitClient);
+      const controller = new ReleaseController({ store, git: gitClient, github, codex, validator: new CountingValidator(config) });
+      const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      assert.equal((await controller.step(created.id)).action, "release_prepared");
+      changes.set(issueNumber, { body: "changed after prepare" });
+
+      const result = await controller.step(created.id);
+      const blocked = store.load(created.id);
+      assert.equal(result.action, "blocked", String(issueNumber));
+      assert.equal(blocked.blocked?.code, "replan_required", String(issueNumber));
+      assert.match(
+        blocked.blocked?.message ?? "",
+        issueNumber === 100 ? /runtime_parent_binding_drift/ : /runtime_child_binding_drift/,
+      );
+      assert.equal(codex.calls.length, 0);
     } finally { repo.cleanup(); }
   }
 });

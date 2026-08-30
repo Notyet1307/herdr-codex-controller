@@ -102,6 +102,10 @@ test("Controller config schema exposes only the explicit execution modes", () =>
     { valid: true, mutate: () => {} },
     { valid: true, mutate: (value) => { delete value.executionMode; } },
     { valid: false, mutate: (value) => { value.executionMode = "dispatcher-qualified"; } },
+    { valid: false, mutate: (value) => { value.delivery.createPullRequest = false; } },
+    { valid: false, mutate: (value) => { value.delivery.allowNoChecks = true; } },
+    { valid: false, mutate: (value) => { value.delivery.requiredChecks = []; } },
+    { valid: false, mutate: (value) => { value.delivery.requiredChecks = ["verify", "verify"]; } },
   ];
   for (const fixture of fixtures) {
     const value = structuredClone(positive);

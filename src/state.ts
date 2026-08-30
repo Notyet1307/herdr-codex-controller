@@ -44,6 +44,9 @@ const REPLAN_CAUSES = new Set([
   "release_hardening_exhausted",
   "release_review_blocked",
   "release_too_many_issues",
+  "runtime_child_binding_drift",
+  "runtime_parent_binding_drift",
+  "runtime_source_base_drift",
 ]);
 
 export class JobStore {

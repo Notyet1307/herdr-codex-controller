@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type {
   CodexRunRecord,
   CommandConfig,
+  GhCheckSummary,
   IssueSnapshot,
   IssueExecution,
   JobState,
@@ -51,6 +52,10 @@ export class ReleaseController {
 
     try {
       this.assertCurrentInputs(job);
+      if (isReleasePlanV2(job.plan)
+        && !["prepare", "ci", "awaiting_merge", "complete"].includes(job.phase)) {
+        await this.assertSourceStillCurrent(job, job.phase);
+      }
       if (job.activeRun) return await this.reconcileInterruptedRun(job);
       switch (job.phase) {
         case "prepare": return await this.prepare(job);
@@ -226,15 +231,42 @@ export class ReleaseController {
       this.deps.store.save({ ...job, baseSha });
     }
 
+    const { parent, issues } = await this.fetchCurrentSourceIssues(job, null);
+    await this.assertOracleBindingsAtBase(plan);
+    return { baseSha, parent, issues };
+  }
+
+  private async assertSourceStillCurrent(job: JobState, phase: string): Promise<void> {
+    if (!isReleasePlanV2(job.plan)) return;
+    this.assertCurrentInputs(job);
+    const baseSha = await this.deps.git.fetchBase();
+    if (baseSha !== job.plan.source.baseSha) {
+      throw new ControllerError(
+        "runtime_source_base_drift",
+        `The remote base changed during ${phase}; abort this Job and create a fresh Release Plan v2.`,
+      );
+    }
+    await this.fetchCurrentSourceIssues(job, phase);
+  }
+
+  private async fetchCurrentSourceIssues(
+    job: JobState,
+    phase: string | null,
+  ): Promise<{ parent: IssueSnapshot; issues: Map<number, IssueSnapshot> }> {
+    if (!isReleasePlanV2(job.plan)) throw new ControllerError("plan_version_mismatch", "Exact source verification requires Release Plan v2.");
+    const plan = job.plan;
     const parent = await this.deps.github.fetchIssue(plan.source.parentBinding.number, { allowClosed: true });
     if (parent.state !== "OPEN") {
-      throw new ControllerError("plan_parent_not_open", `Parent Issue #${plan.parentIssue} is not OPEN.`);
+      throw new ControllerError(
+        phase === null ? "plan_parent_not_open" : "runtime_parent_binding_drift",
+        `Parent Issue #${plan.parentIssue} is not OPEN${phase === null ? "" : ` during ${phase}`}.`,
+      );
     }
     if (parent.number !== plan.source.parentBinding.number
       || parent.title !== plan.source.parentBinding.expectedTitle
       || sha256PrefixedUtf8(parent.body) !== plan.source.parentBinding.expectedBodyHash) {
       throw new ControllerError(
-        "plan_parent_drift",
+        phase === null ? "plan_parent_drift" : "runtime_parent_binding_drift",
         `Parent Issue #${plan.parentIssue} no longer matches its exact title/body source binding.`,
       );
     }
@@ -243,20 +275,22 @@ export class ReleaseController {
     for (const planIssue of plan.issues) {
       const snapshot = await this.deps.github.fetchIssue(planIssue.number, { allowClosed: true });
       if (snapshot.state !== "OPEN") {
-        throw new ControllerError("plan_issue_not_open", `Child Issue #${planIssue.number} is not OPEN.`);
+        throw new ControllerError(
+          phase === null ? "plan_issue_not_open" : "runtime_child_binding_drift",
+          `Child Issue #${planIssue.number} is not OPEN${phase === null ? "" : ` during ${phase}`}.`,
+        );
       }
       if (snapshot.number !== planIssue.number
         || snapshot.title !== planIssue.expectedTitle
         || sha256PrefixedUtf8(snapshot.body) !== planIssue.expectedBodyHash) {
         throw new ControllerError(
-          "plan_issue_drift",
+          phase === null ? "plan_issue_drift" : "runtime_child_binding_drift",
           `Child Issue #${planIssue.number} no longer matches its exact title/body source binding.`,
         );
       }
       issues.set(planIssue.number, snapshot);
     }
-    await this.assertOracleBindingsAtBase(plan);
-    return { baseSha, parent, issues };
+    return { parent, issues };
   }
 
   private async assertOracleBindingsAtBase(plan: JobState["plan"]): Promise<void> {
@@ -530,6 +564,7 @@ export class ReleaseController {
       throw new ControllerError("issue_validation_failed", `Issue #${issue.number} validation failed after the allowed repair rounds.`, validation.path);
     }
 
+    await this.assertSourceStillCurrent(job, `Issue #${issue.number} commit`);
     const commit = await this.deps.git.commitIssue(job, issue.number, issue.snapshot.title, planIssue.allowNoop);
     await this.assertIssueCommitContract(job, planIssue, commit.sha);
     issue.status = "committed";
@@ -668,6 +703,7 @@ export class ReleaseController {
       this.deps.store.save(job);
       throw new ControllerError("hardening_self_review_missing", "Release hardening Worker did not perform self-review.", execution.record.resultPath);
     }
+    await this.assertSourceStillCurrent(job, "hardening commit");
     if (await this.deps.git.isClean(job.worktreePath)) {
       this.deps.store.save(job);
       throw new ControllerError("hardening_no_changes", "Release hardening completed without producing a repair diff.", execution.record.resultPath);
@@ -693,8 +729,12 @@ export class ReleaseController {
       return stepResult("release_completed_without_pr", true, true, null, `Release ${job.id} completed locally at ${job.candidateSha}.`);
     }
     await this.deps.git.push(job);
+    await this.assertSourceStillCurrent(job, "pull request creation");
     const pullRequest = await this.deps.github.createPullRequest(job, this.deps.store.deliveryRoot(job.id));
-    assertPullRequestIdentity(job, pullRequest, "OPEN");
+    assertPullRequestIdentity(job, pullRequest);
+    if (pullRequest.state !== "OPEN") {
+      throw new ControllerError("pull_request_identity_mismatch", "Delivery requires an OPEN pull request for the exact candidate.");
+    }
     job.pullRequest = pullRequest;
     job.phase = "ci";
     job.status = "running";
@@ -705,10 +745,36 @@ export class ReleaseController {
   private async observeCi(job: JobState): Promise<StepResult> {
     if (!job.pullRequest || !job.candidateSha) throw new ControllerError("ci_identity_missing", "CI observation has no bound PR or candidate SHA.");
     const observed = await this.deps.github.inspectPullRequest(job.pullRequest.number);
+    const merged = observed.pullRequest.state === "MERGED" || observed.mergedAt !== null;
+    assertPullRequestIdentity(
+      job,
+      observed.pullRequest,
+      job.pullRequest.number,
+      merged ? "merged_candidate_mismatch" : "pull_request_identity_mismatch",
+    );
     job.pullRequest = observed.pullRequest;
-    if (observed.pullRequest.state === "MERGED" || observed.mergedAt !== null) return this.completeMerged(job);
+    if (merged) return this.observeMerged(job, observed.checks, observed.mergedAt);
     if (observed.pullRequest.state === "CLOSED") throw new ControllerError("pull_request_closed", "The release pull request was closed without merge.");
-    assertPullRequestIdentity(job, observed.pullRequest, "OPEN");
+    if (observed.pullRequest.state !== "OPEN") throw new ControllerError("pull_request_identity_mismatch", "Observed pull request state is invalid.");
+    await this.assertSourceStillCurrent(job, "CI observation");
+    const required = requiredCheckProblems(observed.checks, this.deps.store.config.delivery.requiredChecks);
+    if (required.failures.length > 0) {
+      if (job.ciRepairRounds >= this.deps.store.config.policy.maxCiRepairRounds) {
+        const path = this.writeReason(job, "required-check-failure", JSON.stringify(observed.checks, null, 2));
+        this.deps.store.save(job);
+        throw new ControllerError("required_check_failed", "A required pull request check failed.", path);
+      }
+      job.ciRepairRounds += 1;
+      return this.scheduleHardening(job, "required-check-failure", JSON.stringify(observed.checks, null, 2), null);
+    }
+    if (required.missing.length > 0) {
+      this.deps.store.save(job);
+      return stepResult("required_check_missing", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${required.missing.join(", ")}.`);
+    }
+    if (required.pending.length > 0) {
+      this.deps.store.save(job);
+      return stepResult("required_check_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${required.pending.map(({ name }) => name).join(", ")}.`);
+    }
     if (observed.checks.state === "failure") {
       if (job.ciRepairRounds >= this.deps.store.config.policy.maxCiRepairRounds) {
         const path = this.writeReason(job, "ci-failure", JSON.stringify(observed.checks, null, 2));
@@ -723,9 +789,17 @@ export class ReleaseController {
       return stepResult("ci_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, "Waiting for GitHub checks.");
     }
     if (this.deps.store.config.delivery.autoMerge) {
+      if (!(await this.deps.github.baseAllowsUpToDateAutoMerge())) {
+        throw new ControllerError(
+          "base_up_to_date_policy_unverified",
+          "Auto-merge requires branch protection or an active ruleset that requires pull requests and every configured required check on the latest base. Configure that server-side policy, or set autoMerge=false and merge manually.",
+        );
+      }
+      await this.assertSourceStillCurrent(job, "auto-merge enablement");
       await this.deps.github.enableAutoMerge(job.pullRequest.number, job.candidateSha);
       job.status = "running";
     } else {
+      await this.assertSourceStillCurrent(job, "ready-to-merge transition");
       job.status = "ready_to_merge";
     }
     job.phase = "awaiting_merge";
@@ -742,16 +816,75 @@ export class ReleaseController {
   private async observeMerge(job: JobState): Promise<StepResult> {
     if (!job.pullRequest || !job.candidateSha) throw new ControllerError("merge_identity_missing", "Merge observation has no bound PR or candidate SHA.");
     const observed = await this.deps.github.inspectPullRequest(job.pullRequest.number);
+    const merged = observed.pullRequest.state === "MERGED" || observed.mergedAt !== null;
+    assertPullRequestIdentity(
+      job,
+      observed.pullRequest,
+      job.pullRequest.number,
+      merged ? "merged_candidate_mismatch" : "pull_request_identity_mismatch",
+    );
     job.pullRequest = observed.pullRequest;
-    if (observed.pullRequest.state === "MERGED" || observed.mergedAt !== null) return this.completeMerged(job);
+    if (merged) return this.observeMerged(job, observed.checks, observed.mergedAt);
     if (observed.pullRequest.state === "CLOSED") throw new ControllerError("pull_request_closed", "The release pull request was closed without merge.");
-    assertPullRequestIdentity(job, observed.pullRequest, "OPEN");
+    if (observed.pullRequest.state !== "OPEN") throw new ControllerError("pull_request_identity_mismatch", "Observed pull request state is invalid.");
+    await this.assertSourceStillCurrent(job, "merge observation");
     job.status = this.deps.store.config.delivery.autoMerge ? "running" : "ready_to_merge";
     this.deps.store.save(job);
     return stepResult("awaiting_merge", false, !this.deps.store.config.delivery.autoMerge, this.deps.store.config.delivery.autoMerge ? this.deps.store.config.delivery.pollIntervalMs : null, "Waiting for the exact candidate PR to merge.");
   }
 
-  private completeMerged(job: JobState): StepResult {
+  private async observeMerged(job: JobState, checks: GhCheckSummary, mergedAt: string | null): Promise<StepResult> {
+    if (!job.pullRequest || job.pullRequest.state !== "MERGED") {
+      throw new ControllerError("merged_candidate_mismatch", "GitHub merge state is inconsistent with the observed pull request.");
+    }
+    const required = requiredCheckProblems(checks, this.deps.store.config.delivery.requiredChecks);
+    if (required.failures.length > 0) {
+      throw new ControllerError("required_check_failed", "A merged pull request has a failed required check.");
+    }
+    if (required.missing.length > 0 || required.pending.length > 0) {
+      this.deps.store.save(job);
+      const missing = required.missing.length > 0;
+      return stepResult(
+        missing ? "required_check_missing" : "required_check_pending",
+        true,
+        false,
+        this.deps.store.config.delivery.pollIntervalMs,
+        `Merged candidate is not complete until required checks are ${missing ? "present" : "successful"}.`,
+      );
+    }
+    if (mergedAt === null || !job.pullRequest.mergeSha) {
+      throw new ControllerError("merge_commit_missing", "GitHub reports a merged pull request without a durable merge commit identity.");
+    }
+    this.assertCurrentInputs(job);
+    if (isReleasePlanV2(job.plan)) {
+      await this.fetchCurrentSourceIssues(job, "merge completion");
+    }
+    try {
+      await this.deps.git.fetchBase();
+      if (!(await this.deps.git.isAncestorOfRemoteBase(job.pullRequest.mergeSha))) {
+        throw new Error("merge commit is not on the current remote base");
+      }
+      if (isReleasePlanV2(job.plan)) {
+        const result = await this.deps.git.verifyMergeResult({
+          mergeSha: job.pullRequest.mergeSha,
+          candidateSha: job.candidateSha!,
+          baseSha: job.plan.source.baseSha,
+          mergeMethod: this.deps.store.config.delivery.mergeMethod,
+        });
+        if (result === "base_mismatch") {
+          throw new ControllerError(
+            "runtime_source_base_drift",
+            "The merged candidate was not applied to the Release Plan v2 source base.",
+          );
+        }
+        if (result === "candidate_mismatch") {
+          throw new ControllerError("merged_candidate_mismatch", "The merge result does not reproduce the exact reviewed candidate.");
+        }
+      }
+    } catch (error) {
+      if (error instanceof ControllerError) throw error;
+      throw new ControllerError("merge_commit_unverified", "The merge commit cannot be read from Git or is not an ancestor of the current remote base.");
+    }
     job.status = "completed";
     job.phase = "complete";
     job.blocked = null;
@@ -829,18 +962,32 @@ export class ReleaseController {
 function assertPullRequestIdentity(
   job: JobState,
   pullRequest: NonNullable<JobState["pullRequest"]>,
-  expectedState: "OPEN",
+  expectedNumber: number | null = null,
+  code = "pull_request_identity_mismatch",
 ): void {
   if (!job.candidateSha
-    || pullRequest.state !== expectedState
+    || (expectedNumber !== null && pullRequest.number !== expectedNumber)
     || pullRequest.headSha !== job.candidateSha
     || pullRequest.headRef !== job.branch
     || pullRequest.baseRef !== job.baseRef) {
     throw new ControllerError(
-      "pull_request_identity_mismatch",
-      "Observed pull request does not bind the exact release branch, base branch, candidate SHA, and open state.",
+      code,
+      "Observed pull request does not bind the exact PR number, release branch, base branch, and candidate SHA.",
     );
   }
+}
+
+function requiredCheckProblems(checks: GhCheckSummary, requiredChecks: string[]): {
+  missing: string[];
+  failures: GhCheckSummary["failures"];
+  pending: GhCheckSummary["pending"];
+} {
+  const required = new Set(requiredChecks);
+  return {
+    missing: checks.missing ?? requiredChecks,
+    failures: checks.failures.filter(({ name }) => required.has(name)),
+    pending: checks.pending.filter(({ name }) => required.has(name)),
+  };
 }
 
 function appendValidation(job: JobState, receipt: ValidationReceipt, path: string): void {

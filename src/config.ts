@@ -3,10 +3,12 @@ import { dirname, resolve } from "node:path";
 import type { CommandConfig, ControllerConfig, ExecutionMode } from "./types.js";
 import {
   assertAbsolutePath,
+  boundedStringArray,
   boundedText,
   parsePositiveInteger,
   pathWithin,
 } from "./util.js";
+import { ControllerError } from "./errors.js";
 
 export function loadConfig(path: string): ControllerConfig {
   const absolute = resolve(path);
@@ -42,17 +44,18 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
     throw new Error("config.branchPrefix is not a safe branch prefix");
   }
   const shell = boundedText(root.shell, "config.shell", 4096);
+  const executionMode = validateExecutionMode(root.executionMode);
   const codex = validateCodex(root.codex);
   const validation = validateValidation(root.validation);
   const policy = validatePolicy(root.policy);
   const review = validateReview(root.review);
-  const delivery = validateDelivery(root.delivery);
+  const delivery = validateDelivery(root.delivery, executionMode);
   if (!review.enabled && policy.maxReleaseHardeningRounds > 0) {
     // Hardening can still repair release validation/CI; this is intentionally allowed.
   }
-  return {
+  const config: ControllerConfig = {
     version: 1,
-    executionMode: validateExecutionMode(root.executionMode),
+    executionMode,
     repo,
     localPath,
     stateDir,
@@ -67,6 +70,24 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
     review,
     delivery,
   };
+  assertProductionDeliveryPolicy(config);
+  return config;
+}
+
+export function assertProductionDeliveryPolicy(
+  config: Pick<ControllerConfig, "executionMode" | "delivery">,
+): void {
+  if (config.executionMode !== "release-plan-v2-direct") return;
+  if (!config.delivery.createPullRequest
+    || config.delivery.allowNoChecks
+    || !Array.isArray(config.delivery.requiredChecks)
+    || config.delivery.requiredChecks.length === 0
+    || new Set(config.delivery.requiredChecks).size !== config.delivery.requiredChecks.length) {
+    throw new ControllerError(
+      "production_delivery_policy_invalid",
+      "release-plan-v2-direct requires createPullRequest=true, allowNoChecks=false, and non-empty unique requiredChecks.",
+    );
+  }
 }
 
 function validateExecutionMode(value: unknown): ExecutionMode {
@@ -138,10 +159,10 @@ function validateReview(value: unknown): ControllerConfig["review"] {
   return { enabled: object.enabled, blockingSeverities: [...new Set(severities)] };
 }
 
-function validateDelivery(value: unknown): ControllerConfig["delivery"] {
+function validateDelivery(value: unknown, executionMode: ExecutionMode): ControllerConfig["delivery"] {
   const object = expectObject(value, "config.delivery");
   expectExactKeys(object, [
-    "allowNoChecks", "autoMerge", "createPullRequest", "draft", "mergeMethod", "pollIntervalMs",
+    "allowNoChecks", "autoMerge", "createPullRequest", "draft", "mergeMethod", "pollIntervalMs", "requiredChecks",
   ], "config.delivery");
   for (const key of ["allowNoChecks", "autoMerge", "createPullRequest", "draft"] as const) {
     if (typeof object[key] !== "boolean") throw new Error(`config.delivery.${key} must be boolean`);
@@ -150,12 +171,25 @@ function validateDelivery(value: unknown): ControllerConfig["delivery"] {
   if (object.mergeMethod !== "merge" && object.mergeMethod !== "squash" && object.mergeMethod !== "rebase") {
     throw new Error("config.delivery.mergeMethod must be merge, squash, or rebase");
   }
+  let requiredChecks: string[];
+  try {
+    requiredChecks = boundedStringArray(object.requiredChecks, "config.delivery.requiredChecks", 100, 500);
+  } catch (error) {
+    if (executionMode === "release-plan-v2-direct") {
+      throw new ControllerError(
+        "production_delivery_policy_invalid",
+        `release-plan-v2-direct requires valid unique requiredChecks: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    throw error;
+  }
   return {
     createPullRequest: object.createPullRequest as boolean,
     draft: object.draft as boolean,
     autoMerge: object.autoMerge as boolean,
     mergeMethod: object.mergeMethod,
     allowNoChecks: object.allowNoChecks as boolean,
+    requiredChecks,
     pollIntervalMs: parsePositiveInteger(object.pollIntervalMs, "config.delivery.pollIntervalMs", 1_000, 10 * 60_000),
   };
 }
