@@ -172,7 +172,8 @@ export function validateWorkerResult(value: unknown): WorkerResult {
   if (result.status === "completed" && (result.blockedReason !== null || result.blockedKind !== null)) {
     throw new Error("completed worker result cannot include blockedReason or blockedKind");
   }
-  if (result.observedRiskClasses.some((risk) => !/^[A-Z][A-Z0-9_]{0,63}$/.test(risk))) {
+  if (new Set(result.observedRiskClasses).size !== result.observedRiskClasses.length
+    || result.observedRiskClasses.some((risk) => !/^[A-Z][A-Z0-9_]{0,63}$/.test(risk))) {
     throw new Error("worker observedRiskClasses is invalid");
   }
   return result;
