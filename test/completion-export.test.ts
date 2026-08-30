@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -67,6 +68,28 @@ test("completion export CLI is public, restart-safe, and byte-idempotent", async
     });
     assert.equal(second.digest, artifact.digest);
     assert.deepEqual(readFileSync(output), firstBytes);
+  } finally { fixture.repo.cleanup(); }
+});
+
+test("locale-bound completion checkpoints fail closed after the canonical cutover", async () => {
+  const fixture = await completedFixture();
+  try {
+    const job = fixture.store.load(fixture.jobId);
+    const { digest: currentDigest, ...body } = job.completion!;
+    const legacyDigest = legacyLocaleDigest(body);
+    assert.notEqual(legacyDigest, currentDigest);
+    job.completion!.digest = legacyDigest;
+    writeFileSync(fixture.store.path(fixture.jobId), `${JSON.stringify(job, null, 2)}\n`, "utf8");
+    assert.throws(() => fixture.store.load(fixture.jobId), /job completion evidence is invalid/);
+    const output = join(fixture.repo.root, "legacy-completion.json");
+    await assert.rejects(exportReleaseCompletion({
+      store: fixture.store,
+      git: new GitClient(fixture.config),
+      github: fixture.github,
+      jobId: fixture.jobId,
+      outputPath: output,
+    }), /job completion evidence is invalid/);
+    assert.equal(existsSync(output), false);
   } finally { fixture.repo.cleanup(); }
 });
 
@@ -262,4 +285,19 @@ async function completedFixture() {
 
 async function rejectsCode(promise: Promise<unknown>, code: string): Promise<void> {
   await assert.rejects(promise, (error: any) => error?.code === code);
+}
+
+function legacyLocaleDigest(value: unknown): string {
+  const canonical = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(canonical);
+    if (!item || typeof item !== "object") return item;
+    return Object.fromEntries(Object.entries(item as Record<string, unknown>)
+      .sort(([left], [right]) => {
+        const foldedLeft = left.toLowerCase();
+        const foldedRight = right.toLowerCase();
+        return foldedLeft < foldedRight ? -1 : foldedLeft > foldedRight ? 1 : left < right ? -1 : left > right ? 1 : 0;
+      })
+      .map(([key, child]) => [key, canonical(child)]));
+  };
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 }
