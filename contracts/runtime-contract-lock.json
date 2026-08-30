@@ -1,0 +1,16 @@
+{
+  "schema": "herdr-codex-controller:runtime-contract-lock:v1",
+  "plannerRiskRegistry": {
+    "repository": "https://github.com/Notyet1307/pi-ticket-planning.git",
+    "commit": "441c8f0816f145b8aa5feb0caf61584c44005fd2",
+    "path": "contracts/risk-class-registry.json",
+    "byteSha256": "4d06dc5e7bafbff2cfbed4004f88b3b41f948f30a7cd70846a113daaa982cf8e",
+    "artifactDigest": "sha256:c4672e817c410fb7f8463430e441c556aed161fa8d740db9eccdb024fb737330"
+  },
+  "artifacts": [
+    { "path": "contracts/risk-class-registry.json", "sha256": "4d06dc5e7bafbff2cfbed4004f88b3b41f948f30a7cd70846a113daaa982cf8e" },
+    { "path": "schemas/release-completion-v1.schema.json", "sha256": "e901c2c4d73e97893cffab50105c1b886f1481f1c5293d48750a8eaac53bcdfa" },
+    { "path": "schemas/release-plan-v2.schema.json", "sha256": "362c9ae154c502ce80df16f17527c7136f4de2804da55c1c7c1314882160f363" }
+  ],
+  "digest": "sha256:bf0465897777327330f68c8664607c2cc3073b155c1ab5204c10d00ed3fb1a51"
+}

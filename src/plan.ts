@@ -19,6 +19,7 @@ import {
 } from "./util.js";
 import { assertProductionDeliveryPolicy, expectExactKeys, expectObject, validateCommands } from "./config.js";
 import { ControllerError } from "./errors.js";
+import { assertCanonicalRiskClasses } from "./risk-classes.js";
 
 const PLAN_KEYS_V1 = [
   "id", "issues", "objective", "parentIssue", "releaseAcceptanceCriteria", "reviewFocus", "title", "version",
@@ -267,6 +268,7 @@ function validateIssueV2(value: unknown, index: number): ReleasePlanIssueV2 {
   if (riskClasses.length === 0 || riskClasses.some((risk) => !/^[A-Z][A-Z0-9_]{0,63}$/.test(risk))) {
     throw new Error(`${label}.riskClasses is invalid`);
   }
+  assertCanonicalRiskClasses(riskClasses, `${label}.riskClasses`);
   const scopeBudget = expectObject(object.scopeBudget, `${label}.scopeBudget`);
   expectExactKeys(scopeBudget, ["maxChangedLines", "maxFiles"], `${label}.scopeBudget`);
   const expectedPaths = pathArray(object.expectedPaths, `${label}.expectedPaths`, 1, 8, true);
@@ -470,6 +472,7 @@ function exactRepoPath(value: unknown, label: string): string {
 function expectedRepoPath(value: unknown, label: string): string {
   const text = boundedExactText(value, label, 2_048);
   const segments = text.split("/");
+  if (segments[0]?.includes("*")) throw new Error(`invalid_expected_path_pattern:${label}`);
   if (text.startsWith("/") || /^[A-Za-z]:/.test(text) || text.includes("\\")
     || segments.some((segment) => !segment || segment === "." || segment === "..")
     || /[?[\]{}\u0000\r\n]/.test(text) || text.includes("**")) {

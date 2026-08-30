@@ -103,7 +103,7 @@ test("Issue Oracle failure schedules repair and only PASS can commit", async () 
       if (kind === "issue-repair") writeFileSync(join(job.worktreePath, "oracle-ready"), "ready\n", "utf8");
       return kind === "review"
         ? { review: { status: "pass", summary: "pass", findings: [] } }
-        : { worker: completedWorker(kind, ["FIXTURE_BEHAVIOR"]) };
+        : { worker: completedWorker(kind, ["BOUNDED_BEHAVIOR_CHANGE"]) };
     });
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -206,7 +206,7 @@ test("every Worker globally protects other Tickets' verifier files and package s
           value.scripts["verify:oracle:o02"] = "exit 1";
           writeFileSync(join(job.worktreePath, target), `${JSON.stringify(value)}\n`, "utf8");
         } else writeFileSync(join(job.worktreePath, target), "export const oracleId = \"changed\";\n", "utf8");
-        return { worker: completedWorker("changed verifier", ["FIXTURE_BEHAVIOR"]) };
+        return { worker: completedWorker("changed verifier", ["BOUNDED_BEHAVIOR_CHANGE"]) };
       });
       const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -244,7 +244,7 @@ test("verifier manifest byte drift and hardening drift are REPLAN_REQUIRED", asy
         }
         if (kind === "release-harden") {
           writeFileSync(join(job.worktreePath, "scripts/lib/o01-helper.mjs"), "export const oracleId = \"changed\";\n", "utf8");
-          return { worker: completedWorker("changed verifier", ["FIXTURE_BEHAVIOR"]) };
+          return { worker: completedWorker("changed verifier", ["BOUNDED_BEHAVIOR_CHANGE"]) };
         }
         return {};
       });
