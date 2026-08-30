@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { validateConfig } from "../src/config.js";
 import { assertPlanCompatibleWithConfig, isReleasePlanV2, validatePlan } from "../src/plan.js";
-import { boundedExactText, digestJson, sha256PrefixedUtf8 } from "../src/util.js";
+import { boundedExactText, digestJson, sha256PrefixedUtf8, stableStringify } from "../src/util.js";
 import { createTestRepo, testConfig, testPlan, testPlanV2 } from "./support.js";
 
 test("config and ordered plan validate with isolated paths", () => {
@@ -13,6 +13,21 @@ test("config and ordered plan validate with isolated paths", () => {
     assert.equal(config.codex.networkAccess, false);
     assert.deepEqual(plan.issues.map((issue) => issue.number), [1, 2]);
   } finally { repo.cleanup(); }
+});
+
+test("canonical JSON uses recursive code-unit key order", () => {
+  const value = {
+    pullRequest: { mergedAt: "a", mergeSha: "b" },
+    controllerProvenance: {
+      releasePlan: { version: 2, digest: "d" },
+      controller: { sourceRevision: "r", sourceManifestDigest: "m" },
+    },
+  };
+  assert.equal(
+    stableStringify(value),
+    '{"controllerProvenance":{"controller":{"sourceManifestDigest":"m","sourceRevision":"r"},"releasePlan":{"digest":"d","version":2}},"pullRequest":{"mergeSha":"b","mergedAt":"a"}}',
+  );
+  assert.equal(stableStringify(value), stableStringify(structuredClone(value)));
 });
 
 test("plan rejects a dependency that does not precede the issue", () => {
