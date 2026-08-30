@@ -8,6 +8,7 @@ import type {
   ValidationReceipt,
 } from "./types.js";
 import { runCommand } from "./command.js";
+import { ControllerError } from "./errors.js";
 import { ensurePrivateDir, writeJsonAtomic } from "./fs-atomic.js";
 import { digestJson, newId, nowIso, sha256 } from "./util.js";
 
@@ -89,4 +90,43 @@ export class Validator {
     writeJsonAtomic(path, receipt);
     return { receipt, path };
   }
+}
+
+export function assertValidationReceipt(receipt: ValidationReceipt): void {
+  if (!receipt || receipt.version !== 2
+    || !receipt.id
+    || !["setup", "issue", "release"].includes(receipt.scope)
+    || (receipt.scope === "issue"
+      ? !Number.isSafeInteger(receipt.issueNumber) || Number(receipt.issueNumber) < 1
+      : receipt.issueNumber !== null)
+    || !/^[a-f0-9]{40}$/.test(receipt.candidateSha)
+    || !/^[a-f0-9]{64}$/.test(receipt.sourceWorktreeDigest)
+    || !Number.isSafeInteger(receipt.commandCount)
+    || receipt.commandCount < 0
+    || !Array.isArray(receipt.commands)
+    || !Number.isFinite(Date.parse(receipt.createdAt))) {
+    throw new ControllerError("validation_receipt_invalid", "Validation receipt structure is invalid.");
+  }
+  for (const command of receipt.commands) {
+    if (!command.command
+      || !Array.isArray(command.oracles)
+      || !Number.isSafeInteger(command.timeoutMs)
+      || command.timeoutMs < 1_000
+      || command.oracles.some((oracle) => !Number.isSafeInteger(oracle.issueNumber) || oracle.issueNumber < 1 || !oracle.oracleId)
+      || !/^sha256:[a-f0-9]{64}$/.test(command.stdoutSha256)
+      || !/^sha256:[a-f0-9]{64}$/.test(command.stderrSha256)
+      || !command.stdoutPath
+      || !command.stderrPath
+      || !Number.isFinite(Date.parse(command.verifiedAt))) {
+      throw new ControllerError("validation_receipt_invalid", `Validation receipt ${receipt.id} command evidence is invalid.`);
+    }
+  }
+  const commandsPassed = receipt.commands.length === receipt.commandCount && receipt.commands.every((command) => (
+    command.exitCode === 0 && command.signal === null && !command.timedOut
+  ));
+  if (receipt.passed !== commandsPassed) {
+    throw new ControllerError("validation_receipt_invalid", `Validation receipt ${receipt.id} pass state is invalid.`);
+  }
+  const { digest, ...identity } = receipt;
+  if (digest !== digestJson(identity)) throw new ControllerError("validation_receipt_invalid", `Validation receipt ${receipt.id} failed its self-digest.`);
 }

@@ -37,6 +37,7 @@ declare module "node:fs" {
   export const fstatSync: any;
   export const fsyncSync: any;
   export const lstatSync: any;
+  export const linkSync: any;
   export const mkdirSync: any;
   export const mkdtempSync: any;
   export const openSync: any;

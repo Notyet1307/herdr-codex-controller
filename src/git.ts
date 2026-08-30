@@ -73,6 +73,26 @@ export class GitClient {
     return mergeTree === candidateTree ? "verified" : "candidate_mismatch";
   }
 
+  async verifyIssueCommit(input: {
+    jobId: string;
+    planDigest: string;
+    issueNumber: number;
+    sha: string;
+    candidateSha: string;
+  }): Promise<boolean> {
+    assertSha(input.sha);
+    assertSha(input.candidateSha);
+    const ancestor = await this.run(this.config.localPath, ["merge-base", "--is-ancestor", input.sha, input.candidateSha]);
+    if (ancestor.exitCode === 1) return false;
+    if (ancestor.exitCode !== 0) throw new Error(`cannot verify Issue commit ancestry: ${ancestor.stderrTail || ancestor.stdoutTail}`);
+    const message = await this.textRaw(this.config.localPath, ["show", "-s", "--format=%B", input.sha]);
+    return hasExactTrailers(message, [
+      ["Herdr-Release-Id", input.jobId],
+      ["Herdr-Issue", String(input.issueNumber)],
+      ["Herdr-Plan-Digest", input.planDigest],
+    ]);
+  }
+
   async ensureWorktree(job: JobState): Promise<void> {
     if (!job.baseSha) throw new Error("job base SHA is missing");
     ensurePrivateDir(this.config.worktreeRoot);
@@ -223,11 +243,11 @@ export class GitClient {
     const message = await this.textRaw(job.worktreePath, ["log", "-1", "--format=%H%n%B"]);
     const [sha, ...bodyLines] = message.split(/\r?\n/);
     if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) return null;
-    const body = bodyLines.join("\n");
-    if (!body.includes(`Herdr-Release-Id: ${job.id}`)
-      || !body.includes(`Herdr-Issue: ${issueNumber}`)
-      || !body.includes(`Herdr-Plan-Digest: ${job.planDigest}`)) return null;
-    return sha;
+    return hasExactTrailers(bodyLines.join("\n"), [
+      ["Herdr-Release-Id", job.id],
+      ["Herdr-Issue", String(issueNumber)],
+      ["Herdr-Plan-Digest", job.planDigest],
+    ]) ? sha : null;
   }
 
   async salvageHardeningCommitAtHead(job: JobState, round: number): Promise<string | null> {
@@ -235,11 +255,11 @@ export class GitClient {
     const message = await this.textRaw(job.worktreePath, ["log", "-1", "--format=%H%n%B"]);
     const [sha, ...bodyLines] = message.split(/\r?\n/);
     if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) return null;
-    const body = bodyLines.join("\n");
-    if (!body.includes(`Herdr-Release-Id: ${job.id}`)
-      || !body.includes(`Herdr-Hardening-Round: ${round}`)
-      || !body.includes(`Herdr-Plan-Digest: ${job.planDigest}`)) return null;
-    return sha;
+    return hasExactTrailers(bodyLines.join("\n"), [
+      ["Herdr-Release-Id", job.id],
+      ["Herdr-Hardening-Round", String(round)],
+      ["Herdr-Plan-Digest", job.planDigest],
+    ]) ? sha : null;
   }
 
   async commitHardening(job: JobState, reason: string): Promise<{ sha: string; created: boolean }> {
@@ -368,4 +388,12 @@ function normalizeSubject(value: string, fallback: string): string {
   const firstLine = value.replace(/[\r\n]+/g, " ").trim();
   const subject = firstLine || fallback;
   return subject.length <= 72 ? subject : `${subject.slice(0, 69)}...`;
+}
+
+function hasExactTrailers(message: string, trailers: Array<[string, string]>): boolean {
+  const lines = message.split(/\r?\n/);
+  return trailers.every(([name, value]) => {
+    const prefix = `${name}: `;
+    return lines.filter((line) => line.startsWith(prefix)).length === 1 && lines.includes(`${prefix}${value}`);
+  });
 }

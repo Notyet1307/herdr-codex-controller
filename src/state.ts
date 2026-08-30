@@ -138,6 +138,7 @@ export class JobStore {
       lastReviewPath: null,
       hardeningReasonPath: null,
       pullRequest: null,
+      completion: null,
       blocked: null,
       retryAuthorizations: [],
       createdAt: now,
@@ -157,6 +158,7 @@ export class JobStore {
       };
     }
     if (job.retryAuthorizations === undefined) job.retryAuthorizations = [];
+    if (job.completion === undefined) job.completion = null;
     assertJob(job);
     assertRetryEvidence(job, this.root(job.id));
     return job;
@@ -292,6 +294,20 @@ export function assertJob(job: JobState): void {
   if (!Array.isArray(job.retryAuthorizations)) throw new Error("job retry authorizations are invalid");
   for (const authorization of job.retryAuthorizations) assertRetryAuthorization(authorization);
   if (job.status === "completed" && job.phase !== "complete") throw new Error("completed job must be in complete phase");
+  if (job.completion !== null) {
+    const { digest, ...identity } = job.completion;
+    if (job.status !== "completed"
+      || digest !== digestJson(identity)
+      || job.completion.planDigest !== job.planDigest
+      || job.completion.controllerProvenanceDigest !== job.provenance.digest
+      || job.completion.candidateSha !== job.candidateSha
+      || job.completion.pullRequest.number !== job.pullRequest?.number
+      || job.completion.pullRequest.mergeSha !== job.pullRequest?.mergeSha
+      || job.completion.mergedMainSha !== job.completion.pullRequest.mergeSha
+      || !isCanonicalIsoTime(job.completion.completedAt)) {
+      throw new Error("job completion evidence is invalid");
+    }
+  }
   if (job.activeRun && job.status !== "running") throw new Error("only running jobs may have an active run");
 }
 

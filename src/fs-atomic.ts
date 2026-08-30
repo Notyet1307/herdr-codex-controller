@@ -4,12 +4,14 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -44,6 +46,42 @@ export function writeBytesAtomic(path: string, value: Uint8Array, mode = 0o600):
   writeFileAtomic(path, value, mode);
 }
 
+export function writePublicJsonAtomic(path: string, value: unknown): "created" | "unchanged" {
+  const absolute = resolve(path);
+  const parent = resolve(dirname(absolute));
+  const parentStat = lstatSync(parent);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink() || realpathSync(parent) !== parent) {
+    throw new Error("public output parent is unsafe");
+  }
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+  if (existsSync(absolute)) return assertExistingPublicOutput(absolute, bytes);
+
+  const temporary = resolve(parent, `.${newId("public-output")}`);
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeFileSync(fd, bytes);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  chmodSync(temporary, 0o644);
+  try {
+    linkSync(temporary, absolute);
+  } catch {
+    if (existsSync(absolute) && assertExistingPublicOutput(absolute, bytes) === "unchanged") return "unchanged";
+    throw new Error("public output conflicts with an existing file");
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+  const dirFd = openSync(parent, "r");
+  try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+  const stat = lstatSync(absolute);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o644) {
+    throw new Error("public output was not created safely");
+  }
+  return "created";
+}
+
 function writeFileAtomic(path: string, value: string | Uint8Array, mode: number): void {
   const absolute = resolve(path);
   const parent = ensurePrivateDir(dirname(absolute));
@@ -63,6 +101,15 @@ function writeFileAtomic(path: string, value: string | Uint8Array, mode: number)
   } finally {
     closeSync(dirFd);
   }
+}
+
+function assertExistingPublicOutput(path: string, expected: Uint8Array): "unchanged" {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o644
+    || !readFileSync(path).equals(Buffer.from(expected))) {
+    throw new Error("public output conflicts with an existing file");
+  }
+  return "unchanged";
 }
 
 export function copyJsonSnapshot(sourcePath: string, destinationPath: string): void {

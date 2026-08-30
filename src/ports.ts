@@ -24,6 +24,13 @@ export interface GitPort {
     baseSha: string;
     mergeMethod: "merge" | "squash" | "rebase";
   }): Promise<"verified" | "base_mismatch" | "candidate_mismatch">;
+  verifyIssueCommit(input: {
+    jobId: string;
+    planDigest: string;
+    issueNumber: number;
+    sha: string;
+    candidateSha: string;
+  }): Promise<boolean>;
   ensureWorktree(job: JobState): Promise<void>;
   verifyWorktree(job: JobState): Promise<void>;
   head(cwd: string): Promise<string>;

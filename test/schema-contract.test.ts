@@ -7,6 +7,8 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { validatePlan } from "../src/plan.js";
 import { validateDispatcherConfig } from "../src/dispatcher-config.js";
 import { validateConfig } from "../src/config.js";
+import { assertReleaseCompletion } from "../src/completion-export.js";
+import { digestJson } from "../src/util.js";
 import { createTestRepo, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
 
 function readSchema(name: string): Record<string, unknown> {
@@ -116,5 +118,80 @@ test("Controller config schema exposes only the explicit execution modes", () =>
     assert.equal(validateSchema(value), fixture.valid, JSON.stringify(validateSchema.errors));
     if (fixture.valid) assert.doesNotThrow(() => validateConfig(value));
     else assert.throws(() => validateConfig(value));
+  }
+});
+
+test("release completion schema and runtime validator are closed and self-digested", () => {
+  const schema = readSchema("release-completion-v1.schema.json");
+  const ajv = new Ajv2020({ allErrors: true, strict: false, validateFormats: false });
+  const validateSchema = ajv.compile(schema);
+  const planDigest = "1".repeat(64);
+  const controllerBody = {
+    version: 1 as const,
+    sourceRevision: "2".repeat(40),
+    sourceManifestDigest: "3".repeat(64),
+    buildDigest: "4".repeat(64),
+  };
+  const controller = { ...controllerBody, digest: digestJson(controllerBody) };
+  const provenanceBody = {
+    version: 1 as const,
+    controller,
+    executionMode: "release-plan-v2-direct" as const,
+    configDigest: "5".repeat(64),
+    releasePlan: { version: 2 as const, digest: planDigest },
+  };
+  const body = {
+    schema: "herdr-codex-controller:release-completion:v1" as const,
+    releaseId: "release-1",
+    repo: "example/project",
+    baseRef: "main",
+    planDigest,
+    sourceBaseSha: "6".repeat(40),
+    candidateSha: "7".repeat(40),
+    issueCommits: [{ issueNumber: 1, sha: "8".repeat(40) }],
+    releaseValidationDigest: "9".repeat(64),
+    reviewResultDigest: "a".repeat(64),
+    pullRequest: { number: 1, headRef: "agent/release-1", headSha: "7".repeat(40), baseRef: "main", mergeSha: "b".repeat(40), mergedAt: "2026-08-30T00:00:00.000Z" },
+    requiredChecks: ["verify"],
+    mergedMainSha: "b".repeat(40),
+    dependencyHandoffDigests: [],
+    controllerProvenance: { ...provenanceBody, digest: digestJson(provenanceBody) },
+    completedAt: "2026-08-30T00:01:00.000Z",
+  };
+  const completion = { ...body, digest: `sha256:${digestJson(body)}` };
+  assert.equal(validateSchema(completion), true, JSON.stringify(validateSchema.errors));
+  assert.doesNotThrow(() => assertReleaseCompletion(completion));
+  assert.throws(() => assertReleaseCompletion({ ...completion, digest: `sha256:${"0".repeat(64)}` }));
+
+  const invalids: Array<{ name: string; mutate(value: any): void }> = [
+    { name: "unknown top-level key", mutate: (value) => { value.privatePath = "/secret"; } },
+    { name: "non-canonical release id", mutate: (value) => { value.releaseId = "NOT schema conforming"; } },
+    { name: "oversized base ref", mutate: (value) => { value.baseRef = "b".repeat(301); value.pullRequest.baseRef = value.baseRef; } },
+    { name: "oversized head ref", mutate: (value) => { value.pullRequest.headRef = "h".repeat(301); } },
+    { name: "too many Issue commits", mutate: (value) => { value.issueCommits = Array.from({ length: 51 }, (_, index) => ({ issueNumber: index + 1, sha: index.toString(16).padStart(40, "0") })); } },
+    { name: "open Issue commit", mutate: (value) => { value.issueCommits[0].extra = true; } },
+    { name: "too many required checks", mutate: (value) => { value.requiredChecks = Array.from({ length: 101 }, (_, index) => `check-${index}`); } },
+    { name: "too many handoffs", mutate: (value) => { value.dependencyHandoffDigests = Array.from({ length: 101 }, (_, index) => `sha256:${index.toString(16).padStart(64, "0")}`); } },
+    { name: "compatibility provenance", mutate: (value) => { value.controllerProvenance.executionMode = "release-plan-v1-compatibility"; } },
+    { name: "Plan v1 provenance", mutate: (value) => { value.controllerProvenance.releasePlan.version = 1; } },
+    { name: "open provenance", mutate: (value) => { value.controllerProvenance.extra = true; } },
+    { name: "open Controller identity", mutate: (value) => { value.controllerProvenance.controller.extra = true; } },
+    { name: "open Plan provenance", mutate: (value) => { value.controllerProvenance.releasePlan.extra = true; } },
+  ];
+  for (const fixture of invalids) {
+    const invalid = structuredClone(completion) as any;
+    fixture.mutate(invalid);
+    const { digest: _controllerDigest, ...controllerIdentity } = invalid.controllerProvenance.controller;
+    invalid.controllerProvenance.controller.digest = digestJson(controllerIdentity);
+    const { digest: _provenanceDigest, ...provenanceIdentity } = invalid.controllerProvenance;
+    invalid.controllerProvenance.digest = digestJson(provenanceIdentity);
+    const { digest: _artifactDigest, ...artifactIdentity } = invalid;
+    invalid.digest = `sha256:${digestJson(artifactIdentity)}`;
+    assert.equal(validateSchema(invalid), false, fixture.name);
+    assert.throws(
+      () => assertReleaseCompletion(invalid),
+      (error: any) => error?.code === "completion_export_artifact_invalid",
+      fixture.name,
+    );
   }
 });
