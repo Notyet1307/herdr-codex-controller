@@ -200,10 +200,11 @@ function sandboxEnvironment(input: {
 
 function sensitiveRoots(additional: string[]): string[] {
   const candidates = [process.env.HOME, tmpdir(), "/tmp", "/private/tmp", "/run", "/var/run", ...additional];
-  return [...new Set(candidates
+  const canonical = [...new Set(candidates
     .filter((entry): entry is string => typeof entry === "string" && entry.startsWith("/") && existsSync(entry))
     .map((entry) => realpathSync(entry)))]
-    .sort();
+    .sort((left, right) => left.length - right.length || (left < right ? -1 : left > right ? 1 : 0));
+  return canonical.filter((entry, index) => !canonical.slice(0, index).some((parent) => pathWithin(parent, entry)));
 }
 
 function profileTemplate(deniedRoots: string[]): string {
