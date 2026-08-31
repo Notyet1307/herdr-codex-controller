@@ -17,6 +17,8 @@ import type {
 } from "./types.js";
 import { digestJson, pathWithin, sha256 } from "./util.js";
 import { assertValidationReceipt } from "./validator.js";
+import { assertReviewDemoResult } from "./demo.js";
+import type { ReviewDemoResult } from "./types.js";
 
 const MAX_REPORT_BYTES = 512 * 1024;
 const MAX_CHANGED_PATHS = 100;
@@ -88,6 +90,18 @@ export type ReleaseReportModel = {
       rationale: string;
       recommendation: string;
     }>;
+  };
+  demonstration: {
+    status: "PASS" | "WARN" | "NOT RUN";
+    command: string | null;
+    required: boolean | null;
+    networkAccess: boolean | null;
+    exitCode: number | null;
+    durationMs: number | null;
+    stdoutExcerpt: string;
+    stderrExcerpt: string;
+    artifacts: Array<{ path: string; mediaType: string; bytes: number }>;
+    error: string | null;
   };
   remainingConcerns: {
     items: string[];
@@ -188,6 +202,7 @@ export async function buildReleaseReportModel(input: {
   const reviewRecord = [...input.job.runs].reverse().find(({ kind, resultPath }) => (
     kind === "review" && resultPath === input.job.lastReviewPath
   ));
+  const demo = readReviewDemo(input.jobRoot, input.job);
 
   return {
     result: {
@@ -247,6 +262,29 @@ export async function buildReleaseReportModel(input: {
         ? "The Job references an aggregate review, but no valid structured result is available."
         : "Aggregate review has not run.",
       findings: [],
+    },
+    demonstration: demo ? {
+      status: demo.passed ? "PASS" : "WARN",
+      command: clean(demo.command, 1_000),
+      required: demo.required,
+      networkAccess: demo.networkAccess,
+      exitCode: demo.exitCode,
+      durationMs: demo.durationMs,
+      stdoutExcerpt: clean(demo.stdoutTail, MAX_EXCERPT_BYTES, true),
+      stderrExcerpt: clean(demo.stderrTail, MAX_EXCERPT_BYTES, true),
+      artifacts: demo.artifacts.map((artifact) => ({ ...artifact, path: clean(artifact.path, 1_000) })),
+      error: demo.error === null ? null : clean(demo.error, 1_000),
+    } : {
+      status: "NOT RUN",
+      command: null,
+      required: input.config.reviewDemo?.required ?? null,
+      networkAccess: input.config.reviewDemo?.networkAccess ?? null,
+      exitCode: null,
+      durationMs: null,
+      stdoutExcerpt: "",
+      stderrExcerpt: "",
+      artifacts: [],
+      error: null,
     },
     remainingConcerns: {
       items: concerns,
@@ -353,6 +391,22 @@ export function renderReleaseReport(model: ReleaseReportModel): string {
     lines.push(`### Finding ${index + 1}: ${inline(finding.severity)}${location}`, "");
     lines.push(`- Summary: ${inline(finding.summary)}`, `- Rationale: ${inline(finding.rationale)}`, `- Recommendation: ${inline(finding.recommendation)}`, "");
   }
+  lines.push("## Demonstration", "");
+  lines.push(`- Status: **${model.demonstration.status}**`);
+  if (model.demonstration.command) {
+    lines.push(`- Command: \`${code(model.demonstration.command)}\``);
+    lines.push(`- Required: ${model.demonstration.required ? "yes" : "no"}`);
+    lines.push(`- Network: ${model.demonstration.networkAccess ? "network-enabled demonstration" : "disabled"}`);
+    lines.push(`- Exit: ${model.demonstration.exitCode ?? "not available"}`);
+    lines.push(`- Duration: ${model.demonstration.durationMs === null ? "not available" : formatDuration(model.demonstration.durationMs)}`);
+    if (model.demonstration.error) lines.push(`- Error: ${inline(model.demonstration.error)}`);
+    lines.push("- Artifacts:");
+    lines.push(...model.demonstration.artifacts.map((artifact) => `  - \`${code(artifact.path)}\` — ${artifact.mediaType}, ${artifact.bytes} bytes`));
+    if (model.demonstration.artifacts.length === 0) lines.push("  - None.");
+    if (model.demonstration.stdoutExcerpt) lines.push("", "stdout:", "", ...indented(model.demonstration.stdoutExcerpt));
+    if (model.demonstration.stderrExcerpt) lines.push("", "stderr:", "", ...indented(model.demonstration.stderrExcerpt));
+  } else lines.push("- No Review Demo is recorded for the current candidate.");
+  lines.push("");
   lines.push("## Remaining concerns", "");
   lines.push(...bullets(model.remainingConcerns.items, "None observed."));
   if (model.remainingConcerns.blockedReason) lines.push(`- Blocked reason: ${inline(model.remainingConcerns.blockedReason)}`);
@@ -385,7 +439,7 @@ export function renderPullRequestBody(model: ReleaseReportModel): string {
   const checks = model.checks.slice(-12).map((check) => `- ${inline(check.stage)}: ${inline(check.command)} — ${check.status}`).join("\n") || "- No checks recorded";
   const risks = model.remainingConcerns.items.map((item) => `- ${inline(item)}`).join("\n") || "- None observed";
   const diff = model.change.available ? `${model.change.files} files, ${model.change.changedLines} changed lines` : "Not available yet";
-  return `## Goal\n\n${inline(model.goal.objective)}\n\n## Issues\n\n${issues}\n\n## Change summary\n\n- ${diff}\n\n## Checks\n\n${checks}\n\n## Aggregate review\n\n- ${model.aggregateReview.status}: ${inline(model.aggregateReview.summary)}\n\n## Residual risks\n\n${risks}\n\n## Candidate\n\n${fullIdentity(model.result.candidateSha)}\n`;
+  return `## Goal\n\n${inline(model.goal.objective)}\n\n## Issues\n\n${issues}\n\n## Change summary\n\n- ${diff}\n\n## Checks\n\n${checks}\n\n## Aggregate review\n\n- ${model.aggregateReview.status}: ${inline(model.aggregateReview.summary)}\n\n## Demonstration\n\n- ${model.demonstration.status}${model.demonstration.networkAccess ? " (network-enabled)" : ""}\n\n## Residual risks\n\n${risks}\n\n## Candidate\n\n${fullIdentity(model.result.candidateSha)}\n`;
 }
 
 export async function exportReleaseReport(input: {
@@ -502,6 +556,17 @@ function readAggregateReview(jobRoot: string, job: JobState): ReviewResult | nul
     const result = readPrivateJson<unknown>(jobRoot, job.lastReviewPath);
     const review = validateReviewResult(result);
     return digestJson(review) === record.resultDigest ? review : null;
+  } catch {
+    return null;
+  }
+}
+
+function readReviewDemo(jobRoot: string, job: JobState): ReviewDemoResult | null {
+  if (!job.reviewDemo || job.reviewDemo.candidateSha !== job.candidateSha) return null;
+  try {
+    const result = readPrivateJson<ReviewDemoResult>(jobRoot, job.reviewDemo.path);
+    assertReviewDemoResult(result);
+    return result.digest === job.reviewDemo.digest ? result : null;
   } catch {
     return null;
   }

@@ -66,5 +66,6 @@ Issue repair 使用每 Issue counter。Release validation/review/CI code failure
 ## 产物
 
 - `review.md`：动态、bounded、面向人工，和 PR Body 共用 model。
+- Review Demo：可选单命令，绑定 exact candidate；失败按 required/WARN 策略处理，仅复制 `.herdr-review-output/`。
 - Completion v3：当前跨仓消费者仍依赖，暂时保留。
 - 私有 state：完整 receipt、structured Agent result 与 bounded logs；不公开 prompt/events/env。

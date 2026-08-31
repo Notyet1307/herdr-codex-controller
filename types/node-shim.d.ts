@@ -58,6 +58,7 @@ declare module "node:os" { export const homedir: any; export const tmpdir: any; 
 declare module "node:path" {
   export const basename: any;
   export const dirname: any;
+  export const extname: any;
   export const isAbsolute: any;
   export const join: any;
   export const relative: any;

@@ -16,7 +16,7 @@ import type {
   ValidationReceipt,
   ValidationCommandConfig,
 } from "./types.js";
-import type { CodexPort, GitHubPort, GitPort, ValidationPort } from "./ports.js";
+import type { CodexPort, DemoPort, GitHubPort, GitPort, ValidationPort } from "./ports.js";
 import { ControllerError, asControllerError } from "./errors.js";
 import { createCompletionEvidence, createPublicCompletionCheckpoint, readCanonicalCandidateProof } from "./completion-export.js";
 import { unknownRiskClasses } from "./risk-classes.js";
@@ -46,6 +46,7 @@ export type ControllerDependencies = {
   github: GitHubPort;
   codex: CodexPort;
   validator: ValidationPort;
+  demo?: DemoPort;
 };
 
 export class ReleaseController {
@@ -880,6 +881,32 @@ export class ReleaseController {
       throw new ControllerError("delivery_candidate_drift", "Delivery requires the exact clean reviewed candidate.");
     }
     const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    const demoConfig = this.deps.store.config.reviewDemo;
+    if (demoConfig && job.reviewDemo?.candidateSha !== job.candidateSha) {
+      if (!this.deps.demo) throw new ControllerError("review_demo_runner_missing", "Review Demo is configured but no runner is available.");
+      const demo = await this.deps.demo.run({ job, demoRoot: this.deps.store.demoRoot(job.id) });
+      job.reviewDemo = {
+        candidateSha: demo.result.candidateSha,
+        path: demo.path,
+        digest: demo.result.digest,
+        passed: demo.result.passed,
+        required: demo.result.required,
+      };
+      this.deps.store.save(job);
+      if (!demo.result.passed && demoConfig.required) {
+        throw new ControllerError("review_demo_failed", "Required Review Demo failed.", demo.path);
+      }
+      return stepResult(
+        demo.result.passed ? "review_demo_passed" : "review_demo_warn",
+        true,
+        false,
+        null,
+        demo.result.passed ? "Review Demo passed for the exact candidate." : "Optional Review Demo failed; delivery may continue with WARN.",
+      );
+    }
+    if (demoConfig?.required && job.reviewDemo && !job.reviewDemo.passed) {
+      throw new ControllerError("review_demo_failed", "Required Review Demo failed.", job.reviewDemo.path);
+    }
     await this.assertBaseStillCurrent(job, "delivery");
     await this.deps.git.push(job);
     if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {

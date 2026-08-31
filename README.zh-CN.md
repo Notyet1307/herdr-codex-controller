@@ -67,6 +67,22 @@ Config 只保留操作者真实选择：repo/path、timeout/output limit、valid
 
 示例 `validation.setup` 在 disposable projection 内执行 `npm ci ... && npm test`，因此 baseline 是实际检查而不只是安装依赖。
 
+需要真实 API/UI 演示时，将 `reviewDemo` 从 `null` 改为一个命令；目标仓库负责 curl、Playwright 或自有 demo script：
+
+```json
+{
+  "reviewDemo": {
+    "command": "npm run review:demo",
+    "required": true,
+    "networkAccess": false,
+    "timeoutMs": 600000,
+    "maxOutputBytes": 1048576
+  }
+}
+```
+
+Demo 在 exact candidate disposable projection 中运行，只复制 `.herdr-review-output/` 的安全 regular files。`networkAccess=true` 会在报告中明确标记为 network-enabled demonstration。
+
 ## 启动
 
 ```bash

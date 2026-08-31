@@ -150,6 +150,7 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
       maxChangedFiles: 50,
       maxChangedLines: 4_000,
     },
+    reviewDemo: null,
     review: { enabled: true, blockingSeverities: ["critical", "major"] },
     delivery: {
       createPullRequest: true,

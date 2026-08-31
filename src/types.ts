@@ -89,6 +89,13 @@ export type ControllerConfig = {
     maxChangedFiles: number;
     maxChangedLines: number;
   };
+  reviewDemo?: {
+    command: string;
+    required: boolean;
+    networkAccess: boolean;
+    timeoutMs: number;
+    maxOutputBytes: number;
+  } | null;
   review: {
     enabled: boolean;
     blockingSeverities: Array<"critical" | "major">;
@@ -557,6 +564,36 @@ export type DeliveryAuthorityState = {
   error: string | null;
 };
 
+export type ReviewDemoResult = {
+  version: 1;
+  id: string;
+  candidateSha: string;
+  command: string;
+  required: boolean;
+  networkAccess: boolean;
+  sandboxPolicyDigest: string;
+  passed: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  outputLimitExceeded: boolean;
+  durationMs: number;
+  stdoutTail: string;
+  stderrTail: string;
+  artifacts: Array<{ path: string; mediaType: string; bytes: number }>;
+  error: string | null;
+  createdAt: string;
+  digest: string;
+};
+
+export type ReviewDemoBinding = {
+  candidateSha: string;
+  path: string;
+  digest: string;
+  passed: boolean;
+  required: boolean;
+};
+
 export type JobState = {
   version: 2 | 3 | 4;
   id: string;
@@ -602,6 +639,7 @@ export type JobState = {
   pullRequest: PullRequestState | null;
   ciGate: CiGateState | null;
   deliveryAuthority: DeliveryAuthorityState | null;
+  reviewDemo: ReviewDemoBinding | null;
   completion: JobCompletionEvidence | null;
   publicCompletion: ReleaseCompletionV3 | null;
   blocked: BlockedState | null;

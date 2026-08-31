@@ -30,13 +30,13 @@ export function validateConfig(value: unknown, sourcePath = "config.json", optio
   const keys = version === 4
     ? [
       "baseRef", "branchPrefix", "codex", "delivery", "localPath", "policy", "remote", "remoteIdentity", "repo",
-      "shell", "stateDir", "validation", "version", "worktreeRoot",
+      "reviewDemo", "shell", "stateDir", "validation", "version", "worktreeRoot",
     ]
     : [
       "baseRef", "branchPrefix", "codex", "delivery", "executionMode", "localPath", "policy", "remote", "remoteIdentity",
       "repo", "review", "shell", "stateDir", "validation", "version", "worktreeRoot",
     ];
-  expectExactKeys(root, keys, "config", version === 4 ? [] : ["executionMode"]);
+  expectExactKeys(root, keys, "config", version === 4 ? ["reviewDemo"] : ["executionMode"]);
   const repo = boundedText(root.repo, "config.repo", 300);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("config.repo must be OWNER/REPO");
   const localPath = assertAbsolutePath(boundedText(root.localPath, "config.localPath", 4096), "config.localPath");
@@ -69,6 +69,7 @@ export function validateConfig(value: unknown, sourcePath = "config.json", optio
     throw new Error("validation sandbox root must not overlap localPath, stateDir, or worktreeRoot");
   }
   const policy = validatePolicy(root.policy, version);
+  const reviewDemo = version === 4 ? validateReviewDemo(root.reviewDemo) : null;
   const review = version === 4
     ? { enabled: true as const, blockingSeverities: ["critical", "major"] as Array<"critical" | "major"> }
     : validateReview(root.review);
@@ -88,6 +89,7 @@ export function validateConfig(value: unknown, sourcePath = "config.json", optio
     codex,
     validation,
     policy,
+    ...(version === 4 ? { reviewDemo } : {}),
     review,
     delivery,
   };
@@ -97,6 +99,22 @@ export function validateConfig(value: unknown, sourcePath = "config.json", optio
   return config;
 }
 
+function validateReviewDemo(value: unknown): NonNullable<ControllerConfig["reviewDemo"]> | null {
+  if (value === undefined || value === null) return null;
+  const object = expectObject(value, "config.reviewDemo");
+  expectExactKeys(object, ["command", "maxOutputBytes", "networkAccess", "required", "timeoutMs"], "config.reviewDemo");
+  if (typeof object.required !== "boolean" || typeof object.networkAccess !== "boolean") {
+    throw new Error("config.reviewDemo required and networkAccess must be boolean");
+  }
+  return {
+    command: boundedText(object.command, "config.reviewDemo.command", 8_192),
+    required: object.required,
+    networkAccess: object.networkAccess,
+    timeoutMs: parsePositiveInteger(object.timeoutMs, "config.reviewDemo.timeoutMs", 1_000, 60 * 60_000),
+    maxOutputBytes: parsePositiveInteger(object.maxOutputBytes, "config.reviewDemo.maxOutputBytes", 4_096, 8 * 1024 * 1024),
+  };
+}
+
 export function assertProductionDeliveryPolicy(
   config: Pick<ControllerConfig, "version" | "executionMode" | "codex" | "delivery" | "remoteIdentity" | "review" | "shell" | "validation">,
 ): void {
@@ -104,7 +122,7 @@ export function assertProductionDeliveryPolicy(
   if (config.version !== 4 || config.validation.sandbox === null || config.remoteIdentity === null) {
     throw new ControllerError(
       "production_config_migration_required",
-      "release-plan-v2-direct requires config version 3 with explicit sandbox, check, and merge-authority contracts.",
+      "release-plan-v2-direct requires config version 4 with explicit sandbox and required-check contracts.",
     );
   }
   if (config.codex.workerProfile !== null

@@ -17,6 +17,8 @@ import {
   createControllerProvenance,
   readControllerIdentity,
 } from "./provenance.js";
+import { assertReviewDemoResult } from "./demo.js";
+import type { ReviewDemoResult } from "./types.js";
 
 export const REPLAN_REQUIRED_CODE = "replan_required";
 
@@ -144,6 +146,7 @@ export class JobStore {
       pullRequest: null,
       ciGate: null,
       deliveryAuthority: null,
+      reviewDemo: null,
       completion: null,
       publicCompletion: null,
       blocked: null,
@@ -174,15 +177,18 @@ export class JobStore {
     job.repairReasonPath ??= legacy.hardeningReasonPath ?? null;
     job.ciGate ??= null;
     job.deliveryAuthority ??= null;
+    job.reviewDemo ??= null;
     job.publicCompletion ??= null;
     assertJob(job);
     assertRetryEvidence(job, this.root(job.id));
+    assertReviewDemoEvidence(job, this.root(job.id));
     return job;
   }
 
   save(job: JobState): void {
     assertJob(job);
     assertRetryEvidence(job, this.root(job.id));
+    assertReviewDemoEvidence(job, this.root(job.id));
     job.updatedAt = nowIso();
     ensurePrivateDir(this.root(job.id));
     writeJsonAtomic(this.path(job.id), job);
@@ -232,6 +238,10 @@ export class JobStore {
 
   deliveryRoot(id: string): string {
     return ensurePrivateDir(join(this.root(id), "delivery"));
+  }
+
+  demoRoot(id: string): string {
+    return ensurePrivateDir(join(this.root(id), "demo"));
   }
 }
 
@@ -366,6 +376,10 @@ export function assertJob(job: JobState): void {
     }
   }
   if (job.activeRun && job.status !== "running") throw new Error("only running jobs may have an active run");
+  if (job.reviewDemo && (job.reviewDemo.candidateSha.length !== 40
+    || !isAbsolute(job.reviewDemo.path) || !/^[a-f0-9]{64}$/u.test(job.reviewDemo.digest))) {
+    throw new Error("job review Demo binding is invalid");
+  }
 }
 
 function assertRetryAuthorization(authorization: RetryAuthorization, blocked?: NonNullable<JobState["blocked"]>): void {
@@ -389,6 +403,19 @@ function assertRetryAuthorization(authorization: RetryAuthorization, blocked?: N
 
 function assertRetryEvidence(job: JobState, jobRoot: string): void {
   for (const authorization of job.retryAuthorizations) assertRetryEvidenceBinding(authorization, jobRoot);
+}
+
+function assertReviewDemoEvidence(job: JobState, jobRoot: string): void {
+  if (!job.reviewDemo) return;
+  if (!pathWithin(jobRoot, job.reviewDemo.path)) throw new Error("job review Demo result escapes its private root");
+  let result: ReviewDemoResult;
+  try { result = readJsonFile<ReviewDemoResult>(job.reviewDemo.path); }
+  catch { throw new Error("job review Demo result is missing or unsafe"); }
+  assertReviewDemoResult(result);
+  if (result.candidateSha !== job.reviewDemo.candidateSha || result.digest !== job.reviewDemo.digest
+    || result.passed !== job.reviewDemo.passed || result.required !== job.reviewDemo.required) {
+    throw new Error("job review Demo result differs from its binding");
+  }
 }
 
 function assertRetryEvidenceBinding(authorization: RetryAuthorization, jobRoot: string): void {

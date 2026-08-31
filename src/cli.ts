@@ -25,6 +25,7 @@ import { createControllerProvenance, readControllerIdentity } from "./provenance
 import { exportReleaseCompletion } from "./completion-export.js";
 import { readControllerIdentityHistory } from "./identity-history.js";
 import { exportReleaseReport } from "./report.js";
+import { DemoRunner } from "./demo.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -93,7 +94,8 @@ async function main(): Promise<void> {
   const github = new GitHubClient(config);
   const codex = new CodexRunner(config, git);
   const validator = new Validator(config, git);
-  const controller = new ReleaseController({ store, git, github, codex, validator });
+  const demo = new DemoRunner(config, git);
+  const controller = new ReleaseController({ store, git, github, codex, validator, demo });
 
   if (args.command === "doctor") {
     await git.preflight();
@@ -211,6 +213,7 @@ async function main(): Promise<void> {
         issue.nextRunKind = "recovery";
         job.phase = "repair";
       }
+      if (fromPhase === "deliver" && job.reviewDemo && !job.reviewDemo.passed) job.reviewDemo = null;
       writeJsonAtomic(notePath, authorization);
       store.save(job);
       output(args, {

@@ -18,7 +18,7 @@
     },
     {
       "path": "schemas/controller-config.schema.json",
-      "sha256": "ae6da7d5749599e9be23c869e07c1fca2972a58636638f1a976617f148c4172a"
+      "sha256": "f70ad53eeeae4dc3b0f8ed194df73dc83d5f8deebfecb866fa6cfde84fbafc05"
     },
     {
       "path": "schemas/controller-identity-history-v1.schema.json",
@@ -33,5 +33,5 @@
       "sha256": "c32c6cfa13bcdb8766852f2d1c2d0cfe46b8f05ed6c9f577e2aefa092d3d6ebb"
     }
   ],
-  "digest": "sha256:bfcd0fdf46bba9585720da2dd2f17788285e1fbdf90b9f618618a1969dd896aa"
+  "digest": "sha256:5a76d9ed721d1344f8c558d549949235f3aa2463b2ffdd77a599700b993b5555"
 }
