@@ -24,9 +24,10 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Stage the validation sandbox executable outside the denied source tree
         run: |
-          install -d -m 700 /var/tmp/herdr-codex-sandbox-ci
-          install -m 700 node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex /var/tmp/herdr-codex-sandbox-ci/codex
-          echo "HERDR_TEST_SANDBOX_BIN=/var/tmp/herdr-codex-sandbox-ci/codex" >> "$GITHUB_ENV"
+          install -d -m 700 /var/tmp/herdr-codex-sandbox-ci/bin /var/tmp/herdr-codex-sandbox-ci/codex-resources
+          install -m 700 node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex /var/tmp/herdr-codex-sandbox-ci/bin/codex
+          install -m 700 node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap /var/tmp/herdr-codex-sandbox-ci/codex-resources/bwrap
+          echo "HERDR_TEST_SANDBOX_BIN=/var/tmp/herdr-codex-sandbox-ci/bin/codex" >> "$GITHUB_ENV"
       - if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
       - if: github.event_name == 'push'
