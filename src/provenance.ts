@@ -5,11 +5,14 @@ import { fileURLToPath } from "node:url";
 import type {
   ControllerIdentity,
   ControllerProvenance,
-  ExecutionMode,
+  ControllerConfig,
   ReleasePlan,
 } from "./types.js";
 import { ControllerError } from "./errors.js";
 import { digestJson, pathWithin, sha256 } from "./util.js";
+import { assertExecutionRuntimeIdentity, readExecutionRuntimeIdentity } from "./runtime-identity.js";
+import { assertGitRemoteIdentity, configuredRemoteIdentity } from "./remote-identity.js";
+import { assertValidationSandboxIdentity, readValidationSandboxIdentity } from "./validation-sandbox.js";
 
 const HEX_40 = /^[a-f0-9]{40}$/;
 const HEX_64 = /^[a-f0-9]{64}$/;
@@ -42,20 +45,44 @@ export function readControllerIdentity(): ControllerIdentity {
 
 export function createControllerProvenance(
   controller: ControllerIdentity,
-  executionMode: ExecutionMode,
+  config: ControllerConfig,
   configDigest: string,
   plan: ReleasePlan,
 ): ControllerProvenance {
   assertControllerIdentity(controller);
   if (!HEX_64.test(configDigest)) throw new Error("Controller config digest is invalid");
   const releasePlan = { version: plan.version, digest: digestJson(plan) };
-  const provenance = { version: 1 as const, controller, executionMode, configDigest, releasePlan };
+  const provenance = config.version === 2
+    ? {
+      version: 2 as const,
+      controller,
+      executionRuntime: readExecutionRuntimeIdentity(config),
+      remoteIdentity: configuredRemoteIdentity(config),
+      validationSandbox: readValidationSandboxIdentity(config),
+      executionMode: config.executionMode,
+      configDigest,
+      releasePlan,
+    }
+    : { version: 1 as const, controller, executionMode: config.executionMode, configDigest, releasePlan };
   return { ...provenance, digest: digestJson(provenance) };
 }
 
 export function assertControllerProvenance(value: ControllerProvenance): void {
-  if (!value || value.version !== 1) throw new Error("job Controller provenance is invalid");
+  if (!value || (value.version !== 1 && value.version !== 2)) throw new Error("job Controller provenance is invalid");
+  const expectedKeys = value.version === 1
+    ? ["configDigest", "controller", "digest", "executionMode", "releasePlan", "version"]
+    : ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "remoteIdentity", "releasePlan", "validationSandbox", "version"];
+  if (Object.keys(value as unknown as Record<string, unknown>).sort().join("\n") !== expectedKeys.sort().join("\n")) {
+    throw new Error("job Controller provenance keys are invalid");
+  }
   assertControllerIdentity(value.controller);
+  if (value.version === 2) {
+    assertExecutionRuntimeIdentity(value.executionRuntime!);
+    assertGitRemoteIdentity(value.remoteIdentity!);
+    assertValidationSandboxIdentity(value.validationSandbox!);
+  } else if (value.executionRuntime !== undefined || value.remoteIdentity !== undefined || value.validationSandbox !== undefined) {
+    throw new Error("job Controller provenance is invalid");
+  }
   if (!["release-plan-v2-direct", "release-plan-v1-compatibility", "dispatcher-experimental"].includes(value.executionMode)
     || !HEX_64.test(value.configDigest)
     || (value.releasePlan?.version !== 1 && value.releasePlan?.version !== 2)
@@ -70,6 +97,7 @@ export function assertControllerProvenance(value: ControllerProvenance): void {
 
 function assertControllerIdentity(value: ControllerIdentity): void {
   if (!value
+    || Object.keys(value as unknown as Record<string, unknown>).sort().join(",") !== "buildDigest,digest,sourceManifestDigest,sourceRevision,version"
     || value.version !== 1
     || !HEX_40.test(value.sourceRevision)
     || !HEX_64.test(value.sourceManifestDigest)

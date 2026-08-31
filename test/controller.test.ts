@@ -12,6 +12,7 @@ import type { RetryAuthorization } from "../src/types.js";
 import {
   FakeCodex,
   FakeGitHub,
+  TestGitClient,
   completedWorker,
   createTestRepo,
   git,
@@ -45,7 +46,7 @@ test("two ordered Issues use fresh Workers, one aggregate review, and Controller
     const plan = testPlan([1, 2]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient);
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -74,7 +75,7 @@ test("failed Issue validation schedules one fresh repair over the preserved work
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind === "worker") {
         writeFileSync(join(input.job.worktreePath, "incomplete.txt"), "first\n", "utf8");
@@ -114,7 +115,7 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     let reviews = 0;
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind === "review") {
@@ -162,7 +163,7 @@ test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", asy
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind === "review") {
         return {
@@ -236,7 +237,7 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     let reviews = 0;
     let hardeningRuns = 0;
     const codex = new FakeCodex(gitClient, async (input) => {
@@ -332,7 +333,7 @@ test("release validation evidence remains exactly bound after hardening exhausti
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const controller = new ReleaseController({
       store,
       git: gitClient,
@@ -373,7 +374,7 @@ test("release validation evidence remains exactly bound after hardening exhausti
   } finally { repo.cleanup(); }
 });
 
-test("release validation evidence is checkpointed before post-run worktree policy", async () => {
+test("release validation writes stay disposable and cannot mutate the candidate worktree", async () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
@@ -387,7 +388,7 @@ test("release validation evidence is checkpointed before post-run worktree polic
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const controller = new ReleaseController({
       store,
       git: gitClient,
@@ -404,13 +405,14 @@ test("release validation evidence is checkpointed before post-run worktree polic
     });
 
     const settled = await runToTerminal(controller, store, created.id);
-    assert.equal(settled.status, "blocked");
-    assert.equal(settled.blocked?.code, "validator_mutated_worktree");
+    assert.equal(settled.status, "completed");
+    assert.equal(existsSync(join(settled.worktreePath, "validation-policy-violation.txt")), false);
 
     const restarted = new JobStore(config).load(created.id);
     const releaseBinding = restarted.validations.at(-1);
     const receipt = JSON.parse(readFileSync(releaseBinding!.path, "utf8"));
     assert.equal(releaseBinding?.scope, "release");
+    assert.equal(releaseBinding?.passed, true);
     assert.equal(releaseBinding?.digest, receipt.digest);
     assert.equal(restarted.candidateSha, receipt.candidateSha);
     assert.deepEqual(
@@ -435,7 +437,7 @@ test("latest blocking review and run remain exactly bound after hardening exhaus
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const blockingReview = {
       status: "changes" as const,
       summary: "The exact candidate still needs hardening.",
@@ -505,7 +507,7 @@ test("validated review evidence is checkpointed before post-run worktree policy"
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const passingReview = { status: "pass" as const, summary: "Schema-valid but policy-invalid run.", findings: [] };
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind !== "review") return {};
@@ -772,7 +774,7 @@ test("an interrupted Worker run is reconciled as a fresh recovery run without se
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient);
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -817,7 +819,7 @@ test("production v2 completes only after exact candidate, required checks, and m
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     class DeliveryGitHub extends FakeGitHub {
       pr: any = null;
       merged = false;
@@ -888,7 +890,7 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     class AutoMergeGitHub extends FakeGitHub {
       pr: any = null;
       enabled: { number: number; candidateSha: string } | null = null;
@@ -995,9 +997,9 @@ test("MERGED identity, merge SHA, and Git ancestry are verified before completio
       }
       const controller = new ReleaseController({
         store,
-        git: new GitClient(config),
+        git: new TestGitClient(config),
         github: new MergedGitHub(),
-        codex: new FakeCodex(new GitClient(config)),
+        codex: new FakeCodex(new TestGitClient(config)),
         validator: new Validator(config),
       });
       const result = await controller.step(job.id);
@@ -1032,7 +1034,7 @@ test("Git merge-result verification covers merge, squash, and rebase delivery me
         git(repo.source, ["merge", "--squash", candidateSha]);
         git(repo.source, ["commit", "-m", "squash candidate"]);
       } else git(repo.source, ["merge", "--ff-only", candidateSha]);
-      const result = await new GitClient(config).verifyMergeResult({
+      const result = await new TestGitClient(config).verifyMergeResult({
         mergeSha: git(repo.source, ["rev-parse", "HEAD"]),
         candidateSha,
         baseSha,
@@ -1103,7 +1105,7 @@ test("MERGED v2 cannot bypass the bound base or OPEN Child source gate", async (
           };
         }
       }
-      const gitClient = new GitClient(config);
+      const gitClient = new TestGitClient(config);
       const controller = new ReleaseController({ store, git: gitClient, github: new MergedSourceGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
       const result = await controller.step(job.id);
       const blocked = store.load(job.id);
@@ -1163,7 +1165,7 @@ test("required check missing, pending, or failed never reaches ready_to_merge", 
           return { pullRequest: job.pullRequest!, checks: scenario.checks, mergedAt: null };
         }
       }
-      const gitClient = new GitClient(config);
+      const gitClient = new TestGitClient(config);
       const controller = new ReleaseController({ store, git: gitClient, github: new ChecksGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
       const result = await controller.step(job.id);
       assert.equal(result.action, scenario.action);
@@ -1211,7 +1213,7 @@ test("auto-merge fails closed when GitHub cannot prove latest-base protection", 
       override async enableAutoMerge() { this.enabled = true; }
     }
     const github = new UnprotectedGitHub();
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
     const result = await controller.step(job.id);
     assert.equal(result.action, "blocked");
@@ -1234,7 +1236,7 @@ test("delivery rejects an existing PR that targets the wrong base branch", async
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     class WrongBaseGitHub extends FakeGitHub {
       override async createPullRequest(job: any) {
         return {
@@ -1273,7 +1275,7 @@ test("a Controller hardening commit is salvaged after a crash before job state u
     const plan = testPlan([1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     let reviewCalls = 0;
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind === "review") {

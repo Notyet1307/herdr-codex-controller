@@ -8,7 +8,7 @@ The Controller does **not** implement an agent runtime. Codex owns internal plan
 
 The qualified production mode is `release-plan-v2-direct`, which is also the default when `executionMode` is omitted. It accepts only source-bound Release Plan v2 and never reads `ready-for-agent`. Release Plan v1 requires explicit `release-plan-v1-compatibility`; the retained Dispatcher requires explicit `dispatcher-experimental` and is not a qualified production path.
 
-Release Plan v2 is the exact source-bound `pi-ticket-planning` handoff: it binds the configured repository/base ref, one 40-character base commit, the Parent and Child Issue bytes, decision/predecessor/dependency digests, and every Issue's immutable Oracle, closed verifier manifest, canonical mirrored risk classes, scope budget, literal-first-segment write families, protected paths, and replan triggers. The Controller protects every Oracle verifier file and `package.json` across the whole Release, runs each Issue's exact Oracle commands before commit, and records their identity, timeout, candidate/worktree binding, process result, and output-log digests in Validation Receipt v2. Release validation runs every Oracle again. Any Oracle/verifier, scope, protected-path, or risk-class drift maps to terminal `replan_required`. `plan validate --json` returns the exact Controller provenance approved by `start`:
+Release Plan v2 is the exact source-bound `pi-ticket-planning` handoff: it binds the configured repository/base ref, one 40-character base commit, the Parent and Child Issue bytes, decision/predecessor/dependency digests, and every Issue's immutable Oracle, closed verifier manifest, canonical mirrored risk classes, scope budget, literal-first-segment write families, protected paths, and replan triggers. The Controller protects every Oracle verifier file and `package.json` across the whole Release. Validation Receipt v3 binds the exact clean candidate tree, sandbox policy, command identities, bounded streaming output hashes/termination, and cleanup completion. Release validation runs every Oracle again. Any Oracle/verifier, scope, protected-path, or risk-class drift maps to terminal `replan_required`. `plan validate --json` returns the exact Controller provenance approved by `start`:
 
 `verifier.packageScript.definitionSha256` is SHA-256 over the exact UTF-8 npm script string. The verifier manifest digest is `sha256:` plus the repository's canonical `digestJson` of the manifest with its `digest` field omitted; verifier files remain in supplied lexicographic path order.
 
@@ -23,9 +23,9 @@ node dist/src/cli.js start \
   --json
 ```
 
-The Job atomically snapshots the Controller commit, canonical tracked-source manifest digest, executable build/package digest, execution mode, config digest, and Release Plan version/digest. Every execution step compares the current identity with that snapshot and blocks on drift. `config validate`, `doctor`, `start`, and `status` expose the relevant identity; `status.provenanceMatches` is the readback comparison.
+Config v2 declares exact GitHub fetch/push endpoints and a Codex permission-profile validation sandbox outside the checkout, private state, worktree, operator home, and system temp roots. Production disallows custom Codex profiles and PATH-resolved binaries. Job State v3 / provenance v2 bind Controller bytes, Codex and sandbox executable bytes/version/path digests, fixed runtime controls, Git remote identity, config, and Plan. Every execution step compares current identities with that snapshot and blocks on drift. Every configured validation command receives its own disposable blob projection with isolated HOME/TMP/cache, no inherited Controller secrets, no network or Unix sockets, and no writes outside the projection; commands cannot pass generated state to later commands. A check that needs dependencies must install them inside that same command (for example `npm ci --ignore-scripts --no-audit --no-fund && npm test`).
 
-The pinned schemas are [`release-plan-v1.schema.json`](./schemas/release-plan-v1.schema.json), [`release-plan-v2.schema.json`](./schemas/release-plan-v2.schema.json), the [`oneOf` aggregate entry point](./schemas/release-plan.schema.json), and the public [`release-completion-v1.schema.json`](./schemas/release-completion-v1.schema.json). A verified merged Job exports deterministic completion proof without exposing private `job.json`:
+The pinned schemas are [`release-plan-v1.schema.json`](./schemas/release-plan-v1.schema.json), [`release-plan-v2.schema.json`](./schemas/release-plan-v2.schema.json), the [`oneOf` aggregate entry point](./schemas/release-plan.schema.json), and the public [`release-completion-v2.schema.json`](./schemas/release-completion-v2.schema.json). A verified merged Job exports deterministic completion proof without exposing private `job.json` or local executable paths:
 
 ```bash
 node dist/src/cli.js completion export --config /private/controller.json --job RELEASE_ID --out /public/release-completion.json --json
@@ -33,7 +33,7 @@ node dist/src/cli.js completion export --config /private/controller.json --job R
 
 The v2 example contains format-valid placeholder hashes; replace every source/expected value with the approved Planner handoff rather than attempting to run it unchanged.
 
-See [README.zh-CN.md](./README.zh-CN.md) for the complete guide and [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) for the design.
+See [README.zh-CN.md](./README.zh-CN.md) for the complete guide, [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) for the design, and [docs/P0-HARDENING.md](./docs/P0-HARDENING.md) for migration and release notes.
 
 ```bash
 npm install

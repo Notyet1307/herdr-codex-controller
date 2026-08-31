@@ -67,7 +67,7 @@ export class JobStore {
   currentProvenance(plan: ReleasePlan): ControllerProvenance {
     return createControllerProvenance(
       this.identityProvider(),
-      this.config.executionMode,
+      this.config,
       digestJson(this.config),
       plan,
     );
@@ -102,7 +102,7 @@ export class JobStore {
     const worktreePath = resolve(this.config.worktreeRoot, id);
     const now = nowIso();
     const job: JobState = {
-      version: 2,
+      version: this.config.version === 2 ? 3 : 2,
       id,
       provenance,
       configPath: resolve(input.configPath),
@@ -114,6 +114,7 @@ export class JobStore {
       baseRef: this.config.baseRef,
       baseSha: null,
       remote: this.config.remote,
+      remoteIdentityDigest: provenance.remoteIdentity?.digest ?? null,
       branch,
       worktreePath,
       status: "running",
@@ -274,10 +275,16 @@ export function retryBlockedJob(job: JobState, authorization?: RetryAuthorizatio
 }
 
 export function assertJob(job: JobState): void {
-  if (!job || job.version !== 2 || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
+  if (!job || (job.version !== 2 && job.version !== 3) || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
     throw new Error("job state is invalid or its plan digest drifted");
   }
   assertControllerProvenance(job.provenance);
+  if ((job.version === 3) !== (job.provenance.version === 2)) {
+    throw new Error("job state and Controller provenance versions differ");
+  }
+  if (job.version === 3 && job.remoteIdentityDigest !== job.provenance.remoteIdentity?.digest) {
+    throw new Error("job Git remote identity does not match Controller provenance");
+  }
   if (job.provenance.configDigest !== job.configDigest
     || job.provenance.releasePlan.version !== job.plan.version
     || job.provenance.releasePlan.digest !== job.planDigest) {

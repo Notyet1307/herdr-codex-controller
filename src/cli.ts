@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     const planPath = requiredOption(args, "plan");
     const plan = loadPlan(planPath);
     assertPlanCompatibleWithConfig(plan, config);
-    const provenance = createControllerProvenance(controllerIdentity, config.executionMode, configDigest, plan);
+    const provenance = createControllerProvenance(controllerIdentity, config, configDigest, plan);
     output(args, { ok: true, planDigest: digestJson(plan), provenance, plan });
     return;
   }
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
     const plan = loadPlan(planPath);
     assertPlanCompatibleWithConfig(plan, config);
     assertStartAllowed(config, plan);
-    const provenance = createControllerProvenance(controllerIdentity, config.executionMode, configDigest, plan);
+    const provenance = createControllerProvenance(controllerIdentity, config, configDigest, plan);
     assertExpectedConfigDigest(args, plan, configDigest);
     assertExpectedControllerProvenance(args, plan, provenance);
     if (plan.issues.length > config.policy.maxIssues) {
@@ -67,6 +67,16 @@ async function main(): Promise<void> {
       const active = store.active();
       if (active.length > 0) {
         throw new Error(`repository already has an active release job: ${active.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
+      }
+      if (config.executionMode === "release-plan-v2-direct") {
+        const startGit = new GitClient(config);
+        const startGithub = new GitHubClient(config);
+        const startCodex = new CodexRunner(config, startGit);
+        const startValidator = new Validator(config, startGit);
+        await startGit.preflight();
+        await startGithub.preflight();
+        await startCodex.preflight();
+        await startValidator.preflight();
       }
       return store.create({
         configPath: resolve(configPath),
@@ -95,14 +105,16 @@ async function main(): Promise<void> {
   const git = new GitClient(config);
   const github = new GitHubClient(config);
   const codex = new CodexRunner(config, git);
-  const validator = new Validator(config);
+  const validator = new Validator(config, git);
   const controller = new ReleaseController({ store, git, github, codex, validator });
 
   if (args.command === "doctor") {
     await git.preflight();
+    const remoteIdentity = await git.remoteIdentity();
     await github.preflight();
     await codex.preflight();
-    output(args, { ok: true, checkedAt: nowIso(), configDigest, controller: controllerIdentity, executionMode: config.executionMode });
+    const validationSandbox = await validator.preflight();
+    output(args, { ok: true, checkedAt: nowIso(), configDigest, controller: controllerIdentity, executionMode: config.executionMode, remoteIdentity, validationSandbox });
     return;
   }
 

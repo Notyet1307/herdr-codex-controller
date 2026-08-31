@@ -26,6 +26,7 @@ declare module "node:assert/strict" { const value: any; export default value; }
 declare module "node:child_process" { export const spawn: any; export const spawnSync: any; }
 declare module "node:crypto" { export const createHash: any; export const randomUUID: any; }
 declare module "node:events" { export const once: any; }
+declare module "node:net" { export const createServer: any; }
 declare module "node:fs" {
   export const accessSync: any;
   export const chmodSync: any;
@@ -44,9 +45,11 @@ declare module "node:fs" {
   export const readFileSync: any;
   export const realpathSync: any;
   export const readdirSync: any;
+  export const readlinkSync: any;
   export const renameSync: any;
   export const rmSync: any;
   export const statSync: any;
+  export const symlinkSync: any;
   export const unlinkSync: any;
   export const writeFileSync: any;
   export const writeSync: any;

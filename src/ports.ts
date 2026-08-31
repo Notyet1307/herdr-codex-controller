@@ -12,10 +12,13 @@ import type {
   WorkflowGateSummary,
   RepositoryFileSnapshot,
   ValidationCommandConfig,
+  GitRemoteIdentity,
+  ValidationProjectionEntry,
 } from "./types.js";
 
 export interface GitPort {
   preflight(): Promise<void>;
+  remoteIdentity(): Promise<GitRemoteIdentity | null>;
   fetchBase(): Promise<string>;
   isAncestorOfRemoteBase(sha: string): Promise<boolean>;
   verifyMergeResult(input: {
@@ -37,6 +40,18 @@ export interface GitPort {
   branch(cwd: string): Promise<string>;
   isClean(cwd: string): Promise<boolean>;
   changedPaths(cwd: string): Promise<string[]>;
+  createValidationProjection(cwd: string, destination: string): Promise<{
+    treeSha: string;
+    manifestDigest: string;
+    manifest: ValidationProjectionEntry[];
+    fileCount: number;
+    byteCount: number;
+    changedPaths: string[];
+  }>;
+  verifyValidationProjection(
+    destination: string,
+    manifest: ValidationProjectionEntry[],
+  ): Promise<void>;
   fileAtRevision(revision: string, path: string): Promise<RepositoryFileSnapshot>;
   fileInWorktree(job: JobState, path: string): Promise<RepositoryFileSnapshot>;
   commitStats(job: JobState, sha: string): Promise<{ files: number; changedLines: number; paths: string[]; entries: Array<{ path: string; changedLines: number; binary: boolean }> }>;
@@ -89,6 +104,7 @@ export interface CodexPort {
 }
 
 export interface ValidationPort {
+  preflight(): Promise<{ verified: boolean; policyDigest: string }>;
   run(input: {
     job: JobState;
     scope: "setup" | "issue" | "release";

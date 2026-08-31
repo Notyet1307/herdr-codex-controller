@@ -11,6 +11,7 @@ import { digestJson, sha256, sha256PrefixedUtf8 } from "../src/util.js";
 import {
   FakeCodex,
   FakeGitHub,
+  TestGitClient,
   completedWorker,
   createTestRepo,
   git,
@@ -26,7 +27,7 @@ test("each Issue Oracle runs before commit and release validation runs every Ora
     const plan = testPlanV2(repo, [1, 2]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const controller = new ReleaseController({
       store,
       git: gitClient,
@@ -45,7 +46,7 @@ test("each Issue Oracle runs before commit and release validation runs every Ora
         oracles.some(({ issueNumber, oracleId }) => issueNumber === issue.number && oracleId === binding.id)
       ));
       if (!result) throw new Error(`Issue #${issue.number} Oracle result is missing`);
-      assert.equal(receipt.version, 2);
+      assert.equal(receipt.version, 3);
       assert.equal(receipt.scope, "issue");
       assert.equal(receipt.issueNumber, issue.number);
       assert.equal(receipt.passed, true);
@@ -97,7 +98,7 @@ test("Issue Oracle failure schedules repair and only PASS can commit", async () 
     plan.issues[0]!.expectedPaths = ["issue-1.txt", "oracle-ready"];
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient, async ({ job, kind }) => {
       if (kind === "worker") writeFileSync(join(job.worktreePath, "issue-1.txt"), "first\n", "utf8");
       if (kind === "issue-repair") writeFileSync(join(job.worktreePath, "oracle-ready"), "ready\n", "utf8");
@@ -137,7 +138,7 @@ test("Issue Oracle de-duplicates ordinary validation and keeps the release timeo
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     await stepUntil(controller, store, created.id, () => store.load(created.id).issues[0]?.status === "committed");
@@ -157,12 +158,31 @@ test("missing Issue Oracle execution is durable REPLAN_REQUIRED before commit", 
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     class OmittingValidator extends Validator {
       override async run(input: Parameters<Validator["run"]>[0]) {
         const validation = await super.run(input);
         if (input.scope === "issue") {
-          for (const command of validation.receipt.commands) command.oracles = [];
+          for (let index = 0; index < validation.receipt.commands.length; index += 1) {
+            const command = validation.receipt.commands[index]!;
+            command.oracles = [];
+            command.commandIdentityDigest = digestJson({
+              index,
+              command: command.command,
+              oracles: command.oracles,
+              timeoutMs: command.timeoutMs,
+            });
+          }
+          validation.receipt.commandSetDigest = digestJson(validation.receipt.commands.map((command) => ({
+            command: command.command,
+            oracles: command.oracles,
+            timeoutMs: command.timeoutMs,
+          })));
+          validation.receipt.configuredCommands = validation.receipt.commands.map((command) => ({
+            command: command.command,
+            oracles: command.oracles,
+            timeoutMs: command.timeoutMs,
+          }));
           const { digest: _digest, ...identity } = validation.receipt;
           validation.receipt.digest = digestJson(identity);
           writeFileSync(validation.path, `${JSON.stringify(validation.receipt, null, 2)}\n`, "utf8");
@@ -197,7 +217,7 @@ test("every Worker globally protects other Tickets' verifier files and package s
       const plan = testPlanV2(repo, [1, 2]);
       const { configPath, planPath } = writeInputs(repo, config, plan);
       const store = new JobStore(config);
-      const gitClient = new GitClient(config);
+      const gitClient = new TestGitClient(config);
       const codex = new FakeCodex(gitClient, async ({ job, kind }) => {
         if (kind !== "worker") return {};
         writeFileSync(join(job.worktreePath, "issue-1.txt"), "candidate\n", "utf8");
@@ -237,7 +257,7 @@ test("verifier manifest byte drift and hardening drift are REPLAN_REQUIRED", asy
       }
       const { configPath, planPath } = writeInputs(repo, config, plan);
       const store = new JobStore(config);
-      const gitClient = new GitClient(config);
+      const gitClient = new TestGitClient(config);
       const codex = new FakeCodex(gitClient, async ({ job, kind }) => {
         if (kind === "review") {
           return { review: { status: "changes", summary: "harden", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fix", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
@@ -265,7 +285,7 @@ test("crash salvage requires a passed Oracle receipt bound to the commit parent"
       const plan = testPlanV2(repo, [1]);
       const { configPath, planPath } = writeInputs(repo, config, plan);
       const store = new JobStore(config);
-      const gitClient = new GitClient(config);
+      const gitClient = new TestGitClient(config);
       const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       assert.equal((await controller.step(created.id)).action, "release_prepared");

@@ -1,14 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import type { ControllerConfig, JobState, RepositoryFileSnapshot } from "./types.js";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import type { ControllerConfig, JobState, RepositoryFileSnapshot, ValidationProjectionEntry } from "./types.js";
+import type { GitRemoteIdentity } from "./types.js";
 import { runCommand, requireCommandSuccess } from "./command.js";
 import { ensurePrivateDir } from "./fs-atomic.js";
-import { digestJson, pathWithin, sha256 } from "./util.js";
+import { digestJson, newId, pathWithin, sha256 } from "./util.js";
+import { configuredRemoteIdentity, inspectGitRemoteIdentity } from "./remote-identity.js";
 
 const GIT_TIMEOUT_MS = 120_000;
 const GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
 const ORACLE_MAX_BYTES = 64 * 1024 * 1024;
+const PROJECTION_MAX_FILE_BYTES = 64 * 1024 * 1024;
+const PROJECTION_MAX_BYTES = 512 * 1024 * 1024;
+const PROJECTION_MAX_FILES = 100_000;
 type DiffEntry = { path: string; changedLines: number; binary: boolean };
 type BoundedDiff = { files: number; changedLines: number; paths: string[]; entries: DiffEntry[] };
 
@@ -18,15 +23,25 @@ export class GitClient {
   async preflight(): Promise<void> {
     requireCommandSuccess(await runCommand({
       command: "git", args: ["--version"], cwd: this.config.localPath, timeoutMs: 30_000, maxTailBytes: 16_384,
+      stdoutByteLimit: 16_384, stderrByteLimit: 16_384, aggregateByteLimit: 32_768,
     }), "git preflight");
     const root = await this.text(this.config.localPath, ["rev-parse", "--show-toplevel"]);
     if (realpathSync(root) !== realpathSync(this.config.localPath)) {
       throw new Error(`config.localPath is not the Git root: ${root}`);
     }
+    await this.verifiedRemoteIdentity();
+  }
+
+  async remoteIdentity(): Promise<GitRemoteIdentity | null> {
+    return this.verifiedRemoteIdentity();
   }
 
   async fetchBase(): Promise<string> {
-    await this.success(this.config.localPath, ["fetch", "--prune", this.config.remote, this.config.baseRef], "git fetch base");
+    const identity = await this.verifiedRemoteIdentity();
+    const targetRef = `refs/remotes/${this.config.remote}/${this.config.baseRef}`;
+    await this.success(this.config.localPath, identity
+      ? ["fetch", "--prune", "--no-tags", identity.fetchUrl, `+refs/heads/${this.config.baseRef}:${targetRef}`]
+      : ["fetch", "--prune", this.config.remote, this.config.baseRef], "git fetch base");
     const sha = await this.text(this.config.localPath, ["rev-parse", `${this.config.remote}/${this.config.baseRef}^{commit}`]);
     assertSha(sha);
     return sha;
@@ -94,6 +109,7 @@ export class GitClient {
   }
 
   async ensureWorktree(job: JobState): Promise<void> {
+    await this.verifiedRemoteIdentity();
     if (!job.baseSha) throw new Error("job base SHA is missing");
     ensurePrivateDir(this.config.worktreeRoot);
     if (!pathWithin(this.config.worktreeRoot, job.worktreePath)) throw new Error("worktree path escapes worktreeRoot");
@@ -146,13 +162,153 @@ export class GitClient {
     return [...new Set(`${tracked}\0${untracked}`.split("\0").filter(Boolean))].sort();
   }
 
+  async createValidationProjection(cwd: string, destination: string): Promise<{
+    treeSha: string;
+    manifestDigest: string;
+    manifest: ValidationProjectionEntry[];
+    fileCount: number;
+    byteCount: number;
+    changedPaths: string[];
+  }> {
+    const sourceRoot = realpathSync(cwd);
+    const requestedTarget = resolve(destination);
+    const targetParent = realpathSync(dirname(requestedTarget));
+    const target = join(targetParent, basename(requestedTarget));
+    if (existsSync(target) || pathWithin(sourceRoot, target) || pathWithin(target, sourceRoot)) {
+      throw new Error("validation projection destination is unsafe");
+    }
+    if (!pathWithin(targetParent, target)) throw new Error("validation projection destination escapes its parent");
+    const changedPaths = await this.changedPaths(sourceRoot);
+    await this.assertNoUnignoredSpecialFiles(sourceRoot, new Set(changedPaths));
+    const indexPath = join(targetParent, `${newId("validation-index")}.index`);
+    const objectDirectory = join(targetParent, newId("validation-objects"));
+    const commonDirectory = realpathSync(resolve(sourceRoot, await this.text(sourceRoot, ["rev-parse", "--git-common-dir"])));
+    const sourceObjects = realpathSync(join(commonDirectory, "objects"));
+    if (sourceObjects.includes(":")) throw new Error("validation projection source object path is unsupported");
+    mkdirSync(objectDirectory, { mode: 0o700 });
+    const indexEnvironment = {
+      GIT_INDEX_FILE: indexPath,
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: sourceObjects,
+      GIT_CONFIG_COUNT: "0",
+    };
+    mkdirSync(target, { mode: 0o700 });
+    try {
+      await this.indexSuccess(sourceRoot, indexEnvironment, ["read-tree", "HEAD"], "git prepare validation index");
+      for (const path of changedPaths) {
+        assertSafeRepoPath(path);
+        const file = candidateFile(sourceRoot, path);
+        if (file === null) {
+          await this.indexSuccess(sourceRoot, indexEnvironment, ["update-index", "--remove", "--", path], "git remove deleted validation path");
+          continue;
+        }
+        const object = (await this.indexText(sourceRoot, indexEnvironment, ["hash-object", "-w", "--no-filters", "--", path])).trim();
+        if (!/^[a-f0-9]{40}$/u.test(object)) throw new Error("validation projection object identity is invalid");
+        await this.indexSuccess(sourceRoot, indexEnvironment, [
+          "update-index", "--add", "--cacheinfo", `${file.mode},${object},${path}`,
+        ], "git update validation index");
+      }
+      const treeSha = (await this.indexText(sourceRoot, indexEnvironment, ["write-tree"])).trim();
+      assertSha(treeSha);
+      const raw = await this.indexText(sourceRoot, indexEnvironment, ["ls-files", "--stage", "-z"], 32 * 1024 * 1024);
+      const entries = raw.split("\0").filter(Boolean);
+      if (entries.length > PROJECTION_MAX_FILES) throw new Error("validation projection contains too many files");
+      let byteCount = 0;
+      const manifest: ValidationProjectionEntry[] = [];
+      for (const entry of entries) {
+        const match = entry.match(/^(100644|100755|120000) ([a-f0-9]{40}) 0\t([\s\S]+)$/u);
+        if (!match) throw new Error("validation projection contains a symlink, submodule, or special entry");
+        const mode = match[1]! as "100644" | "100755" | "120000";
+        const object = match[2]!;
+        const path = match[3]!;
+        assertSafeRepoPath(path);
+        const bytes = gitBytes(
+          sourceRoot,
+          ["cat-file", "blob", object],
+          PROJECTION_MAX_FILE_BYTES,
+          indexEnvironment,
+          safeGitArguments(this.config),
+        );
+        byteCount += bytes.byteLength;
+        if (byteCount > PROJECTION_MAX_BYTES) throw new Error("validation projection exceeds its byte bound");
+        const output = resolve(target, path);
+        if (!pathWithin(target, output)) throw new Error("validation projection path escapes its root");
+        mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
+        if (mode === "120000") {
+          if (changedPaths.includes(path)) throw new Error(`validation candidate contains a changed symlink: ${path}`);
+          const linkTarget = Buffer.from(bytes).toString("utf8");
+          if (!linkTarget || Buffer.byteLength(linkTarget, "utf8") !== bytes.byteLength
+            || linkTarget.startsWith("/") || /[\0\r\n]/u.test(linkTarget)
+            || !pathWithin(target, resolve(dirname(output), linkTarget))) {
+            throw new Error(`validation candidate contains an unsafe tracked symlink: ${path}`);
+          }
+          symlinkSync(linkTarget, output);
+          manifest.push({ path, mode, byteCount: bytes.byteLength, sha256: `sha256:${sha256(bytes)}`, linkTarget });
+          continue;
+        }
+        writeFileSync(output, bytes, { flag: "wx", mode: mode === "100755" ? 0o700 : 0o600 });
+        const stat = lstatSync(output);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+          throw new Error("validation projection output is not a safe regular file");
+        }
+        manifest.push({ path, mode, byteCount: bytes.byteLength, sha256: `sha256:${sha256(bytes)}` });
+      }
+      return { treeSha, manifestDigest: digestJson(manifest), manifest, fileCount: entries.length, byteCount, changedPaths };
+    } catch (error) {
+      rmSync(target, { recursive: true, force: true });
+      throw error;
+    } finally {
+      if (existsSync(indexPath)) unlinkSync(indexPath);
+      rmSync(objectDirectory, { recursive: true, force: true });
+    }
+  }
+
+  async verifyValidationProjection(
+    destination: string,
+    manifest: ValidationProjectionEntry[],
+  ): Promise<void> {
+    const root = realpathSync(destination);
+    for (const expected of manifest) {
+      assertSafeRepoPath(expected.path);
+      const output = resolve(root, expected.path);
+      if (expected.mode === "120000") {
+        const stat = lstatSync(output);
+        const linkTarget = readlinkSync(output);
+        if (!stat.isSymbolicLink() || linkTarget !== expected.linkTarget
+          || !pathWithin(root, resolve(dirname(output), linkTarget))
+          || `sha256:${sha256(linkTarget)}` !== expected.sha256) {
+          throw new Error(`validation candidate projection changed after materialization: ${expected.path}`);
+        }
+        continue;
+      }
+      let current = root;
+      for (const segment of expected.path.split("/")) {
+        current = join(current, segment);
+        const stat = lstatSync(current);
+        if (stat.isSymbolicLink()) throw new Error("validation candidate projection changed through a symlink");
+      }
+      const stat = lstatSync(current);
+      const mode = (stat.mode & 0o111) === 0 ? "100644" : "100755";
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size !== expected.byteCount || mode !== expected.mode
+        || `sha256:${sha256(readFileSync(current))}` !== expected.sha256) {
+        throw new Error(`validation candidate projection changed after materialization: ${expected.path}`);
+      }
+    }
+  }
+
   async fileAtRevision(revision: string, path: string): Promise<RepositoryFileSnapshot> {
     assertSha(revision);
     assertSafeRepoPath(path);
     const tree = await this.textRawBounded(this.config.localPath, ["ls-tree", "-z", revision, "--", path], 8_192);
     const match = tree.replace(/\0$/u, "").match(/^(100644|100755) blob [a-f0-9]+\t([^\u0000]+)$/u);
     if (!match || match[2] !== path) throw new Error("Oracle artifact is not a reviewed-base regular file");
-    return fileBinding(gitBytes(this.config.localPath, ["show", `${revision}:${path}`]));
+    return fileBinding(gitBytes(
+      this.config.localPath,
+      ["show", `${revision}:${path}`],
+      ORACLE_MAX_BYTES,
+      { GIT_CONFIG_COUNT: "0" },
+      safeGitArguments(this.config),
+    ));
   }
 
   async fileInWorktree(job: JobState, path: string): Promise<RepositoryFileSnapshot> {
@@ -215,7 +371,7 @@ export class GitClient {
         `Herdr-Plan-Digest: ${job.planDigest}`,
         "Herdr-Noop: true",
       ].join("\n");
-      await this.success(job.worktreePath, ["commit", "--allow-empty", "-m", subject, "-m", body], "git commit no-op issue");
+      await this.success(job.worktreePath, ["commit", "--no-verify", "--allow-empty", "-m", subject, "-m", body], "git commit no-op issue");
       return { sha: await this.head(job.worktreePath), created: true };
     }
     if (diff.exitCode !== 1) throw new Error(`cannot inspect staged diff: ${diff.stderrTail || diff.stdoutTail}`);
@@ -227,7 +383,7 @@ export class GitClient {
       `Herdr-Issue: ${issueNumber}`,
       `Herdr-Plan-Digest: ${job.planDigest}`,
     ].join("\n");
-    await this.success(job.worktreePath, ["commit", "-m", subject, "-m", body], "git commit issue");
+    await this.success(job.worktreePath, ["commit", "--no-verify", "-m", subject, "-m", body], "git commit issue");
     return { sha: await this.head(job.worktreePath), created: true };
   }
 
@@ -275,7 +431,7 @@ export class GitClient {
       `Herdr-Hardening-Evidence-Digest: ${sha256(reason)}`,
       `Herdr-Plan-Digest: ${job.planDigest}`,
     ].join("\n");
-    await this.success(job.worktreePath, ["commit", "-m", `fix: harden ${job.plan.title}`, "-m", body], "git commit hardening");
+    await this.success(job.worktreePath, ["commit", "--no-verify", "-m", `fix: harden ${job.plan.title}`, "-m", body], "git commit hardening");
     return { sha: await this.head(job.worktreePath), created: true };
   }
 
@@ -297,7 +453,10 @@ export class GitClient {
   }
 
   async push(job: JobState): Promise<void> {
-    await this.success(job.worktreePath, ["push", "--set-upstream", job.remote, job.branch], "git push release branch", 15 * 60_000);
+    const identity = await this.verifiedRemoteIdentity();
+    await this.success(job.worktreePath, identity
+      ? ["push", "--no-verify", identity.pushUrl, `HEAD:refs/heads/${job.branch}`]
+      : ["push", "--no-verify", "--set-upstream", job.remote, job.branch], "git push release branch", 15 * 60_000);
   }
 
   async removeWorktree(job: JobState): Promise<void> {
@@ -353,9 +512,121 @@ export class GitClient {
     requireCommandSuccess(await this.run(cwd, args, GIT_OUTPUT_BYTES, timeoutMs), label);
   }
 
-  private run(cwd: string, args: string[], maxTailBytes = GIT_OUTPUT_BYTES, timeoutMs = GIT_TIMEOUT_MS) {
-    return runCommand({ command: "git", args: ["-C", cwd, ...args], cwd, timeoutMs, maxTailBytes });
+  private async indexText(
+    cwd: string,
+    environment: Record<string, string>,
+    args: string[],
+    maximumBytes = GIT_OUTPUT_BYTES,
+  ): Promise<string> {
+    const result = await runCommand({
+      command: "git",
+      args: [...safeGitArguments(this.config), "-C", cwd, ...args],
+      cwd,
+      env: environment,
+      timeoutMs: GIT_TIMEOUT_MS,
+      maxTailBytes: maximumBytes,
+      stdoutByteLimit: maximumBytes,
+      stderrByteLimit: GIT_OUTPUT_BYTES,
+      aggregateByteLimit: maximumBytes + GIT_OUTPUT_BYTES,
+    });
+    requireCommandSuccess(result, `git ${args[0] ?? "command"}`);
+    if (result.stdoutBytes >= maximumBytes) throw new Error(`git ${args[0] ?? "command"} output reached its byte bound`);
+    return result.stdoutTail;
   }
+
+  private async indexSuccess(cwd: string, environment: Record<string, string>, args: string[], label: string): Promise<void> {
+    const result = await runCommand({
+      command: "git",
+      args: [...safeGitArguments(this.config), "-C", cwd, ...args],
+      cwd,
+      env: environment,
+      timeoutMs: GIT_TIMEOUT_MS,
+      maxTailBytes: GIT_OUTPUT_BYTES,
+      stdoutByteLimit: GIT_OUTPUT_BYTES,
+      stderrByteLimit: GIT_OUTPUT_BYTES,
+      aggregateByteLimit: GIT_OUTPUT_BYTES,
+    });
+    requireCommandSuccess(result, label);
+  }
+
+  private async assertNoUnignoredSpecialFiles(cwd: string, changedPaths: Set<string>): Promise<void> {
+    const pending = [cwd];
+    let visited = 0;
+    while (pending.length > 0) {
+      const directory = pending.pop()!;
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const absolute = join(directory, entry.name);
+        const path = relative(cwd, absolute).split("\\").join("/");
+        if (path === ".git" || path.startsWith(".git/")) continue;
+        visited += 1;
+        if (visited > 200_000) throw new Error("validation candidate filesystem scan exceeds its entry bound");
+        if (entry.isDirectory()) {
+          if (!(await this.isIgnored(cwd, path))) pending.push(absolute);
+          continue;
+        }
+        if (entry.isFile()) continue;
+        if (entry.isSymbolicLink() && !changedPaths.has(path) && await this.isTracked(cwd, path)) continue;
+        if (!(await this.isIgnored(cwd, path))) {
+          throw new Error(`validation candidate contains an unignored symlink, device, FIFO, or socket: ${path}`);
+        }
+      }
+    }
+  }
+
+  private async isTracked(cwd: string, path: string): Promise<boolean> {
+    const result = await this.run(cwd, ["ls-files", "--error-unmatch", "--", path], 8_192);
+    if (result.exitCode === 0) return true;
+    if (result.exitCode === 1) return false;
+    throw new Error(`cannot classify tracked validation path: ${result.stderrTail || result.stdoutTail}`);
+  }
+
+  private async isIgnored(cwd: string, path: string): Promise<boolean> {
+    const result = await this.run(cwd, ["check-ignore", "--quiet", "--", path], 8_192);
+    if (result.exitCode === 0) return true;
+    if (result.exitCode === 1) return false;
+    throw new Error(`cannot classify ignored validation path: ${result.stderrTail || result.stdoutTail}`);
+  }
+
+  private run(cwd: string, args: string[], maxTailBytes = GIT_OUTPUT_BYTES, timeoutMs = GIT_TIMEOUT_MS) {
+    const remoteIdentity = this.config.remoteIdentity ? configuredRemoteIdentity(this.config) : null;
+    return runCommand({
+      command: "git",
+      args: [...safeGitArguments(this.config), "-C", cwd, ...args],
+      cwd,
+      env: {
+        GIT_CONFIG_COUNT: "0",
+        GIT_EXTERNAL_DIFF: undefined,
+        GIT_TERMINAL_PROMPT: "0",
+        ...(remoteIdentity?.fetchTransport === "ssh" || remoteIdentity?.pushTransport === "ssh"
+          ? { GIT_SSH_COMMAND: "/usr/bin/ssh -F /dev/null -o ClearAllForwardings=yes -o PermitLocalCommand=no -o ProxyCommand=none -o CanonicalizeHostname=no" }
+          : {}),
+      },
+      timeoutMs,
+      maxTailBytes,
+      stdoutByteLimit: maxTailBytes,
+      stderrByteLimit: maxTailBytes,
+      aggregateByteLimit: Math.min(Number.MAX_SAFE_INTEGER, maxTailBytes * 2),
+    });
+  }
+
+  protected async verifiedRemoteIdentity(): Promise<GitRemoteIdentity | null> {
+    return this.config.executionMode === "release-plan-v2-direct" && this.config.remoteIdentity
+      ? inspectGitRemoteIdentity(this.config)
+      : null;
+  }
+}
+
+function safeGitArguments(config: ControllerConfig): string[] {
+  return [
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.fsmonitor=false",
+    "-c", "credential.interactive=never",
+    "-c", "protocol.allow=never",
+    "-c", "protocol.https.allow=always",
+    "-c", "protocol.ssh.allow=always",
+    "-c", `protocol.file.allow=${config.executionMode === "release-plan-v2-direct" ? "never" : "always"}`,
+    "-c", "protocol.ext.allow=never",
+  ];
 }
 
 function assertSha(value: string): void {
@@ -376,12 +647,42 @@ function fileBinding(bytes: Uint8Array): RepositoryFileSnapshot {
   return { sha256: `sha256:${sha256(bytes)}`, byteCount: bytes.byteLength, bytes };
 }
 
-function gitBytes(cwd: string, args: string[]): Uint8Array {
-  const run = spawnSync("git", ["-C", cwd, ...args], { encoding: null, maxBuffer: ORACLE_MAX_BYTES + 1 });
+function gitBytes(
+  cwd: string,
+  args: string[],
+  maximumBytes = ORACLE_MAX_BYTES,
+  environment: Record<string, string> = {},
+  prefix: string[] = [],
+): Uint8Array {
+  const run = spawnSync("git", [...prefix, "-C", cwd, ...args], {
+    encoding: null,
+    maxBuffer: maximumBytes + 1,
+    env: { ...process.env, GIT_CONFIG_COUNT: "0", GIT_EXTERNAL_DIFF: undefined, ...environment },
+  });
   if (run.error || run.signal || run.status !== 0 || !(run.stdout instanceof Uint8Array)) {
     throw new Error("cannot read Oracle artifact bytes from Git");
   }
   return run.stdout;
+}
+
+function candidateFile(root: string, path: string): { mode: "100644" | "100755" } | null {
+  let current = root;
+  const segments = path.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    current = join(current, segments[index]!);
+    if (!existsSync(current)) return null;
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) throw new Error(`validation candidate contains a changed symlink: ${path}`);
+    if (index < segments.length - 1) {
+      if (!stat.isDirectory()) throw new Error(`validation candidate path has a non-directory parent: ${path}`);
+      continue;
+    }
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error(`validation candidate contains a hardlink, device, FIFO, or socket: ${path}`);
+    }
+    return { mode: (stat.mode & 0o111) === 0 ? "100644" : "100755" };
+  }
+  return null;
 }
 
 function normalizeSubject(value: string, fallback: string): string {

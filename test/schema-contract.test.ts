@@ -10,6 +10,44 @@ import { validateConfig } from "../src/config.js";
 import { assertReleaseCompletion } from "../src/completion-export.js";
 import { digestJson } from "../src/util.js";
 import { createTestRepo, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
+import { createControllerProvenance, readControllerIdentity } from "../src/provenance.js";
+
+test("release completion v2 binds runtime, sandbox, and remote identities without local paths", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const plan = testPlanV2(repo, [1]);
+    const planDigest = digestJson(plan);
+    const provenance = createControllerProvenance(readControllerIdentity(), config, digestJson(config), plan);
+    const body = {
+      schema: "herdr-codex-controller:release-completion:v2" as const,
+      releaseId: "release-v2",
+      repo: "example/project",
+      baseRef: "main",
+      planDigest,
+      sourceBaseSha: "1".repeat(40),
+      candidateSha: "2".repeat(40),
+      issueCommits: [{ issueNumber: 1, sha: "3".repeat(40) }],
+      releaseValidationDigest: "4".repeat(64),
+      reviewResultDigest: "5".repeat(64),
+      pullRequest: { number: 2, headRef: "agent/release-v2", headSha: "2".repeat(40), baseRef: "main", mergeSha: "6".repeat(40), mergedAt: "2026-08-30T00:00:00.000Z" },
+      requiredChecks: ["verify"],
+      mergedMainSha: "6".repeat(40),
+      dependencyHandoffDigests: [],
+      controllerProvenance: provenance,
+      completedAt: "2026-08-30T00:01:00.000Z",
+    };
+    const completion = { ...body, digest: `sha256:${digestJson(body)}` };
+    const validate = new Ajv2020({ allErrors: true, strict: false, validateFormats: false })
+      .compile(readSchema("release-completion-v2.schema.json"));
+    assert.equal(validate(completion), true, JSON.stringify(validate.errors));
+    assert.doesNotThrow(() => assertReleaseCompletion(completion));
+    const rendered = JSON.stringify(completion);
+    for (const privatePath of [repo.root, config.codex.bin, config.validation.sandbox!.bin, config.validation.sandbox!.root]) {
+      assert.equal(rendered.includes(privatePath), false);
+    }
+  } finally { repo.cleanup(); }
+});
 
 function readSchema(name: string): Record<string, unknown> {
   return JSON.parse(readFileSync(resolve("schemas", name), "utf8")) as Record<string, unknown>;
@@ -119,6 +157,27 @@ test("Controller config schema exposes only the explicit execution modes", () =>
     if (fixture.valid) assert.doesNotThrow(() => validateConfig(value));
     else assert.throws(() => validateConfig(value));
   }
+});
+
+test("config v1 remains readable only in explicit non-production modes", () => {
+  const repo = createTestRepo();
+  try {
+    const legacy = structuredClone(testConfig(repo)) as any;
+    legacy.version = 1;
+    legacy.executionMode = "release-plan-v1-compatibility";
+    delete legacy.remoteIdentity;
+    for (const key of ["maxEventBytes", "maxStderrBytes", "maxResultBytes", "maxAggregateBytes"]) delete legacy.codex[key];
+    for (const key of ["sandbox", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes"]) delete legacy.validation[key];
+    const validate = new Ajv2020({ allErrors: true, strict: false }).compile(readSchema("controller-config.schema.json"));
+    assert.equal(validate(legacy), true, JSON.stringify(validate.errors));
+    assert.doesNotThrow(() => validateConfig(legacy));
+    legacy.executionMode = "release-plan-v2-direct";
+    assert.equal(validate(legacy), false);
+    assert.throws(
+      () => validateConfig(legacy),
+      (error: any) => error?.code === "production_config_migration_required",
+    );
+  } finally { repo.cleanup(); }
 });
 
 test("release completion schema and runtime validator are closed and self-digested", () => {

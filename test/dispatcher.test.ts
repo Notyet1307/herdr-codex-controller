@@ -15,7 +15,7 @@ import { GitClient } from "../src/git.js";
 import { JobStore } from "../src/state.js";
 import { digestJson, nowIso } from "../src/util.js";
 import { writeJsonAtomic } from "../src/fs-atomic.js";
-import { createTestRepo, FakeGitHub, git, testConfig } from "./support.js";
+import { createTestRepo, FakeGitHub, TestGitClient, git, testConfig } from "./support.js";
 
 const dispatcherConfig: DispatcherConfig = {
   version: 1,
@@ -128,7 +128,7 @@ test("dispatcher gates the next claim on post-merge evidence, then claims it wit
     const dispatcher = new IssueDispatcher({
       store,
       controller: fakeController,
-      git: new GitClient(config),
+      git: new TestGitClient(config),
       github,
       controllerConfig: config,
       controllerConfigPath: configPath,

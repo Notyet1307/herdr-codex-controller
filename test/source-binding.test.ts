@@ -11,6 +11,7 @@ import { digestJson } from "../src/util.js";
 import {
   FakeCodex,
   FakeGitHub,
+  TestGitClient,
   completedWorker,
   createTestRepo,
   git,
@@ -20,7 +21,7 @@ import {
 } from "./support.js";
 import { readControllerIdentity } from "../src/provenance.js";
 
-class CountingGit extends GitClient {
+class CountingGit extends TestGitClient {
   ensureCalls = 0;
   commitCalls = 0;
   pushCalls = 0;

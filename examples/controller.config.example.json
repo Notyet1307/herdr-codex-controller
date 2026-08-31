@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "executionMode": "release-plan-v2-direct",
   "repo": "OWNER/REPOSITORY",
   "localPath": "/ABSOLUTE/PATH/TO/LOCAL/CHECKOUT",
@@ -7,15 +7,24 @@
   "worktreeRoot": "/ABSOLUTE/PRIVATE/PATH/herdr-codex-worktrees",
   "baseRef": "main",
   "remote": "origin",
+  "remoteIdentity": {
+    "version": 1,
+    "fetchUrl": "https://github.com/OWNER/REPOSITORY.git",
+    "pushUrl": "https://github.com/OWNER/REPOSITORY.git"
+  },
   "branchPrefix": "agent/release",
   "shell": "/bin/bash",
   "codex": {
-    "bin": "codex",
+    "bin": "/ABSOLUTE/PATH/TO/codex",
     "workerProfile": null,
     "reviewerProfile": null,
     "workerTimeoutMs": 3600000,
     "reviewerTimeoutMs": 1800000,
     "terminationGraceMs": 10000,
+    "maxEventBytes": 8388608,
+    "maxStderrBytes": 4194304,
+    "maxResultBytes": 1048576,
+    "maxAggregateBytes": 12582912,
     "networkAccess": false
   },
   "validation": {
@@ -23,15 +32,25 @@
       { "command": "npm ci", "timeoutMs": 1800000 }
     ],
     "issue": [
-      { "command": "npm run typecheck", "timeoutMs": 900000 }
+      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run typecheck", "timeoutMs": 1800000 }
     ],
     "release": [
-      { "command": "npm run verify:oracle:o01", "timeoutMs": 900000 },
-      { "command": "npm run typecheck", "timeoutMs": 900000 },
-      { "command": "npm test", "timeoutMs": 1800000 },
-      { "command": "npm run build", "timeoutMs": 900000 }
+      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run verify:oracle:o01", "timeoutMs": 1800000 },
+      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run typecheck", "timeoutMs": 1800000 },
+      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm test", "timeoutMs": 2700000 },
+      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run build", "timeoutMs": 1800000 }
     ],
-    "maxOutputBytes": 131072
+    "maxOutputBytes": 131072,
+    "maxStdoutBytes": 1048576,
+    "maxStderrBytes": 1048576,
+    "maxAggregateBytes": 2097152,
+    "sandbox": {
+      "version": 1,
+      "provider": "codex-permission-profile",
+      "bin": "/ABSOLUTE/PATH/TO/codex",
+      "root": "/var/tmp/herdr-codex-validation",
+      "environmentPath": ["/usr/local/bin", "/usr/bin", "/bin"]
+    }
   },
   "policy": {
     "maxIssueRepairRounds": 1,

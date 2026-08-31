@@ -90,6 +90,70 @@ test("production direct delivery policy requires a PR and exact non-empty checks
   } finally { repo.cleanup(); }
 });
 
+test("legacy direct config requires an explicit validation sandbox migration", () => {
+  const repo = createTestRepo();
+  try {
+    const legacy: any = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    legacy.version = 1;
+    delete legacy.remoteIdentity;
+    delete legacy.codex.maxEventBytes;
+    delete legacy.codex.maxStderrBytes;
+    delete legacy.codex.maxResultBytes;
+    delete legacy.codex.maxAggregateBytes;
+    delete legacy.validation.sandbox;
+    delete legacy.validation.maxStdoutBytes;
+    delete legacy.validation.maxStderrBytes;
+    delete legacy.validation.maxAggregateBytes;
+    assert.throws(
+      () => validateConfig(legacy),
+      (error: any) => error?.code === "production_config_migration_required",
+    );
+    const migrated = structuredClone(legacy) as any;
+    migrated.version = 2;
+    Object.assign(migrated.codex, {
+      maxEventBytes: 1024 * 1024,
+      maxStderrBytes: 1024 * 1024,
+      maxResultBytes: 256 * 1024,
+      maxAggregateBytes: 2 * 1024 * 1024,
+    });
+    migrated.remoteIdentity = {
+      version: 1,
+      fetchUrl: "https://github.com/example/project.git",
+      pushUrl: "https://github.com/example/project.git",
+    };
+    migrated.validation.sandbox = {
+      version: 1,
+      provider: "codex-permission-profile",
+      bin: "/usr/bin/false",
+      root: "/var/tmp/herdr-validation-test",
+      environmentPath: ["/usr/bin", "/bin"],
+    };
+    migrated.validation.maxStdoutBytes = 64 * 1024;
+    migrated.validation.maxStderrBytes = 64 * 1024;
+    migrated.validation.maxAggregateBytes = 96 * 1024;
+    assert.doesNotThrow(() => validateConfig(migrated));
+  } finally { repo.cleanup(); }
+});
+
+test("production runtime disallows profiles and PATH-resolved Codex binaries", () => {
+  const repo = createTestRepo();
+  try {
+    const valid = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    for (const mutate of [
+      (config: any) => { config.codex.workerProfile = "worker"; },
+      (config: any) => { config.codex.reviewerProfile = "reviewer"; },
+      (config: any) => { config.codex.bin = "codex"; },
+    ]) {
+      const config = structuredClone(valid) as any;
+      mutate(config);
+      assert.throws(
+        () => validateConfig(config),
+        (error: any) => error?.code === "production_runtime_policy_invalid",
+      );
+    }
+  } finally { repo.cleanup(); }
+});
+
 test("Release Plan v1 keeps its existing nullable and operator-supplied fields", () => {
   const plan: any = testPlan([1]);
   plan.parentIssue = null;

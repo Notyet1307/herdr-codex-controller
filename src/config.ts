@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import type { CommandConfig, ControllerConfig, ExecutionMode } from "./types.js";
 import {
   assertAbsolutePath,
@@ -9,6 +10,7 @@ import {
   pathWithin,
 } from "./util.js";
 import { ControllerError } from "./errors.js";
+import { parseRemoteIdentityContract } from "./remote-identity.js";
 
 export function loadConfig(path: string): ControllerConfig {
   const absolute = resolve(path);
@@ -18,11 +20,14 @@ export function loadConfig(path: string): ControllerConfig {
 
 export function validateConfig(value: unknown, sourcePath = "config.json"): ControllerConfig {
   const root = expectObject(value, "config");
-  expectExactKeys(root, [
+  if (root.version !== 1 && root.version !== 2) throw new Error("config.version must be 1 or 2");
+  const version = root.version;
+  const keys = [
     "baseRef", "branchPrefix", "codex", "delivery", "executionMode", "localPath", "policy", "remote", "repo",
     "review", "shell", "stateDir", "validation", "version", "worktreeRoot",
-  ], "config", ["executionMode"]);
-  if (root.version !== 1) throw new Error("config.version must be 1");
+  ];
+  if (version === 2) keys.push("remoteIdentity");
+  expectExactKeys(root, keys, "config", ["executionMode"]);
   const repo = boundedText(root.repo, "config.repo", 300);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("config.repo must be OWNER/REPO");
   const localPath = assertAbsolutePath(boundedText(root.localPath, "config.localPath", 4096), "config.localPath");
@@ -39,14 +44,18 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
   }
   const baseRef = safeGitName(root.baseRef, "config.baseRef");
   const remote = safeGitName(root.remote, "config.remote");
+  const remoteIdentity = version === 2 ? parseRemoteIdentityContract(root.remoteIdentity, repo) : null;
   const branchPrefix = boundedText(root.branchPrefix, "config.branchPrefix", 120);
   if (!/^[A-Za-z0-9._/-]+$/.test(branchPrefix) || branchPrefix.startsWith("/") || branchPrefix.endsWith("/")) {
     throw new Error("config.branchPrefix is not a safe branch prefix");
   }
   const shell = boundedText(root.shell, "config.shell", 4096);
   const executionMode = validateExecutionMode(root.executionMode);
-  const codex = validateCodex(root.codex);
-  const validation = validateValidation(root.validation);
+  const codex = validateCodex(root.codex, version);
+  const validation = validateValidation(root.validation, version);
+  if (validation.sandbox && [localPath, stateDir, worktreeRoot].some((entry) => pathsOverlap(entry, validation.sandbox!.root))) {
+    throw new Error("validation sandbox root must not overlap localPath, stateDir, or worktreeRoot");
+  }
   const policy = validatePolicy(root.policy);
   const review = validateReview(root.review);
   const delivery = validateDelivery(root.delivery, executionMode);
@@ -54,7 +63,7 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
     // Hardening can still repair release validation/CI; this is intentionally allowed.
   }
   const config: ControllerConfig = {
-    version: 1,
+    version,
     executionMode,
     repo,
     localPath,
@@ -62,6 +71,7 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
     worktreeRoot,
     baseRef,
     remote,
+    remoteIdentity,
     branchPrefix,
     shell,
     codex,
@@ -75,9 +85,24 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
 }
 
 export function assertProductionDeliveryPolicy(
-  config: Pick<ControllerConfig, "executionMode" | "delivery">,
+  config: Pick<ControllerConfig, "version" | "executionMode" | "codex" | "delivery" | "remoteIdentity" | "shell" | "validation">,
 ): void {
   if (config.executionMode !== "release-plan-v2-direct") return;
+  if (config.version !== 2 || config.validation.sandbox === null || config.remoteIdentity === null) {
+    throw new ControllerError(
+      "production_config_migration_required",
+      "release-plan-v2-direct requires config version 2 with an explicit validation sandbox contract.",
+    );
+  }
+  if (config.codex.workerProfile !== null
+    || config.codex.reviewerProfile !== null
+    || !isAbsolute(config.codex.bin)
+    || !isAbsolute(config.shell)) {
+    throw new ControllerError(
+      "production_runtime_policy_invalid",
+      "release-plan-v2-direct requires absolute Codex/shell binaries and disallows custom Codex profiles.",
+    );
+  }
   if (!config.delivery.createPullRequest
     || config.delivery.allowNoChecks
     || !Array.isArray(config.delivery.requiredChecks)
@@ -100,13 +125,30 @@ function validateExecutionMode(value: unknown): ExecutionMode {
   return value;
 }
 
-function validateCodex(value: unknown): ControllerConfig["codex"] {
+function validateCodex(value: unknown, version: 1 | 2): ControllerConfig["codex"] {
   const object = expectObject(value, "config.codex");
-  expectExactKeys(object, [
+  const keys = [
     "bin", "networkAccess", "reviewerProfile", "reviewerTimeoutMs", "terminationGraceMs",
     "workerProfile", "workerTimeoutMs",
-  ], "config.codex");
+  ];
+  if (version === 2) keys.push("maxAggregateBytes", "maxEventBytes", "maxResultBytes", "maxStderrBytes");
+  expectExactKeys(object, keys, "config.codex");
   if (object.networkAccess !== false) throw new Error("config.codex.networkAccess must be false in v1");
+  const maxEventBytes = version === 2
+    ? parsePositiveInteger(object.maxEventBytes, "config.codex.maxEventBytes", 4_096, 16 * 1024 * 1024)
+    : 8 * 1024 * 1024;
+  const maxStderrBytes = version === 2
+    ? parsePositiveInteger(object.maxStderrBytes, "config.codex.maxStderrBytes", 4_096, 16 * 1024 * 1024)
+    : 8 * 1024 * 1024;
+  const maxResultBytes = version === 2
+    ? parsePositiveInteger(object.maxResultBytes, "config.codex.maxResultBytes", 4_096, 4 * 1024 * 1024)
+    : 1024 * 1024;
+  const maxAggregateBytes = version === 2
+    ? parsePositiveInteger(object.maxAggregateBytes, "config.codex.maxAggregateBytes", 4_096, 32 * 1024 * 1024)
+    : 16 * 1024 * 1024;
+  if (maxAggregateBytes < Math.max(maxEventBytes, maxStderrBytes, maxResultBytes)) {
+    throw new Error("config.codex.maxAggregateBytes must cover each Codex output limit");
+  }
   return {
     bin: boundedText(object.bin, "config.codex.bin", 4096),
     workerProfile: nullableText(object.workerProfile, "config.codex.workerProfile", 200),
@@ -114,19 +156,84 @@ function validateCodex(value: unknown): ControllerConfig["codex"] {
     workerTimeoutMs: parsePositiveInteger(object.workerTimeoutMs, "config.codex.workerTimeoutMs", 60_000, 8 * 60 * 60 * 1000),
     reviewerTimeoutMs: parsePositiveInteger(object.reviewerTimeoutMs, "config.codex.reviewerTimeoutMs", 60_000, 4 * 60 * 60 * 1000),
     terminationGraceMs: parsePositiveInteger(object.terminationGraceMs, "config.codex.terminationGraceMs", 1_000, 60_000),
+    maxEventBytes,
+    maxStderrBytes,
+    maxResultBytes,
+    maxAggregateBytes,
     networkAccess: false,
   };
 }
 
-function validateValidation(value: unknown): ControllerConfig["validation"] {
+function validateValidation(value: unknown, version: 1 | 2): ControllerConfig["validation"] {
   const object = expectObject(value, "config.validation");
-  expectExactKeys(object, ["issue", "maxOutputBytes", "release", "setup"], "config.validation");
+  const version2Keys = [
+    "issue", "maxAggregateBytes", "maxOutputBytes", "maxStderrBytes", "maxStdoutBytes", "release", "sandbox", "setup",
+  ];
+  expectExactKeys(
+    object,
+    version === 2 ? version2Keys : ["issue", "maxOutputBytes", "release", "setup"],
+    "config.validation",
+  );
+  const maxOutputBytes = parsePositiveInteger(object.maxOutputBytes, "config.validation.maxOutputBytes", 4_096, 8 * 1024 * 1024);
+  if (version === 1) {
+    return {
+      setup: validateCommands(object.setup, "config.validation.setup", 30),
+      issue: validateCommands(object.issue, "config.validation.issue", 50),
+      release: validateCommands(object.release, "config.validation.release", 50),
+      maxOutputBytes,
+      maxStdoutBytes: maxOutputBytes,
+      maxStderrBytes: maxOutputBytes,
+      maxAggregateBytes: maxOutputBytes * 2,
+      sandbox: null,
+    };
+  }
+  const maxStdoutBytes = parsePositiveInteger(object.maxStdoutBytes, "config.validation.maxStdoutBytes", 4_096, 8 * 1024 * 1024);
+  const maxStderrBytes = parsePositiveInteger(object.maxStderrBytes, "config.validation.maxStderrBytes", 4_096, 8 * 1024 * 1024);
+  const maxAggregateBytes = parsePositiveInteger(object.maxAggregateBytes, "config.validation.maxAggregateBytes", 4_096, 16 * 1024 * 1024);
+  if (maxAggregateBytes < Math.max(maxStdoutBytes, maxStderrBytes)) {
+    throw new Error("config.validation.maxAggregateBytes must cover each stream limit");
+  }
   return {
     setup: validateCommands(object.setup, "config.validation.setup", 30),
     issue: validateCommands(object.issue, "config.validation.issue", 50),
     release: validateCommands(object.release, "config.validation.release", 50),
-    maxOutputBytes: parsePositiveInteger(object.maxOutputBytes, "config.validation.maxOutputBytes", 4_096, 8 * 1024 * 1024),
+    maxOutputBytes,
+    maxStdoutBytes,
+    maxStderrBytes,
+    maxAggregateBytes,
+    sandbox: validateSandbox(object.sandbox),
   };
+}
+
+function validateSandbox(value: unknown): NonNullable<ControllerConfig["validation"]["sandbox"]> {
+  const object = expectObject(value, "config.validation.sandbox");
+  expectExactKeys(object, ["bin", "environmentPath", "provider", "root", "version"], "config.validation.sandbox");
+  if (object.version !== 1) throw new Error("config.validation.sandbox.version must be 1");
+  if (object.provider !== "codex-permission-profile") {
+    throw new Error("config.validation.sandbox.provider must be codex-permission-profile");
+  }
+  const bin = assertAbsolutePath(boundedText(object.bin, "config.validation.sandbox.bin", 4096), "config.validation.sandbox.bin");
+  const requestedRoot = assertAbsolutePath(boundedText(object.root, "config.validation.sandbox.root", 4096), "config.validation.sandbox.root");
+  const parent = realpathSync(dirname(requestedRoot));
+  const root = existsSync(requestedRoot) ? realpathSync(requestedRoot) : join(parent, basename(requestedRoot));
+  for (const sensitive of [homedir(), tmpdir(), "/tmp", "/private/tmp"].filter((entry) => existsSync(entry))) {
+    if (pathWithin(realpathSync(sensitive), root)) {
+      throw new Error("config.validation.sandbox.root must be outside the operator home and system temporary directory");
+    }
+  }
+  if (existsSync(root)) {
+    const stat = lstatSync(root);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error("config.validation.sandbox.root must be a canonical directory");
+    }
+  } else {
+    if (!pathWithin(parent, root)) throw new Error("config.validation.sandbox.root has an unsafe parent");
+  }
+  const environmentPath = boundedStringArray(object.environmentPath, "config.validation.sandbox.environmentPath", 30, 4096);
+  if (environmentPath.length === 0 || environmentPath.some((entry) => !entry.startsWith("/"))) {
+    throw new Error("config.validation.sandbox.environmentPath must contain absolute directories");
+  }
+  return { version: 1, provider: "codex-permission-profile", bin, root, environmentPath };
 }
 
 function validatePolicy(value: unknown): ControllerConfig["policy"] {

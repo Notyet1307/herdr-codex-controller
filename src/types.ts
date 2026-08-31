@@ -11,7 +11,7 @@ export type CommandConfig = {
 };
 
 export type ControllerConfig = {
-  version: 1;
+  version: 1 | 2;
   executionMode: ExecutionMode;
   repo: string;
   localPath: string;
@@ -19,6 +19,11 @@ export type ControllerConfig = {
   worktreeRoot: string;
   baseRef: string;
   remote: string;
+  remoteIdentity: {
+    version: 1;
+    fetchUrl: string;
+    pushUrl: string;
+  } | null;
   branchPrefix: string;
   shell: string;
   codex: {
@@ -28,6 +33,10 @@ export type ControllerConfig = {
     workerTimeoutMs: number;
     reviewerTimeoutMs: number;
     terminationGraceMs: number;
+    maxEventBytes: number;
+    maxStderrBytes: number;
+    maxResultBytes: number;
+    maxAggregateBytes: number;
     networkAccess: false;
   };
   validation: {
@@ -35,6 +44,16 @@ export type ControllerConfig = {
     issue: CommandConfig[];
     release: CommandConfig[];
     maxOutputBytes: number;
+    maxStdoutBytes: number;
+    maxStderrBytes: number;
+    maxAggregateBytes: number;
+    sandbox: {
+      version: 1;
+      provider: "codex-permission-profile";
+      bin: string;
+      root: string;
+      environmentPath: string[];
+    } | null;
   };
   policy: {
     maxIssueRepairRounds: number;
@@ -67,9 +86,47 @@ export type ControllerIdentity = {
   digest: string;
 };
 
-export type ControllerProvenance = {
+export type ExecutableIdentity = {
+  configuredPathDigest: string;
+  realPathDigest: string;
+  byteCount: number;
+  sha256: string;
+  versionOutput: string;
+};
+
+export type ExecutionRuntimeIdentity = {
   version: 1;
+  binary: ExecutableIdentity;
+  fixedPolicyDigest: string;
+  profilesDisabled: boolean;
+  digest: string;
+};
+
+export type ValidationSandboxIdentity = {
+  version: 1;
+  provider: "codex-permission-profile";
+  binary: ExecutableIdentity;
+  policyDigest: string;
+  digest: string;
+};
+
+export type GitRemoteIdentity = {
+  version: 1;
+  remote: string;
+  repo: string;
+  fetchUrl: string;
+  pushUrl: string;
+  fetchTransport: "https" | "ssh";
+  pushTransport: "https" | "ssh";
+  digest: string;
+};
+
+export type ControllerProvenance = {
+  version: 1 | 2;
   controller: ControllerIdentity;
+  executionRuntime?: ExecutionRuntimeIdentity;
+  remoteIdentity?: GitRemoteIdentity;
+  validationSandbox?: ValidationSandboxIdentity;
   executionMode: ExecutionMode;
   configDigest: string;
   releasePlan: {
@@ -261,6 +318,11 @@ export type ValidationCommandResult = {
   stderrSha256: string;
   stdoutTail: string;
   stderrTail: string;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  outputLimitExceeded?: boolean;
+  terminationReason?: "exit" | "signal" | "timeout" | "output_limit";
+  commandIdentityDigest?: string;
   verifiedAt: string;
 };
 
@@ -279,13 +341,29 @@ export type RepositoryFileSnapshot = {
   bytes: Uint8Array;
 };
 
+export type ValidationProjectionEntry =
+  | { path: string; mode: "100644" | "100755"; byteCount: number; sha256: string }
+  | { path: string; mode: "120000"; byteCount: number; sha256: string; linkTarget: string };
+
 export type ValidationReceipt = {
-  version: 2;
+  version: 2 | 3;
   id: string;
   scope: "setup" | "issue" | "release";
   issueNumber: number | null;
   candidateSha: string;
   sourceWorktreeDigest: string;
+  candidateTreeSha?: string;
+  candidateTreeDigest?: string;
+  sandboxPolicyDigest?: string;
+  commandSetDigest?: string;
+  configuredCommands?: Array<{
+    command: string;
+    oracles: OracleExecutionRef[];
+    timeoutMs: number;
+  }>;
+  projectionFileCount?: number;
+  projectionByteCount?: number;
+  cleanupCompleted?: boolean;
   commandCount: number;
   passed: boolean;
   commands: ValidationCommandResult[];
@@ -306,6 +384,13 @@ export type CodexRunRecord = {
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
+  outputLimitExceeded?: boolean;
+  terminationReason?: "exit" | "signal" | "timeout" | "output_limit";
+  eventsBytes?: number;
+  stderrBytes?: number;
+  resultBytes?: number;
+  eventsSha256?: string;
+  stderrSha256?: string;
   promptPath: string;
   eventsPath: string;
   stderrPath: string;
@@ -504,8 +589,12 @@ export type ReleaseCompletionV1 = {
   digest: string;
 };
 
+export type ReleaseCompletionV2 = Omit<ReleaseCompletionV1, "schema"> & {
+  schema: "herdr-codex-controller:release-completion:v2";
+};
+
 export type JobState = {
-  version: 2;
+  version: 2 | 3;
   id: string;
   provenance: ControllerProvenance;
   configPath: string;
@@ -517,6 +606,7 @@ export type JobState = {
   baseRef: string;
   baseSha: string | null;
   remote: string;
+  remoteIdentityDigest?: string | null;
   branch: string;
   worktreePath: string;
   status: JobStatus;
@@ -572,6 +662,12 @@ export type CommandResult = {
   stderrPath: string | null;
   stdoutTail: string;
   stderrTail: string;
+  stdoutBytes: number;
+  stderrBytes: number;
+  stdoutSha256: string;
+  stderrSha256: string;
+  outputLimitExceeded: boolean;
+  terminationReason: "exit" | "signal" | "timeout" | "output_limit";
 };
 
 export type GhCheckSummary = {

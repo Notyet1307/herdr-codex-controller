@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -9,18 +9,24 @@ import type {
   RunKind,
   WorkerResult,
 } from "./types.js";
-import { runCommand } from "./command.js";
+import { requireCommandSuccess, runCommand } from "./command.js";
 import { ensurePrivateDir, writeTextAtomic } from "./fs-atomic.js";
 import { digestJson, newId, nowIso } from "./util.js";
 import type { GitClient } from "./git.js";
+import { ControllerError } from "./errors.js";
+import {
+  codexRuntimeControlArgs,
+  readExecutionRuntimeIdentity,
+  REVIEWER_MODEL,
+  REVIEWER_REASONING_EFFORT,
+  WORKER_MODEL,
+  WORKER_REASONING_EFFORT,
+} from "./runtime-identity.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const WORKER_SCHEMA = join(PACKAGE_ROOT, "schemas", "worker-result.schema.json");
 const REVIEW_SCHEMA = join(PACKAGE_ROOT, "schemas", "review-result.schema.json");
-const WORKER_MODEL = "gpt-5.6-terra";
-const WORKER_REASONING_EFFORT = "high";
-const REVIEWER_MODEL = "gpt-5.6-sol";
-const REVIEWER_REASONING_EFFORT = "max";
+const MAX_PROMPT_BYTES = 8 * 1024 * 1024;
 
 export type CodexExecution = {
   record: CodexRunRecord;
@@ -41,16 +47,36 @@ export class CodexRunner {
       cwd: this.config.localPath,
       timeoutMs: 30_000,
       maxTailBytes: 64 * 1024,
+      stdoutByteLimit: 64 * 1024,
+      stderrByteLimit: 64 * 1024,
+      aggregateByteLimit: 128 * 1024,
     });
-    if (version.exitCode !== 0) throw new Error(`codex --version failed: ${version.stderrTail || version.stdoutTail}`);
+    requireCommandSuccess(version, "codex --version");
+    const surface = await runCommand({
+      command: this.config.codex.bin,
+      args: ["exec", "--help"],
+      cwd: this.config.localPath,
+      timeoutMs: 30_000,
+      maxTailBytes: 128 * 1024,
+      stdoutByteLimit: 128 * 1024,
+      stderrByteLimit: 64 * 1024,
+      aggregateByteLimit: 192 * 1024,
+    });
+    requireCommandSuccess(surface, "codex exec --help");
+    for (const flag of ["--ignore-user-config", "--ignore-rules", "--output-schema", "--output-last-message"]) {
+      if (!surface.stdoutTail.includes(flag)) throw new Error(`Codex runtime does not support required flag ${flag}`);
+    }
     const auth = await runCommand({
       command: this.config.codex.bin,
       args: ["login", "status"],
       cwd: this.config.localPath,
       timeoutMs: 30_000,
       maxTailBytes: 64 * 1024,
+      stdoutByteLimit: 64 * 1024,
+      stderrByteLimit: 64 * 1024,
+      aggregateByteLimit: 128 * 1024,
     });
-    if (auth.exitCode !== 0) throw new Error(`codex login status failed: ${auth.stderrTail || auth.stdoutTail}`);
+    requireCommandSuccess(auth, "codex login status");
   }
 
   async run(input: {
@@ -61,6 +87,18 @@ export class CodexRunner {
     runsRoot: string;
     runId?: string;
   }): Promise<CodexExecution> {
+    if (Buffer.byteLength(input.prompt, "utf8") > MAX_PROMPT_BYTES) {
+      throw new ControllerError("codex_prompt_too_large", `Codex prompt exceeds ${MAX_PROMPT_BYTES} bytes.`);
+    }
+    if (input.job.provenance.version === 2) {
+      const current = readExecutionRuntimeIdentity(this.config);
+      if (current.digest !== input.job.provenance.executionRuntime?.digest) {
+        throw new ControllerError(
+          "execution_runtime_drift",
+          "Codex executable bytes, version, profile policy, or fixed runtime controls changed after Job creation.",
+        );
+      }
+    }
     const runId = input.runId ?? newId(input.kind);
     const runDir = ensurePrivateDir(join(input.runsRoot, runId));
     const promptPath = join(runDir, "prompt.md");
@@ -75,13 +113,11 @@ export class CodexRunner {
       "--ask-for-approval", "never",
       "exec",
       "--ephemeral",
+      ...codexRuntimeControlArgs(this.config, input.job.worktreePath),
       "--json",
       "--strict-config",
       "--sandbox", isReview ? "read-only" : "workspace-write",
       "--cd", input.job.worktreePath,
-      "--config", "sandbox_workspace_write.network_access=false",
-      "--config", 'shell_environment_policy.inherit="core"',
-      "--config", "shell_environment_policy.ignore_default_excludes=false",
       "--output-schema", isReview ? REVIEW_SCHEMA : WORKER_SCHEMA,
       "--output-last-message", resultPath,
     ];
@@ -103,9 +139,21 @@ export class CodexRunner {
       stdoutPath: eventsPath,
       stderrPath,
       maxTailBytes: 128 * 1024,
+      stdoutByteLimit: this.config.codex.maxEventBytes,
+      stderrByteLimit: this.config.codex.maxStderrBytes,
+      aggregateByteLimit: Math.max(0, this.config.codex.maxAggregateBytes - this.config.codex.maxResultBytes),
+      watchedFileLimits: [{ path: resultPath, maxBytes: this.config.codex.maxResultBytes }],
     });
     const finalHeadSha = await this.git.head(input.job.worktreePath);
-    const rawResult = existsSync(resultPath) ? readFileSync(resultPath, "utf8") : null;
+    const resultFile = existsSync(resultPath)
+      ? readBoundedResult(resultPath, this.config.codex.maxResultBytes)
+      : { bytes: null, byteCount: 0, tooLarge: false };
+    const aggregateExceeded = command.stdoutBytes + command.stderrBytes + resultFile.byteCount > this.config.codex.maxAggregateBytes;
+    const outputLimitExceeded = command.outputLimitExceeded || resultFile.tooLarge || aggregateExceeded;
+    if (resultFile.tooLarge && existsSync(resultPath)) unlinkSync(resultPath);
+    const rawResult = outputLimitExceeded || resultFile.bytes === null
+      ? null
+      : Buffer.from(resultFile.bytes).toString("utf8");
     let parsed: unknown = null;
     if (rawResult !== null) {
       try { parsed = JSON.parse(rawResult) as unknown; }
@@ -124,6 +172,13 @@ export class CodexRunner {
       exitCode: command.exitCode,
       signal: command.signal,
       timedOut: command.timedOut,
+      outputLimitExceeded,
+      terminationReason: outputLimitExceeded ? "output_limit" : command.terminationReason,
+      eventsBytes: command.stdoutBytes,
+      stderrBytes: command.stderrBytes,
+      resultBytes: resultFile.byteCount,
+      eventsSha256: command.stdoutSha256,
+      stderrSha256: command.stderrSha256,
       promptPath,
       eventsPath,
       stderrPath,
@@ -131,6 +186,35 @@ export class CodexRunner {
       resultDigest: parsed === null ? null : digestJson(parsed),
     };
     return { record, workerResult, reviewResult };
+  }
+}
+
+function readBoundedResult(path: string, maximumBytes: number): {
+  bytes: Uint8Array | null;
+  byteCount: number;
+  tooLarge: boolean;
+} {
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+    throw new ControllerError("codex_result_file_unsafe", "Codex final result is not a safe regular file.");
+  }
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size < 0 || stat.dev !== before.dev || stat.ino !== before.ino) {
+      throw new ControllerError("codex_result_file_unsafe", "Codex final result is not a safe regular file.");
+    }
+    if (stat.size > maximumBytes) return { bytes: null, byteCount: stat.size, tooLarge: true };
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    if (after.size !== stat.size || after.nlink !== 1 || bytes.byteLength !== stat.size
+      || pathAfter.isSymbolicLink() || pathAfter.nlink !== 1 || pathAfter.dev !== stat.dev || pathAfter.ino !== stat.ino) {
+      throw new ControllerError("codex_result_file_unsafe", "Codex final result changed while it was read.");
+    }
+    return { bytes, byteCount: bytes.byteLength, tooLarge: false };
+  } finally {
+    closeSync(fd);
   }
 }
 

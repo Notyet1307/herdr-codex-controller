@@ -48,22 +48,24 @@ Controller checkout HEAD commit
 + canonical manifest(path/mode/bytes/hash) of every tracked regular file
 + actual dist/src/**/*.js + package.json + package-lock.json build digest
 → Controller identity self-digest
++ Codex binary bytes/version/path digest + fixed runtime policy
++ validation sandbox binary/policy + exact GitHub fetch/push identity
 + executionMode + validated config digest + Release Plan version/digest
 → Job provenance self-digest
-→ atomic job.json snapshot
+→ atomic Job State v3 snapshot
 → compare again before every Controller step
 ```
 
 `config validate`/`doctor` 暴露 runtime identity，`plan validate` 暴露完整待绑定 provenance，`start` 原子写入 Job，`status` 回读 snapshot、current 和 match。任何 source/build/config/plan drift 都阻止后续执行；缺少 provenance 的旧 Job 不会被静默 backfill。
 
 ```text
-preflight(git → github → codex)
+preflight(git remote identity → github → codex runtime → validation sandbox capability)
 → fetch remote base and compare exact SHA
 → fetch Parent and compare OPEN/number/title/raw-body-hash
 → fetch every Child and compare OPEN/number/title/raw-body-hash
 → ensureWorktree
 → persist snapshots
-→ setup validation
+→ clean disposable projection + contained setup validation
 ```
 
 任何 source drift 都 fail closed，不调用 Worktree 创建、setup validator 或 `codex.run`。模型不参与 drift 判断，Controller 也不自动修复 Plan。
