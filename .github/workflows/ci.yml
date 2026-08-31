@@ -19,6 +19,8 @@ jobs:
         with:
           node-version: 22.16.0
           cache: npm
+      - name: Enable unprivileged user namespaces for the validation sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
