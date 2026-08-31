@@ -135,6 +135,8 @@ Release validation 或 aggregate review 完成后，Controller 按以下 durabil
 
 verified merge 完成时还会原子保存 immutable completion checkpoint，绑定 exact candidate、Issue commits、release validation/review digest、PR/merge/checks、与 verified merge SHA 相同的 exact merged main、handoff digests 和 provenance。`completion export` 只从该 checkpoint 与重新验证的 private evidence 生成 public allowlist artifact；旧的 local-only 或无 checkpoint Job 不可导出。
 
+`report export` 可在任意 Job 状态下生成 bounded `review.md`。它从 Job 已绑定的 receipt、structured Agent result、Git diff 与 CI checkpoint 动态重建，不复制 prompt、events、完整日志、环境变量或私有绝对路径，也不成为新的 Job authority。输出必须位于 `stateDir` 之外；已有不同字节的目标文件会被拒绝，重复导出相同状态则保持 byte-idempotent。
+
 `release_hardening_exhausted` 由 `scheduleHardening` 直接保存为 `replan_required`，不依赖异常后的 reload。排查时应同时核对：
 
 - `blocked.detailsPath` 是本轮 exact receipt/result；

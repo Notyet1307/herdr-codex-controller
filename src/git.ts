@@ -442,6 +442,17 @@ export class GitClient {
     return { ...stats, summary };
   }
 
+  async reportDiffStats(job: JobState): Promise<(BoundedDiff & { summary: string }) | null> {
+    if (!job.baseSha) return null;
+    const cwd = existsSync(job.worktreePath) ? job.worktreePath : this.config.localPath;
+    const target = job.candidateSha ?? "HEAD";
+    const stats = await this.statsBetween(cwd, job.baseSha, target);
+    const summary = await this.textRawBounded(cwd, [
+      "diff", "--stat", "--no-renames", `${job.baseSha}...${target}`, "--",
+    ], GIT_OUTPUT_BYTES);
+    return { ...stats, summary };
+  }
+
   async diffText(job: JobState, maximumBytes: number): Promise<string> {
     if (!job.baseSha || !job.candidateSha) throw new Error("review candidate identity is incomplete");
     const result = await this.run(job.worktreePath, ["diff", "--no-ext-diff", "--unified=80", `${job.baseSha}...${job.candidateSha}`], maximumBytes);

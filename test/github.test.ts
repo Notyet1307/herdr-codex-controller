@@ -64,18 +64,19 @@ test("versioned required checks accept configured conclusions and ignore observa
 });
 
 test("v2 pull request bodies keep source-bound Issues OPEN while legacy delivery keeps closure behavior", () => {
-  const job = {
-    plan: { version: 2, title: "Release", objective: "Ship it", releaseAcceptanceCriteria: [], issues: [] },
-    issues: [{ number: 1 }],
-    validations: [],
-    candidateSha: "a".repeat(40),
-    reviewRound: 1,
-    planDigest: "b".repeat(64),
+  const report = {
+    result: { releaseId: "release", candidateSha: "a".repeat(40) },
+    goal: { issueVerb: "Issue", objective: "Ship it", issues: [{ number: 1 }] },
+    change: { available: true, files: 1, changedLines: 1 },
+    checks: [],
+    aggregateReview: { status: "PASS", summary: "pass" },
+    remainingConcerns: { items: [] },
+    technical: { planDigest: "b".repeat(64) },
   } as any;
-  assert.match(renderPullRequestBody(job), /- Issue #1/);
-  assert.doesNotMatch(renderPullRequestBody(job), /Closes #1/);
-  job.plan.version = 1;
-  assert.match(renderPullRequestBody(job), /- Closes #1/);
+  assert.match(renderPullRequestBody(report), /- Issue #1/);
+  assert.doesNotMatch(renderPullRequestBody(report), /Closes #1/);
+  report.goal.issueVerb = "Closes";
+  assert.match(renderPullRequestBody(report), /- Closes #1/);
 });
 
 test("auto-merge policy requires a pull-request rule and strict protection for every configured check", async () => {

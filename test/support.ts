@@ -376,7 +376,7 @@ export class FakeGitHub implements GitHubPort {
     return { ...identity, digest: digestJson(identity) };
   }
   async findPullRequest(_job: JobState): Promise<PullRequestState | null> { return null; }
-  async createPullRequest(_job: JobState, _deliveryRoot: string): Promise<PullRequestState> { throw new Error("not used"); }
+  async createPullRequest(_job: JobState, _deliveryRoot: string, _body: string): Promise<PullRequestState> { throw new Error("not used"); }
   async inspectPullRequest(_number: number): Promise<{ pullRequest: PullRequestState; checks: any; mergedAt: string | null }> { throw new Error("not used"); }
   async baseAllowsUpToDateAutoMerge(): Promise<boolean> { return true; }
   async enableAutoMerge(_number: number, _candidateSha: string): Promise<void> { throw new Error("not used"); }

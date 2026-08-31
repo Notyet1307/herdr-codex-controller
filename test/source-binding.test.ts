@@ -78,9 +78,9 @@ class SourceGitHub extends FakeGitHub {
     return { ...snapshot, ...this.changes.get(number) };
   }
 
-  override async createPullRequest(job: JobState, deliveryRoot: string) {
+  override async createPullRequest(job: JobState, deliveryRoot: string, body: string) {
     this.createPullRequestCalls += 1;
-    return super.createPullRequest(job, deliveryRoot);
+    return super.createPullRequest(job, deliveryRoot, body);
   }
 }
 
