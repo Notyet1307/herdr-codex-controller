@@ -2,8 +2,6 @@
 
 ## 上线前
 
-确认 `git`、`gh`、`codex`、Node、目标 checkout、remote identity、required-check server policy 和 validation sandbox 均可用。先执行：
-
 ```bash
 npm ci
 npm run verify
@@ -12,9 +10,7 @@ node dist/src/cli.js doctor --config /PRIVATE/PATH/controller.json --json
 node dist/src/cli.js plan validate --config /PRIVATE/PATH/controller.json --plan /PRIVATE/PATH/release-plan.json --json
 ```
 
-Config 必须是 v4。固定生产策略不接受 JSON override；required-check app/workflow identity、timeouts、merge method 和 paths 必须与目标仓库真实策略一致。
-
-`reviewDemo` 缺省为 `null`。启用后只配置一个目标仓库命令；required 失败会在 PR 前阻断，optional 失败记录 WARN。只有确实需要 API、浏览器或运行时下载时才设置 `networkAccess=true`。
+Config 必须是 v4；required-check identity、timeout、merge method、paths 与 validation commands 必须符合目标仓库真实策略。
 
 ## 启动与观察
 
@@ -22,37 +18,29 @@ Config 必须是 v4。固定生产策略不接受 JSON override；required-check
 node dist/src/cli.js start \
   --config /PRIVATE/PATH/controller.json \
   --plan /PRIVATE/PATH/release-plan.json \
-  --expected-config-digest CONFIG_DIGEST \
-  --expected-controller-revision CONTROLLER_SHA \
-  --expected-controller-provenance-digest PROVENANCE_DIGEST \
+  --approve-plan PLAN_DIGEST \
   --json
 
 node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job RELEASE_ID --json
 node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --operator --json
 ```
 
-Admission 才核对 Parent/Child title/body。Job 启动后 Issue 文案变化不会自动使旧 Job 失效；remote base 会在 delivery 与 auto-merge authorization 前重新核对。
+`--approve-plan` 必须等于 `plan validate` 返回的 64 位 digest。Controller 私下 snapshot config/Plan 并在恢复时拒绝 drift，但不要求 Planner 批准 config 或 Controller build。
 
-## Blocked
+## Blocked 与中断
 
-- `replan_required`：保存 review/receipt，执行 `abort`，回 Planner 生成并批准新 Plan，再创建新 Job。
-- recoverable：修复不改变 Plan authority 的基础设施/凭据/固定依赖问题，生成新的 regular evidence file，再执行 `retry --reason ... --evidence ...`。
+- `replan_required`：保存 report/receipt，执行 `abort`，回 Planner 生成并批准新 Plan，再创建新 Job。
+- recoverable：修复不改变 Plan authority 的基础设施问题，提供新的 regular evidence file，再执行 `retry --reason ... --evidence ...`。
 
-不要通过 retry 改 Plan、base、Issue snapshot、accepted ADR 或 dependency handoff，也不要增加 code-repair budget。
+优先用 SIGINT/SIGTERM。若异常中断，先确认无遗留 Codex 进程，再执行 `step`；Controller 会核对 Worktree/HEAD 并启动 fresh recovery。
 
-## 中断
-
-优先使用 SIGINT/SIGTERM。若被 SIGKILL，先确认无遗留 Codex 进程，再执行 `step`。Controller 会核对 Worktree/HEAD 并使用 fresh recovery；不会恢复 transcript/session。
-
-## Review 与 Completion
+## 输出
 
 ```bash
 node dist/src/cli.js report export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/review.md --json
-node dist/src/cli.js completion export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/completion.json --json
+node dist/src/cli.js result export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/release-result.json --json
 ```
 
-`report export` 可用于非终态 Job；Completion 只允许 verified merged checkpoint。两种输出都必须在 `stateDir` 外，已有不同字节的目标文件会被拒绝。
+`report export` 可用于非终态 Job；Result 只允许 verified merged Job。输出必须位于 `stateDir` 外，已有不同字节的目标文件会被拒绝。
 
-## 清理
-
-`cleanup` 只删除 terminal 且 clean 的 Worktree，不删除 Job、receipt、runs、retry evidence、branch 或公开结果。历史 state 迁移前先确认没有 active Job/process，并使用可逆归档。
+`cleanup` 只删除 terminal 且 clean 的 Worktree，不删除 Job、receipts、runs、retry evidence、branch 或公开结果。

@@ -1,0 +1,24 @@
+{
+  "controllerContractVersion": 1,
+  "id": "release-id",
+  "title": "Release title",
+  "objective": "One observable release objective",
+  "repo": "OWNER/REPOSITORY",
+  "baseRef": "main",
+  "baseSha": "0000000000000000000000000000000000000000",
+  "parentIssue": 100,
+  "issues": [
+    {
+      "number": 101,
+      "order": 1,
+      "dependsOn": [],
+      "objective": "Implement one observable behavior",
+      "acceptanceCriteria": ["The behavior is observable and covered"],
+      "expectedPaths": ["src/*.ts", "test/*.test.ts"],
+      "risk": "normal",
+      "oracleCommands": []
+    }
+  ],
+  "releaseAcceptanceCriteria": ["The complete release validation passes"],
+  "reviewFocus": ["Cross-Issue correctness and regressions"]
+}

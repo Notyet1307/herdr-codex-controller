@@ -185,7 +185,7 @@ function reportFixture() {
   job.ciGate = {
     version: 1,
     candidateSha: job.candidateSha,
-    checkContractDigest: job.provenance.requiredCheckContractDigest!,
+    checkContractDigest: digestJson(config.delivery.requiredChecks),
     firstObservedAt: nowIso(),
     firstAppearanceDeadlineAt: nowIso(),
     pendingDeadlineAt: null,
@@ -215,7 +215,6 @@ function reportFixture() {
     },
     testsRun: [{ command: "npm test", outcome: "passed" }],
     residualRisks: ["Keep the fallback visible."],
-    observedRiskClasses: [],
     blockedReason: null,
     blockedKind: null,
   });
@@ -268,7 +267,6 @@ function addValidation(
     passed,
     commands: [{
       command,
-      oracles: [],
       timeoutMs: 60_000,
       exitCode: passed ? 0 : 1,
       signal: null,

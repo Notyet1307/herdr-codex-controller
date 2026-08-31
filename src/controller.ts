@@ -8,9 +8,6 @@ import type {
   IssueSnapshot,
   IssueExecution,
   JobState,
-  OracleExecutionRef,
-  ReleasePlanIssueV2,
-  RepositoryFileSnapshot,
   ReviewResult,
   StepResult,
   ValidationReceipt,
@@ -18,15 +15,13 @@ import type {
 } from "./types.js";
 import type { CodexPort, DemoPort, GitHubPort, GitPort, ValidationPort } from "./ports.js";
 import { ControllerError, asControllerError } from "./errors.js";
-import { createCompletionEvidence, createPublicCompletionCheckpoint, readCanonicalCandidateProof } from "./completion-export.js";
-import { unknownRiskClasses } from "./risk-classes.js";
+import { createReleaseResult, readCandidateProof } from "./release-result.js";
 import { CommandInterruptedError } from "./command.js";
 import { JobStore, blockJob, currentIssue, nextPendingIssue } from "./state.js";
 import { readJsonFile, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
-import { digestJson, newId, nowIso, sha256PrefixedUtf8 } from "./util.js";
+import { digestJson, newId, nowIso } from "./util.js";
 import {
   assertPlanCompatibleWithConfig,
-  oracleVerifierProtectedPaths,
   validatePlan,
 } from "./plan.js";
 import { assertValidationReceipt } from "./validator.js";
@@ -123,13 +118,6 @@ export class ReleaseController {
     if (digestJson(job.plan) !== job.planDigest) {
       throw new ControllerError("plan_drift", "The job-bound release plan digest changed.");
     }
-    const currentProvenance = this.deps.store.currentProvenance(job.plan);
-    if (currentProvenance.digest !== job.provenance.digest) {
-      throw new ControllerError(
-        "controller_provenance_drift",
-        "The current Controller source or build provenance differs from the Job snapshot.",
-      );
-    }
   }
 
   private async reconcileInterruptedRun(job: JobState): Promise<StepResult> {
@@ -190,7 +178,7 @@ export class ReleaseController {
     if (job.plan.issues.length > this.deps.store.config.policy.maxIssues) {
       throw new ControllerError("release_too_many_issues", `Plan has ${job.plan.issues.length} issues; configured maximum is ${this.deps.store.config.policy.maxIssues}.`);
     }
-    return this.prepareSourceBoundV2(job);
+    return this.prepareRelease(job);
   }
 
   private async verify(job: JobState): Promise<StepResult> {
@@ -201,7 +189,7 @@ export class ReleaseController {
     return job.currentIssueNumber === null ? this.repairRelease(job) : this.implement(job);
   }
 
-  private async prepareSourceBoundV2(job: JobState): Promise<StepResult> {
+  private async prepareRelease(job: JobState): Promise<StepResult> {
     const verified = await this.verifyPlanSourceBeforeSideEffects(job);
     job = { ...job, baseSha: verified.baseSha };
     await this.deps.git.ensureWorktree(job);
@@ -238,10 +226,10 @@ export class ReleaseController {
     await this.deps.validator.preflight();
 
     const baseSha = await this.deps.git.fetchBase();
-    if (baseSha !== plan.source.baseSha) {
+    if (baseSha !== plan.baseSha) {
       throw new ControllerError(
         "plan_base_drift",
-        "The current remote base commit differs from the Release Plan v2 source binding.",
+        "The current remote base commit differs from the Release Plan binding.",
       );
     }
     if (job.baseSha === null) {
@@ -249,39 +237,29 @@ export class ReleaseController {
     }
 
     const { parent, issues } = await this.fetchCurrentSourceIssues(job);
-    await this.assertOracleBindingsAtBase(plan);
     return { baseSha, parent, issues };
   }
 
   private async assertBaseStillCurrent(job: JobState, phase: string): Promise<void> {
     this.assertCurrentInputs(job);
     const baseSha = await this.deps.git.fetchBase();
-    if (baseSha !== job.plan.source.baseSha) {
+    if (baseSha !== job.plan.baseSha) {
       throw new ControllerError(
         "runtime_source_base_drift",
-        `The remote base changed during ${phase}; abort this Job and create a fresh Release Plan v2.`,
+        `The remote base changed during ${phase}; abort this Job and create a fresh Release Plan.`,
       );
     }
   }
 
   private async fetchCurrentSourceIssues(job: JobState): Promise<{ parent: IssueSnapshot; issues: Map<number, IssueSnapshot> }> {
     const plan = job.plan;
-    const parent = await this.deps.github.fetchIssue(plan.source.parentBinding.number, { allowClosed: true });
+    const parent = await this.deps.github.fetchIssue(plan.parentIssue, { allowClosed: true });
     if (parent.state !== "OPEN") {
       throw new ControllerError(
         "plan_parent_not_open",
         `Parent Issue #${plan.parentIssue} is not OPEN.`,
       );
     }
-    if (parent.number !== plan.source.parentBinding.number
-      || parent.title !== plan.source.parentBinding.expectedTitle
-      || sha256PrefixedUtf8(parent.body) !== plan.source.parentBinding.expectedBodyHash) {
-      throw new ControllerError(
-        "plan_parent_drift",
-        `Parent Issue #${plan.parentIssue} no longer matches its exact title/body source binding.`,
-      );
-    }
-
     const issues = new Map<number, IssueSnapshot>();
     for (const planIssue of plan.issues) {
       const snapshot = await this.deps.github.fetchIssue(planIssue.number, { allowClosed: true });
@@ -291,129 +269,25 @@ export class ReleaseController {
           `Child Issue #${planIssue.number} is not OPEN.`,
         );
       }
-      if (snapshot.number !== planIssue.number
-        || snapshot.title !== planIssue.expectedTitle
-        || sha256PrefixedUtf8(snapshot.body) !== planIssue.expectedBodyHash) {
-        throw new ControllerError(
-          "plan_issue_drift",
-          `Child Issue #${planIssue.number} no longer matches its exact title/body source binding.`,
-        );
-      }
       issues.set(planIssue.number, snapshot);
     }
     return { parent, issues };
   }
 
-  private async assertOracleBindingsAtBase(plan: JobState["plan"]): Promise<void> {
-    for (const issue of plan.issues) {
-      for (const binding of issue.oracleBindings) {
-        let observed;
-        try { observed = await this.deps.git.fileAtRevision(plan.source.baseSha, binding.artifact.path); }
-        catch { throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} is unavailable at the bound source base.`); }
-        if (observed.sha256 !== binding.artifact.sha256 || observed.byteCount !== binding.artifact.byteCount) {
-          throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} does not match its bound bytes.`);
-        }
-      }
-    }
-    await this.assertOracleVerifierBindings(
-      plan,
-      (path) => this.deps.git.fileAtRevision(plan.source.baseSha, path),
-      "source base",
-    );
-  }
-
   private async assertIssueWorktreeContract(job: JobState, issue: JobState["plan"]["issues"][number]): Promise<void> {
-    await this.assertOracleBindingsInWorktree(job, job.plan.issues);
+    if (issue.expectedPaths.length === 0) return;
     const changed = await this.deps.git.changedPaths(job.worktreePath);
-    this.assertNoOracleVerifierChanges(changed, job.plan);
-    this.assertNoProtectedChanges(changed, job.plan.issues.flatMap((entry) => entry.protectedPaths));
     if (changed.some((path) => !issue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)))) {
       throw new ControllerError("issue_scope_path_drift", `Issue #${issue.number} changed a path outside its bound expectedPaths.`);
     }
   }
 
   private async assertReleaseWorktreeContract(job: JobState): Promise<void> {
-    const issues = job.plan.issues;
-    await this.assertOracleBindingsInWorktree(job, issues);
+    const expectedPaths = job.plan.issues.flatMap((issue) => issue.expectedPaths);
+    if (expectedPaths.length === 0) return;
     const changed = await this.deps.git.changedPaths(job.worktreePath);
-    this.assertNoOracleVerifierChanges(changed, job.plan);
-    this.assertNoProtectedChanges(changed, issues.flatMap((issue) => issue.protectedPaths));
-    if (changed.some((path) => owningIssues(issues, path).length !== 1)) {
-      throw new ControllerError("hardening_scope_unattributed", "Release hardening changed a path without one exact Ticket owner.");
-    }
-  }
-
-  private async assertOracleBindingsInWorktree(job: JobState, issues: ReleasePlanIssueV2[]): Promise<void> {
-    for (const issue of issues) {
-      for (const binding of issue.oracleBindings) {
-        let observed;
-        try { observed = await this.deps.git.fileInWorktree(job, binding.artifact.path); }
-        catch { throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} is unavailable in the release worktree.`); }
-        if (observed.sha256 !== binding.artifact.sha256 || observed.byteCount !== binding.artifact.byteCount) {
-          throw new ControllerError("oracle_binding_drift", `Oracle ${binding.id} changed in the release worktree.`);
-        }
-      }
-    }
-    await this.assertOracleVerifierBindings(
-      job.plan,
-      (path) => this.deps.git.fileInWorktree(job, path),
-      "release worktree",
-    );
-  }
-
-  private async assertOracleVerifierBindings(
-    plan: JobState["plan"],
-    read: (path: string) => Promise<RepositoryFileSnapshot>,
-    location: string,
-  ): Promise<void> {
-    if (plan.issues.every((issue) => issue.oracleBindings.length === 0)) return;
-    try {
-      const cache = new Map<string, RepositoryFileSnapshot>();
-      const snapshot = async (path: string) => {
-        const existing = cache.get(path);
-        if (existing) return existing;
-        const observed = await read(path);
-        cache.set(path, observed);
-        return observed;
-      };
-      const packageJson = JSON.parse(Buffer.from((await snapshot("package.json")).bytes).toString("utf8")) as unknown;
-      if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson)) throw new Error("package.json is invalid");
-      const scripts = (packageJson as Record<string, unknown>).scripts;
-      if (!scripts || typeof scripts !== "object" || Array.isArray(scripts)) throw new Error("package.json scripts are invalid");
-      for (const issue of plan.issues) {
-        for (const binding of issue.oracleBindings) {
-          const verifier = binding.verifier;
-          const definition = (scripts as Record<string, unknown>)[verifier.packageScript.name];
-          if (typeof definition !== "string"
-            || sha256PrefixedUtf8(definition) !== verifier.packageScript.definitionSha256) {
-            throw new Error(`Oracle ${binding.id} package script drifted`);
-          }
-          const { digest, ...identity } = verifier;
-          if (digest !== `sha256:${digestJson(identity)}`) throw new Error(`Oracle ${binding.id} manifest drifted`);
-          for (const file of verifier.files) {
-            const observed = await snapshot(file.path);
-            if (observed.sha256 !== file.sha256 || observed.byteCount !== file.byteCount) {
-              throw new Error(`Oracle ${binding.id} verifier file drifted`);
-            }
-          }
-        }
-      }
-    } catch {
-      throw new ControllerError("oracle_verifier_drift", `Oracle verifier bindings do not match the ${location}.`);
-    }
-  }
-
-  private assertNoOracleVerifierChanges(changed: string[], plan: JobState["plan"]): void {
-    const protectedPaths = new Set(oracleVerifierProtectedPaths(plan));
-    if (changed.some((path) => protectedPaths.has(path))) {
-      throw new ControllerError("oracle_verifier_drift", "An Oracle verifier or package.json changed in the release worktree.");
-    }
-  }
-
-  private assertNoProtectedChanges(changed: string[], protectedPaths: string[]): void {
-    const protectedSet = new Set(protectedPaths);
-    if (changed.some((path) => protectedSet.has(path))) {
-      throw new ControllerError("protected_path_changed", "A protected Oracle path changed in the release worktree.");
+    if (changed.some((path) => !expectedPaths.some((pattern) => expectedPathMatches(pattern, path)))) {
+      throw new ControllerError("repair_scope_unattributed", "Release repair changed a path outside all declared expectedPaths.");
     }
   }
 
@@ -423,80 +297,26 @@ export class ReleaseController {
     sha: string,
   ): Promise<void> {
     const stats = await this.deps.git.commitStats(job, sha);
-    const maxFiles = Math.min(issue.scopeBudget.maxFiles, this.deps.store.config.policy.maxChangedFiles);
-    const maxChangedLines = Math.min(issue.scopeBudget.maxChangedLines, this.deps.store.config.policy.maxChangedLines);
-    if (stats.entries.some(({ binary }) => binary) || stats.files > maxFiles || stats.changedLines > maxChangedLines) {
+    if (stats.entries.some(({ binary }) => binary)
+      || stats.files > this.deps.store.config.policy.maxChangedFiles
+      || stats.changedLines > this.deps.store.config.policy.maxChangedLines) {
       throw new ControllerError(
         "issue_scope_budget_exceeded",
-        `Issue #${issue.number} commit exceeds its bound scope budget.`,
+        `Issue #${issue.number} commit exceeds the configured change budget.`,
       );
     }
-    this.assertNoOracleVerifierChanges(stats.paths, job.plan);
-    const releaseProtectedPaths = new Set(job.plan.issues.flatMap((entry) => entry.protectedPaths));
-    if (stats.paths.some((path) => releaseProtectedPaths.has(path))) {
-      throw new ControllerError("protected_path_changed", `Issue #${issue.number} commit changes a protected Oracle path.`);
-    }
-    if (stats.paths.some((path) => !issue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)))) {
+    if (issue.expectedPaths.length > 0
+      && stats.paths.some((path) => !issue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)))) {
       throw new ControllerError("issue_scope_path_drift", `Issue #${issue.number} commit changed a path outside its bound expectedPaths.`);
     }
-    await this.assertOracleBindingsInWorktree(job, job.plan.issues);
   }
 
   private async assertReleaseCommitProtected(job: JobState, sha: string): Promise<void> {
     const stats = await this.deps.git.commitStats(job, sha);
-    this.assertNoOracleVerifierChanges(stats.paths, job.plan);
-    const protectedPaths = new Set(job.plan.issues.flatMap((issue) => issue.protectedPaths));
-    if (stats.paths.some((path) => protectedPaths.has(path))) {
-      throw new ControllerError("protected_path_changed", "Release hardening changed a protected Oracle path.");
-    }
-    await this.assertOracleBindingsInWorktree(job, job.plan.issues);
-    await this.assertReleaseAggregateScope(job);
-  }
-
-  private async assertReleaseAggregateScope(job: JobState): Promise<void> {
-    const stats = await this.deps.git.diffStats(job);
-    const groups = new Map<number, typeof stats.entries>();
-    for (const entry of stats.entries) {
-      const owners = owningIssues(job.plan.issues, entry.path);
-      if (owners.length !== 1) {
-        throw new ControllerError("hardening_scope_unattributed", "Release hardening has no unique Ticket scope owner.");
-      }
-      groups.set(owners[0]!.number, [...(groups.get(owners[0]!.number) ?? []), entry]);
-    }
-    for (const issue of job.plan.issues) {
-      const entries = groups.get(issue.number) ?? [];
-      const maxFiles = Math.min(issue.scopeBudget.maxFiles, this.deps.store.config.policy.maxChangedFiles);
-      const maxChangedLines = Math.min(issue.scopeBudget.maxChangedLines, this.deps.store.config.policy.maxChangedLines);
-      if (entries.some(({ binary }) => binary) || entries.length > maxFiles
-        || entries.reduce((total, entry) => total + entry.changedLines, 0) > maxChangedLines) {
-        throw new ControllerError("issue_scope_budget_exceeded", `Release hardening exceeds Issue #${issue.number} scope budget.`);
-      }
-    }
-  }
-
-  private assertObservedRiskClasses(
-    job: JobState,
-    observed: string[],
-    issueNumber: number | null,
-    detailsPath: string,
-  ): void {
-    const expected = issueNumber === null
-      ? [...new Set(job.plan.issues.flatMap((issue) => issue.riskClasses))]
-      : job.plan.issues.find((issue) => issue.number === issueNumber)?.riskClasses;
-    const unknown = unknownRiskClasses([...(expected ?? []), ...observed]);
-    if (unknown.length > 0) {
-      throw new ControllerError(
-        "unknown_risk_class",
-        `The Worker or Release Plan reported unknown risk classes: ${unknown.join(", ")}.`,
-        detailsPath,
-      );
-    }
-    if (!expected || !sameStringSet(expected, observed)) {
-      throw new ControllerError(
-        "issue_risk_class_drift",
-        "The Worker reported a risk-class set outside the bound Release Plan v2.",
-        detailsPath,
-      );
+    if (stats.entries.some(({ binary }) => binary)
+      || stats.files > this.deps.store.config.policy.maxChangedFiles
+      || stats.changedLines > this.deps.store.config.policy.maxChangedLines) {
+      throw new ControllerError("release_diff_too_large", "Release repair commit exceeds the configured change budget.");
     }
   }
 
@@ -504,59 +324,25 @@ export class ReleaseController {
     job: JobState,
     issue: JobState["plan"]["issues"][number],
   ): ValidationCommandConfig[] {
-    return bindOracleValidationCommands(
-      this.deps.store.config.validation.issue,
-      this.deps.store.config.validation.release,
-      oracleRefs([issue]),
-    );
+    const oracle = issue.oracleCommands.map((command) => (
+      this.deps.store.config.validation.release.find((entry) => entry.command === command)!
+    ));
+    return dedupeCommands([...oracle, ...this.deps.store.config.validation.issue]);
   }
 
-  private releaseValidationCommands(job: JobState): ValidationCommandConfig[] {
-    return bindOracleValidationCommands(
-      this.deps.store.config.validation.release,
-      this.deps.store.config.validation.release,
-      oracleRefs(job.plan.issues),
-    );
+  private releaseValidationCommands(_job: JobState): ValidationCommandConfig[] {
+    return this.deps.store.config.validation.release;
   }
 
-  private requirePassedIssueOracleValidation(
+  private requirePassedIssueValidation(
     job: JobState,
     issue: IssueExecution,
-    planIssue: JobState["plan"]["issues"][number],
-  ): ValidationReceipt | null {
+  ): ValidationReceipt {
     const receipt = issue.lastValidationId ? this.readValidation(job, issue.lastValidationId) : null;
     if (!receipt || receipt.scope !== "issue" || receipt.issueNumber !== issue.number || !receipt.passed) {
-      throw new ControllerError("issue_oracle_validation_missing", `Issue #${issue.number} has no passed durable Oracle validation receipt.`);
+      throw new ControllerError("issue_validation_missing", `Issue #${issue.number} has no passed durable validation receipt.`);
     }
-    this.assertOracleValidationCoverage(receipt, oracleRefs([planIssue]), "issue_oracle_validation_missing");
     return receipt;
-  }
-
-  private assertOracleValidationCoverage(
-    receipt: ValidationReceipt,
-    expected: BoundOracleRef[],
-    code: string,
-  ): void {
-    if (expected.length === 0) return;
-    assertValidationReceipt(receipt);
-    const expectedByKey = new Map(expected.map((entry) => [oracleRefKey(entry), entry.command]));
-    const observed = new Set<string>();
-    for (const result of receipt.commands) {
-      for (const oracle of result.oracles) {
-        const key = oracleRefKey(oracle);
-        if (!expectedByKey.has(key) || expectedByKey.get(key) !== result.command || observed.has(key)) {
-          throw new ControllerError(code, `Validation receipt ${receipt.id} has invalid Oracle command bindings.`);
-        }
-        observed.add(key);
-      }
-    }
-    if (observed.size !== expectedByKey.size) {
-      throw new ControllerError(code, `Validation receipt ${receipt.id} is missing an Oracle command result.`);
-    }
-    if (receipt.scope === "issue"
-      && (receipt.issueNumber === null || expected.some(({ issueNumber }) => issueNumber !== receipt.issueNumber))) {
-      throw new ControllerError(code, `Validation receipt ${receipt.id} does not bind the expected Issue.`);
-    }
   }
 
   private async runSetupValidation(job: JobState, baseSha: string): Promise<StepResult> {
@@ -635,7 +421,6 @@ export class ReleaseController {
       this.deps.store.save(job);
       throw new ControllerError("codex_worker_result_missing", `Codex Worker produced no valid structured result for Issue #${issue.number}.`, execution.record.resultPath);
     }
-    this.assertObservedRiskClasses(job, result.observedRiskClasses, planIssue.number, execution.record.resultPath);
     if (result.status === "blocked") {
       issue.status = "blocked";
       this.deps.store.save(job);
@@ -661,9 +446,9 @@ export class ReleaseController {
 
     const salvaged = await this.deps.git.salvageIssueCommitAtHead(job, issue.number);
     if (salvaged) {
-      const receipt = this.requirePassedIssueOracleValidation(job, issue, planIssue);
+      const receipt = this.requirePassedIssueValidation(job, issue);
       if (receipt && await this.deps.git.commitParent(job, salvaged) !== receipt.candidateSha) {
-        throw new ControllerError("issue_oracle_validation_missing", `Issue #${issue.number} salvaged commit is not bound to its Oracle validation candidate.`);
+        throw new ControllerError("issue_validation_missing", `Issue #${issue.number} salvaged commit is not bound to its validation candidate.`);
       }
       await this.assertIssueCommitContract(job, planIssue, salvaged);
       issue.status = "committed";
@@ -690,7 +475,6 @@ export class ReleaseController {
     appendValidation(job, validation.receipt, validation.path);
     issue.lastValidationId = validation.receipt.id;
     this.deps.store.save(job);
-    this.assertOracleValidationCoverage(validation.receipt, oracleRefs([planIssue]), "issue_oracle_validation_missing");
     if (!validation.receipt.passed) {
       if (issue.repairRounds < this.deps.store.config.policy.maxIssueRepairRounds) {
         issue.repairRounds += 1;
@@ -704,10 +488,10 @@ export class ReleaseController {
       throw new ControllerError("issue_validation_failed", `Issue #${issue.number} validation failed after the allowed repair rounds.`, validation.path);
     }
 
-    this.requirePassedIssueOracleValidation(job, issue, planIssue);
-    const commit = await this.deps.git.commitIssue(job, issue.number, issue.snapshot.title, false);
+    this.requirePassedIssueValidation(job, issue);
+    const commit = await this.deps.git.commitIssue(job, issue.number, issue.snapshot.title);
     if (await this.deps.git.commitParent(job, commit.sha) !== validation.receipt.candidateSha) {
-      throw new ControllerError("issue_oracle_validation_missing", `Issue #${issue.number} commit is not bound to its Oracle validation candidate.`);
+      throw new ControllerError("issue_validation_missing", `Issue #${issue.number} commit is not bound to its validation candidate.`);
     }
     await this.assertIssueCommitContract(job, planIssue, commit.sha);
     issue.status = "committed";
@@ -742,11 +526,6 @@ export class ReleaseController {
     job.candidateSha = head;
     this.deps.store.save(job);
     await this.assertValidationDidNotMutate(job, beforeDigest);
-    this.assertOracleValidationCoverage(
-      validation.receipt,
-      oracleRefs(job.plan.issues),
-      "release_oracle_validation_missing",
-    );
     if (!validation.receipt.passed) {
       return this.scheduleRepair(job, "release-validation", renderValidationFailure(validation.receipt), validation.path);
     }
@@ -798,7 +577,7 @@ export class ReleaseController {
     if (review.status === "blocked") {
       throw new ControllerError("release_review_blocked", review.summary, execution.record.resultPath);
     }
-    const blocking = blockingFindings(review, this.deps.store.config.review.blockingSeverities);
+    const blocking = blockingFindings(review);
     if (review.status === "changes" && blocking.length > 0) {
       return this.scheduleRepair(job, "release-review", renderReviewFailure(review), execution.record.resultPath);
     }
@@ -842,7 +621,6 @@ export class ReleaseController {
       this.deps.store.save(job);
       throw new ControllerError("codex_hardening_failed", "Release hardening Worker did not complete successfully.", execution.record.stderrPath);
     }
-    this.assertObservedRiskClasses(job, execution.workerResult.observedRiskClasses, null, execution.record.resultPath);
     if (execution.workerResult.status === "blocked") {
       this.deps.store.save(job);
       const code = execution.workerResult.blockedKind === "replan_required"
@@ -880,7 +658,7 @@ export class ReleaseController {
     if (!job.candidateSha || await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
       throw new ControllerError("delivery_candidate_drift", "Delivery requires the exact clean reviewed candidate.");
     }
-    const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    const proof = readCandidateProof(job, this.deps.store.root(job.id));
     const demoConfig = this.deps.store.config.reviewDemo;
     if (demoConfig && job.reviewDemo?.candidateSha !== job.candidateSha) {
       if (!this.deps.demo) throw new ControllerError("review_demo_runner_missing", "Review Demo is configured but no runner is available.");
@@ -912,7 +690,7 @@ export class ReleaseController {
     if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
       throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before pull request creation.");
     }
-    readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    readCandidateProof(job, this.deps.store.root(job.id));
     const report = await buildReleaseReportModel({
       job,
       config: this.deps.store.config,
@@ -1054,7 +832,7 @@ export class ReleaseController {
       return stepResult("required_check_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${checks.pending.map(({ name }) => name).join(", ")}.`);
     }
 
-    const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    const proof = readCandidateProof(job, this.deps.store.root(job.id));
     if (!(await this.deps.github.baseAllowsUpToDateAutoMerge())) {
       throw new ControllerError("base_up_to_date_policy_unverified", "Controller auto-merge requires strict server-side latest-base and required-check policy.");
     }
@@ -1083,7 +861,7 @@ export class ReleaseController {
     if (merged) return this.observeMerged(job, observed.mergedAt);
     if (observed.pullRequest.state === "CLOSED") throw new ControllerError("pull_request_closed", "The release pull request was closed without merge.");
     if (observed.pullRequest.state !== "OPEN") throw new ControllerError("pull_request_identity_mismatch", "Observed pull request state is invalid.");
-    readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    readCandidateProof(job, this.deps.store.root(job.id));
     job.status = "running";
     this.deps.store.save(job);
     return stepResult("awaiting_merge", false, false, this.deps.store.config.delivery.pollIntervalMs, "Waiting for the exact candidate PR to merge.");
@@ -1104,7 +882,7 @@ export class ReleaseController {
       || checks.failures.length > 0 || (checks.ambiguous ?? []).length > 0) {
       throw new ControllerError("merged_without_controller_authority", "The candidate merged without successful exact-head checks and Controller-owned authority.");
     }
-    const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    const proof = readCandidateProof(job, this.deps.store.root(job.id));
     if (job.deliveryAuthority.proofDigest !== digestJson(proof)) {
       throw new ControllerError("merged_without_controller_authority", "The candidate merged without a valid Controller-owned authority checkpoint.");
     }
@@ -1120,13 +898,13 @@ export class ReleaseController {
       const result = await this.deps.git.verifyMergeResult({
         mergeSha: job.pullRequest.mergeSha,
         candidateSha: job.candidateSha!,
-        baseSha: job.plan.source.baseSha,
+        baseSha: job.plan.baseSha,
         mergeMethod: this.deps.store.config.delivery.mergeMethod,
       });
       if (result === "base_mismatch") {
         throw new ControllerError(
           "runtime_source_base_drift",
-          "The merged candidate was not applied to the Release Plan v2 source base.",
+          "The merged candidate was not applied to the approved Release Plan base.",
         );
       }
       if (result === "candidate_mismatch") {
@@ -1136,31 +914,21 @@ export class ReleaseController {
       if (error instanceof ControllerError) throw error;
       throw new ControllerError("merge_commit_unverified", "The merge commit cannot be read from Git or is not an ancestor of the current remote base.");
     }
-    {
-      if (job.deliveryAuthority) {
-        job.deliveryAuthority = {
-          ...job.deliveryAuthority,
-          pullRequest: job.pullRequest,
-          status: "consumed",
-          autoMergeEnabled: false,
-          lastVerifiedAt: nowIso(),
-        };
-      }
-      job.completion = createCompletionEvidence({
-        job,
-        config: this.deps.store.config,
-        jobRoot: this.deps.store.root(job.id),
-        mergedAt,
-        mergedMainSha: job.pullRequest.mergeSha,
-      });
-      if (job.provenance.version === 3) {
-        job.publicCompletion = createPublicCompletionCheckpoint({
-          job,
-          config: this.deps.store.config,
-          jobRoot: this.deps.store.root(job.id),
-        });
-      }
+    if (job.deliveryAuthority) {
+      job.deliveryAuthority = {
+        ...job.deliveryAuthority,
+        pullRequest: job.pullRequest,
+        status: "consumed",
+        autoMergeEnabled: false,
+        lastVerifiedAt: nowIso(),
+      };
     }
+    job.result = createReleaseResult({
+      job,
+      config: this.deps.store.config,
+      jobRoot: this.deps.store.root(job.id),
+      completedAt: new Date(mergedAt).toISOString(),
+    });
     job.status = "completed";
     job.phase = "complete";
     job.blocked = null;
@@ -1378,54 +1146,6 @@ function dedupeCommands(commands: CommandConfig[]): CommandConfig[] {
   return result;
 }
 
-type BoundOracleRef = OracleExecutionRef & { command: string };
-
-function oracleRefs(issues: JobState["plan"]["issues"]): BoundOracleRef[] {
-  return issues.flatMap((issue) => issue.oracleBindings.map((binding) => ({
-      issueNumber: issue.number,
-      oracleId: binding.id,
-      command: binding.execution.command,
-    })));
-}
-
-function bindOracleValidationCommands(
-  ordinary: CommandConfig[],
-  release: CommandConfig[],
-  bindings: BoundOracleRef[],
-): ValidationCommandConfig[] {
-  const grouped = new Map<string, OracleExecutionRef[]>();
-  for (const { command, ...oracle } of bindings) {
-    grouped.set(command, [...(grouped.get(command) ?? []), oracle]);
-  }
-  const oracleCommands = [...grouped].map(([command, oracles]) => {
-    const matches = release.filter((entry) => entry.command === command);
-    if (matches.length !== 1) {
-      throw new ControllerError(
-        matches.length === 0 ? "oracle_validation_command_missing" : "oracle_validation_command_ambiguous",
-        `Oracle command ${command} must have one exact config.validation.release definition.`,
-      );
-    }
-    return { ...matches[0]!, oracles };
-  });
-  const oracleNames = new Set(grouped.keys());
-  return [
-    ...oracleCommands,
-    ...dedupeCommands(ordinary.filter(({ command }) => !oracleNames.has(command))),
-  ];
-}
-
-function oracleRefKey(value: OracleExecutionRef): string {
-  return `${value.issueNumber}:${value.oracleId}`;
-}
-
-function sameStringSet(left: string[], right: string[]): boolean {
-  return [...left].sort().join("\n") === [...right].sort().join("\n");
-}
-
-function owningIssues(issues: ReleasePlanIssueV2[], path: string): ReleasePlanIssueV2[] {
-  return issues.filter((issue) => issue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)));
-}
-
 function expectedPathMatches(pattern: string, path: string): boolean {
   if (pattern.split("/", 1)[0]?.includes("*")) return false;
   const source = pattern.split("*").map((part) => part.replace(/[|\\{}()[\]^$+?.]/gu, "\\$&")).join("[^/]*");
@@ -1476,9 +1196,8 @@ function renderReviewFailure(review: ReviewResult): string {
   ].join("\n");
 }
 
-function blockingFindings(review: ReviewResult, severities: Array<"critical" | "major">) {
-  const allowed = new Set(severities);
-  return review.findings.filter((finding) => allowed.has(finding.severity as "critical" | "major"));
+function blockingFindings(review: ReviewResult) {
+  return review.findings.filter((finding) => finding.severity === "critical" || finding.severity === "major");
 }
 
 function stepResult(action: string, progressed: boolean, terminal: boolean, retryAfterMs: number | null, message: string): StepResult {

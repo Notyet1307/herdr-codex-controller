@@ -9,5 +9,5 @@ export * from "./codex.js";
 export * from "./validator.js";
 export * from "./report.js";
 export * from "./demo.js";
-export * from "./provenance.js";
+export * from "./release-result.js";
 export { digestJson, sha256PrefixedUtf8, stableStringify } from "./util.js";

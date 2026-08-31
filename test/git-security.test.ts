@@ -12,7 +12,7 @@ import { join } from "node:path";
 test("SSH and HTTPS endpoints canonicalize to the approved GitHub repository", () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo);
     for (const endpoint of [
       "https://github.com/example/project.git",
       "git@github.com:example/project.git",
@@ -52,16 +52,16 @@ test("remote inspection rejects push redirection, URL rewrites, and local endpoi
 test("remote inspection accepts the exact configured endpoint", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo);
     git(repo.source, ["remote", "set-url", "origin", config.remoteIdentity!.fetchUrl]);
-    assert.equal((await inspectGitRemoteIdentity(config)).digest, configuredRemoteIdentity(config).digest);
+    assert.deepEqual(await inspectGitRemoteIdentity(config), configuredRemoteIdentity(config));
   } finally { repo.cleanup(); }
 });
 
 test("remote drift after Job creation is rejected on the next Git preflight", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo);
     git(repo.source, ["remote", "set-url", "origin", config.remoteIdentity!.fetchUrl]);
     const client = new GitClient(config);
     await client.preflight();
@@ -73,7 +73,7 @@ test("remote drift after Job creation is rejected on the next Git preflight", as
 test("remote mismatch is rejected before any push mutation", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo);
     const remoteBefore = git(repo.remote, ["rev-parse", "refs/heads/main"]);
     writeFileSync(join(repo.source, "unpushed.txt"), "must stay local\n", "utf8");
     git(repo.source, ["add", "unpushed.txt"]);
@@ -108,7 +108,7 @@ test("Controller commits and pushes cannot execute repository-configured hooks",
     git(repo.source, ["config", "core.hooksPath", "tracked-hooks"]);
     writeFileSync(join(repo.source, "candidate.txt"), "candidate\n", "utf8");
     const client = new TestGitClient(config);
-    await client.commitIssue(job, 1, "Hook-safe commit", false);
+    await client.commitIssue(job, 1, "Hook-safe commit");
     await client.push(job);
     assert.equal(existsSync(sentinel), false);
   } finally { repo.cleanup(); }
@@ -117,7 +117,7 @@ test("Controller commits and pushes cannot execute repository-configured hooks",
 test("remote branch quarantine is expected-head CAS and never deletes a changed head", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo);
     const client = new TestGitClient(config);
     const branch = "agent/release/quarantine";
     git(repo.source, ["checkout", "-b", branch]);

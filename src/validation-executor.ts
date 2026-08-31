@@ -138,13 +138,10 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
         stderrPath: string;
         result: Awaited<ReturnType<SandboxProvider["run"]>>;
       }> = [];
-      let oracleFailed = false;
       let aggregateOutputBytes = 0;
       for (let index = 0; index < input.commands.length; index += 1) {
         const command = input.commands[index]!;
-        const oracles = command.oracles ?? [];
         const timeoutMs = command.timeoutMs ?? 30 * 60_000;
-        if (oracleFailed && oracles.length === 0) break;
         const commandWorkspace = join(sandboxRunRoot, `workspace-${String(index + 1).padStart(2, "0")}`);
         const commandProjection = await this.git.createValidationProjection(input.job.worktreePath, commandWorkspace);
         if (projection === null) projection = commandProjection;
@@ -175,8 +172,7 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
         await this.git.verifyValidationProjection(commandWorkspace, commandProjection.manifest);
         rmSync(commandWorkspace, { recursive: true, force: true });
         if (result.exitCode !== 0 || result.signal !== null || result.timedOut || result.outputLimitExceeded) {
-          if (oracles.length === 0) break;
-          oracleFailed = true;
+          break;
         }
       }
       if (projection === null) {

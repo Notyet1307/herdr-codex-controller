@@ -16,7 +16,6 @@ import type { GitClient } from "./git.js";
 import { ControllerError } from "./errors.js";
 import {
   codexRuntimeControlArgs,
-  readExecutionRuntimeIdentity,
   REVIEWER_MODEL,
   REVIEWER_REASONING_EFFORT,
   WORKER_MODEL,
@@ -90,15 +89,6 @@ export class CodexRunner {
     if (Buffer.byteLength(input.prompt, "utf8") > MAX_PROMPT_BYTES) {
       throw new ControllerError("codex_prompt_too_large", `Codex prompt exceeds ${MAX_PROMPT_BYTES} bytes.`);
     }
-    if (input.job.provenance.version >= 2) {
-      const current = readExecutionRuntimeIdentity(this.config);
-      if (current.digest !== input.job.provenance.executionRuntime?.digest) {
-        throw new ControllerError(
-          "execution_runtime_drift",
-          "Codex executable bytes, version, profile policy, or fixed runtime controls changed after Job creation.",
-        );
-      }
-    }
     const runId = input.runId ?? newId(input.kind);
     const runDir = ensurePrivateDir(join(input.runsRoot, runId));
     const promptPath = join(runDir, "prompt.md");
@@ -121,8 +111,6 @@ export class CodexRunner {
       "--output-schema", isReview ? REVIEW_SCHEMA : WORKER_SCHEMA,
       "--output-last-message", resultPath,
     ];
-    const profile = isReview ? this.config.codex.reviewerProfile : this.config.codex.workerProfile;
-    if (profile) args.push("--profile", profile);
     args.push("--model", isReview ? REVIEWER_MODEL : WORKER_MODEL);
     args.push(
       "--config",
@@ -219,7 +207,7 @@ function readBoundedResult(path: string, maximumBytes: number): {
 }
 
 export function validateWorkerResult(value: unknown): WorkerResult {
-  const object = exactObject(value, ["blockedKind", "blockedReason", "observedRiskClasses", "residualRisks", "selfReview", "status", "summary", "testsRun"], "worker result");
+  const object = exactObject(value, ["blockedKind", "blockedReason", "residualRisks", "selfReview", "status", "summary", "testsRun"], "worker result");
   if (object.status !== "completed" && object.status !== "blocked") throw new Error("worker result status is invalid");
   if (object.blockedKind !== null && object.blockedKind !== "recoverable" && object.blockedKind !== "replan_required") {
     throw new Error("worker blockedKind is invalid");
@@ -246,7 +234,6 @@ export function validateWorkerResult(value: unknown): WorkerResult {
     },
     testsRun: tests,
     residualRisks: stringArray(object.residualRisks, "worker residualRisks", 20, 500),
-    observedRiskClasses: stringArray(object.observedRiskClasses, "worker observedRiskClasses", 16, 64),
     blockedReason: object.blockedReason === null ? null : text(object.blockedReason, "worker blockedReason", 2000),
     blockedKind: object.blockedKind,
   };
@@ -255,10 +242,6 @@ export function validateWorkerResult(value: unknown): WorkerResult {
   }
   if (result.status === "completed" && (result.blockedReason !== null || result.blockedKind !== null)) {
     throw new Error("completed worker result cannot include blockedReason or blockedKind");
-  }
-  if (new Set(result.observedRiskClasses).size !== result.observedRiskClasses.length
-    || result.observedRiskClasses.some((risk) => !/^[A-Z][A-Z0-9_]{0,63}$/.test(risk))) {
-    throw new Error("worker observedRiskClasses is invalid");
   }
   return result;
 }

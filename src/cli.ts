@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadConfig, requiredCheckContract } from "./config.js";
+import { loadConfig } from "./config.js";
 import { assertPlanCompatibleWithConfig, loadPlan } from "./plan.js";
 import { JobStore, REPLAN_REQUIRED_CODE, retryBlockedJob } from "./state.js";
 import { GitClient } from "./git.js";
@@ -14,16 +14,12 @@ import { digestJson, newId, nowIso, sha256, sleep } from "./util.js";
 import { writeBytesAtomic, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
 import type {
   ControllerConfig,
-  ControllerProvenance,
   JobState,
-  ReleasePlan,
   RetryAuthorization,
   StepResult,
 } from "./types.js";
 import { ControllerError } from "./errors.js";
-import { createControllerProvenance, readControllerIdentity } from "./provenance.js";
-import { exportReleaseCompletion } from "./completion-export.js";
-import { readControllerIdentityHistory } from "./identity-history.js";
+import { exportReleaseResult } from "./release-result.js";
 import { exportReleaseReport } from "./report.js";
 import { DemoRunner } from "./demo.js";
 
@@ -36,28 +32,26 @@ async function main(): Promise<void> {
   const configPath = requiredOption(args, "config");
   const config = loadConfig(configPath);
   const configDigest = digestJson(config);
-  const controllerIdentity = readControllerIdentity();
 
   if (args.command === "config-validate") {
-    output(args, { ok: true, configDigest, controller: controllerIdentity, config });
+    output(args, { ok: true, configDigest, config });
     return;
   }
   if (args.command === "plan-validate") {
     const planPath = requiredOption(args, "plan");
     const plan = loadPlan(planPath);
     assertPlanCompatibleWithConfig(plan, config);
-    const provenance = createControllerProvenance(controllerIdentity, config, configDigest, plan);
-    output(args, { ok: true, planDigest: digestJson(plan), provenance, plan });
+    output(args, { ok: true, planDigest: digestJson(plan), plan });
     return;
   }
 
   if (args.command === "start") {
+    assertOnlyOptions(args, ["approve-plan", "config", "json", "plan"]);
     const planPath = requiredOption(args, "plan");
     const plan = loadPlan(planPath);
     assertPlanCompatibleWithConfig(plan, config);
-    const provenance = createControllerProvenance(controllerIdentity, config, configDigest, plan);
-    assertExpectedConfigDigest(args, plan, configDigest);
-    assertExpectedControllerProvenance(args, plan, provenance);
+    const planDigest = digestJson(plan);
+    assertApprovedPlan(args, planDigest);
     if (plan.issues.length > config.policy.maxIssues) {
       throw new Error(`plan has ${plan.issues.length} issues; configured maximum is ${config.policy.maxIssues}`);
     }
@@ -80,11 +74,10 @@ async function main(): Promise<void> {
         planPath: resolve(planPath),
         plan,
         configDigest,
-        planDigest: digestJson(plan),
-        expectedControllerProvenanceDigest: provenance.digest,
+        planDigest,
       });
     });
-    output(args, summarizeJob(job, provenance));
+    output(args, summarizeJob(job));
     return;
   }
 
@@ -107,13 +100,8 @@ async function main(): Promise<void> {
       ok: true,
       checkedAt: nowIso(),
       configDigest,
-      controller: controllerIdentity,
-      executionMode: config.executionMode,
       remoteIdentity,
       validationSandbox,
-      requiredCheckContractDigest: config.version === 3 ? digestJson(requiredCheckContract(config)) : null,
-      mergeAuthorityDigest: config.version === 3 ? digestJson(config.delivery.mergeAuthority) : null,
-      identityHistoryDigest: config.version === 3 ? readControllerIdentityHistory().digest : null,
       mergePolicyVerified: true,
     });
     return;
@@ -122,14 +110,13 @@ async function main(): Promise<void> {
   const jobId = requiredOption(args, "job");
   if (args.command === "status") {
     const job = store.load(jobId);
-    const currentProvenance = store.currentProvenance(job.plan);
     output(args, args.options.operator
-      ? operatorStatus(job, currentProvenance)
-      : summarizeJob(job, currentProvenance));
+      ? operatorStatus(job)
+      : summarizeJob(job));
     return;
   }
-  if (args.command === "completion-export") {
-    const artifact = await withControllerLock(store.repositoryLockPath(), () => exportReleaseCompletion({
+  if (args.command === "result-export") {
+    const artifact = await withControllerLock(store.repositoryLockPath(), () => exportReleaseResult({
       store,
       git,
       github,
@@ -181,7 +168,7 @@ async function main(): Promise<void> {
       }
       if (args.options.json) {
         const job = store.load(jobId);
-        output(args, { job: summarizeJob(job, store.currentProvenance(job.plan)), steps: history });
+        output(args, { job: summarizeJob(job), steps: history });
       }
       return;
     }
@@ -221,7 +208,7 @@ async function main(): Promise<void> {
         notePath,
         evidencePath,
         evidenceDigest,
-        job: summarizeJob(job, store.currentProvenance(job.plan)),
+        job: summarizeJob(job),
       });
       return;
     }
@@ -232,7 +219,7 @@ async function main(): Promise<void> {
       const notePath = join(store.root(job.id), `operator-abort-${Date.now()}.md`);
       writeTextAtomic(notePath, `# Operator abort\n\nTime: ${nowIso()}\n\n${reason.trim()}\n`);
       job = await controller.abort(jobId, reason);
-      output(args, { action: "job_aborted", notePath, job: summarizeJob(job, store.currentProvenance(job.plan)) });
+      output(args, { action: "job_aborted", notePath, job: summarizeJob(job) });
       return;
     }
     if (args.command === "cleanup") {
@@ -248,7 +235,7 @@ async function main(): Promise<void> {
 }
 
 type ParsedArgs = {
-  command: "help" | "config-validate" | "plan-validate" | "completion-export" | "report-export" | "doctor" | "start" | "status" | "step" | "run" | "retry" | "abort" | "cleanup";
+  command: "help" | "config-validate" | "plan-validate" | "result-export" | "report-export" | "doctor" | "start" | "status" | "step" | "run" | "retry" | "abort" | "cleanup";
   options: Record<string, string | boolean>;
 };
 
@@ -258,7 +245,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let offset = 1;
   if (argv[0] === "config" && argv[1] === "validate") { command = "config-validate"; offset = 2; }
   else if (argv[0] === "plan" && argv[1] === "validate") { command = "plan-validate"; offset = 2; }
-  else if (argv[0] === "completion" && argv[1] === "export") { command = "completion-export"; offset = 2; }
+  else if (argv[0] === "result" && argv[1] === "export") { command = "result-export"; offset = 2; }
   else if (argv[0] === "report" && argv[1] === "export") { command = "report-export"; offset = 2; }
   else if (["doctor", "start", "status", "step", "run", "retry", "abort", "cleanup"].includes(argv[0]!)) command = argv[0] as ParsedArgs["command"];
   else throw new Error(`unknown command: ${argv[0]}`);
@@ -274,15 +261,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) throw new Error(`option --${key} requires a value`);
     if (key in options) {
-      if (key === "expected-config-digest") {
-        throw new ControllerError("expected_config_digest_invalid", "--expected-config-digest may be supplied only once.");
-      }
-      if (["expected-controller-revision", "expected-controller-provenance-digest"].includes(key)) {
-        throw new ControllerError(
-          "expected_controller_provenance_invalid",
-          `--${key} may be supplied only once.`,
-        );
-      }
+      if (key === "approve-plan") throw new ControllerError("approved_plan_digest_invalid", "--approve-plan may be supplied only once.");
       throw new Error(`duplicate option --${key}`);
     }
     options[key] = value;
@@ -291,75 +270,20 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, options };
 }
 
-function assertExpectedConfigDigest(args: ParsedArgs, plan: ReleasePlan, configDigest: string): void {
-  const expected = args.options["expected-config-digest"];
-  if (expected === undefined) {
-    throw new ControllerError(
-      "expected_config_digest_required",
-      "Release Plan v2 start requires --expected-config-digest.",
-    );
+function assertApprovedPlan(args: ParsedArgs, planDigest: string): void {
+  const approved = args.options["approve-plan"];
+  if (approved === undefined) throw new ControllerError("approved_plan_digest_required", "start requires --approve-plan.");
+  if (typeof approved !== "string" || !/^[a-f0-9]{64}$/u.test(approved)) {
+    throw new ControllerError("approved_plan_digest_invalid", "--approve-plan must be 64 lowercase hexadecimal characters.");
   }
-  if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)) {
-    throw new ControllerError(
-      "expected_config_digest_invalid",
-      "--expected-config-digest must be exactly 64 lowercase hexadecimal characters without a prefix.",
-    );
-  }
-  if (expected !== configDigest) {
-    throw new ControllerError(
-      "expected_config_digest_mismatch",
-      "--expected-config-digest does not match the current validated Controller config.",
-    );
+  if (approved !== planDigest) {
+    throw new ControllerError("approved_plan_digest_mismatch", "--approve-plan does not match the validated Release Plan.");
   }
 }
 
-function assertExpectedControllerProvenance(
-  args: ParsedArgs,
-  plan: ReleasePlan,
-  provenance: ControllerProvenance,
-): void {
-  const expectedRevision = args.options["expected-controller-revision"];
-  const expectedDigest = args.options["expected-controller-provenance-digest"];
-  if (expectedRevision === undefined) {
-    throw new ControllerError(
-      "expected_controller_revision_required",
-      "Release Plan v2 start requires --expected-controller-revision.",
-    );
-  }
-  if (expectedDigest === undefined) {
-    throw new ControllerError(
-      "expected_controller_provenance_required",
-      "Release Plan v2 start requires --expected-controller-provenance-digest.",
-    );
-  }
-  if (expectedRevision !== undefined) {
-    if (typeof expectedRevision !== "string" || !/^[a-f0-9]{40}$/.test(expectedRevision)) {
-      throw new ControllerError(
-        "expected_controller_revision_invalid",
-        "--expected-controller-revision must be exactly 40 lowercase hexadecimal characters.",
-      );
-    }
-    if (expectedRevision !== provenance.controller.sourceRevision) {
-      throw new ControllerError(
-        "expected_controller_revision_mismatch",
-        "--expected-controller-revision does not match the running Controller source revision.",
-      );
-    }
-  }
-  if (expectedDigest !== undefined) {
-    if (typeof expectedDigest !== "string" || !/^[a-f0-9]{64}$/.test(expectedDigest)) {
-      throw new ControllerError(
-        "expected_controller_provenance_invalid",
-        "--expected-controller-provenance-digest must be exactly 64 lowercase hexadecimal characters.",
-      );
-    }
-    if (expectedDigest !== provenance.digest) {
-      throw new ControllerError(
-        "expected_controller_provenance_mismatch",
-        "--expected-controller-provenance-digest does not match the current Controller, config, and Release Plan.",
-      );
-    }
-  }
+function assertOnlyOptions(args: ParsedArgs, allowed: string[]): void {
+  const unknown = Object.keys(args.options).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) throw new Error(`unknown option --${unknown[0]}`);
 }
 
 function requiredOption(args: ParsedArgs, key: string): string {
@@ -394,12 +318,13 @@ function output(args: ParsedArgs, value: unknown): void {
   else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function summarizeJob(job: JobState, currentProvenance: ControllerProvenance) {
+function summarizeJob(job: JobState) {
   return {
     id: job.id,
     status: job.status,
     phase: job.phase,
     repo: job.repo,
+    planDigest: job.planDigest,
     baseSha: job.baseSha,
     branch: job.branch,
     worktreePath: job.worktreePath,
@@ -413,16 +338,14 @@ function summarizeJob(job: JobState, currentProvenance: ControllerProvenance) {
     ciGate: job.ciGate,
     deliveryAuthority: job.deliveryAuthority,
     blocked: job.blocked,
-    provenance: job.provenance,
-    currentProvenance,
-    provenanceMatches: currentProvenance.digest === job.provenance.digest,
+    result: job.result,
     updatedAt: job.updatedAt,
   };
 }
 
-function operatorStatus(job: JobState, currentProvenance: ControllerProvenance) {
+function operatorStatus(job: JobState) {
   return {
-    ...summarizeJob(job, currentProvenance),
+    ...summarizeJob(job),
     activeRun: job.activeRun,
     lastRun: job.runs.at(-1) ?? null,
     lastValidation: job.validations.at(-1) ?? null,
@@ -434,7 +357,7 @@ function operatorStatus(job: JobState, currentProvenance: ControllerProvenance) 
 
 function nextAction(job: JobState): string {
   if (job.status === "blocked" && job.blocked?.code === REPLAN_REQUIRED_CODE) {
-    return "Run abort, return to Planner for a new Release Plan v2, then start a new Job.";
+    return "Run abort, return to Planner for a new Release Plan, then start a new Job.";
   }
   if (job.status === "blocked") return `Inspect blocked evidence and run retry --reason TEXT --evidence PATH after resolving ${job.blocked?.code ?? "the blocker"}.`;
   if (job.status === "completed" || job.status === "failed") return "No workflow action remains; cleanup is optional.";
@@ -442,7 +365,7 @@ function nextAction(job: JobState): string {
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate    --config PATH [--json]\n  plan validate      --config PATH --plan PATH [--json]\n  completion export  --config PATH --job ID --out FILE [--json]\n  report export      --config PATH --job ID --out FILE [--json]\n  doctor             --config PATH [--json]\n  start              --config PATH --plan PATH [--json]\n                     v2 requires --expected-config-digest 64HEX --expected-controller-revision 40HEX --expected-controller-provenance-digest 64HEX\n  status             --config PATH --job ID [--operator] [--json]\n  step               --config PATH --job ID [--json]\n  run                --config PATH --job ID [--max-steps N] [--json]\n  retry              --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort              --config PATH --job ID --reason TEXT [--json]\n  cleanup            --config PATH --job ID [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate    --config PATH [--json]\n  plan validate      --config PATH --plan PATH [--json]\n  result export      --config PATH --job ID --out FILE [--json]\n  report export      --config PATH --job ID --out FILE [--json]\n  doctor             --config PATH [--json]\n  start              --config PATH --plan PATH --approve-plan 64HEX [--json]\n  status             --config PATH --job ID [--operator] [--json]\n  step               --config PATH --job ID [--json]\n  run                --config PATH --job ID [--max-steps N] [--json]\n  retry              --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort              --config PATH --job ID --reason TEXT [--json]\n  cleanup            --config PATH --job ID [--json]\n`);
 }
 
 main().catch((error) => {

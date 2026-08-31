@@ -1,7 +1,5 @@
 export type SandboxMode = "read-only" | "workspace-write";
 export type ApprovalPolicy = "never";
-export type ExecutionMode = "release-plan-v2-direct";
-
 export type CommandConfig = {
   command: string;
   timeoutMs?: number;
@@ -13,7 +11,6 @@ export type RequiredCheckContractV1 = {
   version: 1;
   firstAppearanceTimeoutMs: number;
   pendingTimeoutMs: number;
-  postMergeTimeoutMs?: number;
   checks: Array<{
     name: string;
     appId: number | null;
@@ -23,15 +20,17 @@ export type RequiredCheckContractV1 = {
   }>;
 };
 
-export type MergeAuthorityContractV1 = {
-  version: 1;
-  mode: "controller-auto-merge";
-  quarantine: "delete-exact-head-branch";
+export type VerifiedGitRemote = {
+  remote: string;
+  repo: string;
+  fetchUrl: string;
+  pushUrl: string;
+  fetchTransport: "https" | "ssh";
+  pushTransport: "https" | "ssh";
 };
 
 export type ControllerConfig = {
-  version: 1 | 2 | 3 | 4;
-  executionMode: ExecutionMode;
+  version: 4;
   repo: string;
   localPath: string;
   stateDir: string;
@@ -42,13 +41,11 @@ export type ControllerConfig = {
     version: 1;
     fetchUrl: string;
     pushUrl: string;
-  } | null;
+  };
   branchPrefix: string;
   shell: string;
   codex: {
     bin: string;
-    workerProfile: string | null;
-    reviewerProfile: string | null;
     workerTimeoutMs: number;
     reviewerTimeoutMs: number;
     terminationGraceMs: number;
@@ -56,7 +53,6 @@ export type ControllerConfig = {
     maxStderrBytes: number;
     maxResultBytes: number;
     maxAggregateBytes: number;
-    networkAccess: false;
   };
   validation: {
     setup: CommandConfig[];
@@ -72,226 +68,60 @@ export type ControllerConfig = {
       bin: string;
       root: string;
       environmentPath: string[];
-    } | null;
+    };
   };
   policy: {
     maxIssueRepairRounds: number;
-    maxReleaseHardeningRounds?: number;
-    maxCiRepairRounds?: number;
-    maxReleaseValidationRepairRounds?: number;
-    maxReviewRepairRounds?: number;
-    maxCiCodeRepairRounds?: number;
-    maxCiInfrastructureReruns?: number;
-    maxProviderRetries?: number;
-    maxCodeRepairRounds?: number;
-    maxInfrastructureReruns?: number;
+    maxCodeRepairRounds: number;
+    maxInfrastructureReruns: number;
     maxIssues: number;
     maxChangedFiles: number;
     maxChangedLines: number;
   };
-  reviewDemo?: {
+  reviewDemo: {
     command: string;
     required: boolean;
     networkAccess: boolean;
     timeoutMs: number;
     maxOutputBytes: number;
   } | null;
-  review: {
-    enabled: boolean;
-    blockingSeverities: Array<"critical" | "major">;
-  };
   delivery: {
-    createPullRequest: boolean;
     draft: boolean;
-    autoMerge: boolean;
     mergeMethod: "merge" | "squash" | "rebase";
-    allowNoChecks: boolean;
-    requiredChecks: string[] | RequiredCheckContractV1;
-    mergeAuthority?: MergeAuthorityContractV1 | null;
+    requiredChecks: RequiredCheckContractV1;
     pollIntervalMs: number;
   };
 };
 
-export type ControllerIdentity = {
-  version: 1;
-  sourceRevision: string;
-  sourceManifestDigest: string;
-  buildDigest: string;
-  digest: string;
-};
-
-export type ControllerIdentityHistory = {
-  schema: "herdr-codex-controller:identity-history:v1";
-  version: 1;
-  digestAlgorithm: "utf16-code-unit-canonical-json-v1+sha256-hex";
-  entries: Array<{
-    identity: ControllerIdentity;
-    ownedSchemas: Array<{ schema: string; sha256: string }>;
-    qualificationStatus: "qualified";
-    activatedAt: string;
-    revocation: { revokedAt: string; reason: string } | null;
-  }>;
-  digest: string;
-};
-
-export type ExecutableIdentity = {
-  configuredPathDigest: string;
-  realPathDigest: string;
-  byteCount: number;
-  sha256: string;
-  versionOutput: string;
-};
-
-export type ExecutionRuntimeIdentity = {
-  version: 1;
-  binary: ExecutableIdentity;
-  fixedPolicyDigest: string;
-  profilesDisabled: boolean;
-  digest: string;
-};
-
-export type ValidationSandboxIdentity = {
-  version: 1;
-  provider: "codex-permission-profile";
-  binary: ExecutableIdentity;
-  policyDigest: string;
-  digest: string;
-};
-
-export type GitRemoteIdentity = {
-  version: 1;
-  remote: string;
-  repo: string;
-  fetchUrl: string;
-  pushUrl: string;
-  fetchTransport: "https" | "ssh";
-  pushTransport: "https" | "ssh";
-  digest: string;
-};
-
-export type ControllerProvenance = {
-  version: 1 | 2 | 3;
-  controller: ControllerIdentity;
-  executionRuntime?: ExecutionRuntimeIdentity;
-  remoteIdentity?: GitRemoteIdentity;
-  validationSandbox?: ValidationSandboxIdentity;
-  requiredCheckContractDigest?: string;
-  mergeAuthorityDigest?: string;
-  identityHistoryDigest?: string;
-  executionMode: ExecutionMode;
-  configDigest: string;
-  releasePlan: {
-    version: 1 | 2;
-    digest: string;
-  };
-  digest: string;
-};
-
-export type ReleasePlanSourceV2 = {
-  planner: "pi-ticket-planning";
-  repo: string;
-  baseRef: string;
-  baseSha: string;
-  parentBinding: {
-    number: number;
-    expectedTitle: string;
-    expectedBodyHash: string;
-  };
-  specContentHash: string;
-  deliveryGraphDigest: string;
-  decisionManifestDigest: string;
-  predecessorReceiptDigest: string | null;
-  dependencyHandoffDigests: string[];
-};
-
-export type OracleBindingV1 = {
-  schema: "pi-ticket-planning:oracle-binding:v1";
-  id: string;
-  owner: {
-    kind: "INDEPENDENT_VERIFICATION";
-    identity: string;
-  };
-  artifact: {
-    path: string;
-    format: string;
-    baseSha: string;
-    sha256: string;
-    byteCount: number;
-  };
-  execution: {
-    command: string;
-  };
-  verifier: OracleVerifierManifestV1;
-  workerMutationAllowed: false;
-};
-
-export type OracleVerifierManifestV1 = {
-  schema: "herdr-codex-controller:oracle-verifier-manifest:v1";
-  oracleId: string;
-  command: string;
-  packageScript: {
-    name: string;
-    definitionSha256: string;
-  };
-  files: Array<{
-    path: string;
-    sha256: string;
-    byteCount: number;
-  }>;
-  digest: string;
-};
-
-export type ScopeBudget = {
-  maxFiles: number;
-  maxChangedLines: number;
-};
-
-export type IntegrationOnlyContract = {
-  noNewProductBehavior: true;
-  noSchemaChanges: true;
-  noDuplicatedProductionLogic: true;
-  missingBehavior: "REPLAN_REQUIRED";
-};
-
-export type ReleasePlanIssueV2 = {
+export type ReleasePlanIssue = {
   number: number;
   order: number;
   dependsOn: number[];
   objective: string;
   acceptanceCriteria: string[];
-  suggestedValidation: [];
-  allowNoop: false;
-  expectedTitle: string;
-  expectedBodyHash: string;
-  oracleBindings: OracleBindingV1[];
-  riskClasses: string[];
-  scopeBudget: ScopeBudget;
   expectedPaths: string[];
-  protectedPaths: string[];
-  replanTriggers: string[];
-  integrationOnly: IntegrationOnlyContract | null;
-  waiverDigests: string[];
+  risk: "low" | "normal" | "high";
+  oracleCommands: string[];
 };
 
-export type ReleasePlanV2 = {
-  version: 2;
-  source: ReleasePlanSourceV2;
+export type ReleasePlan = {
+  controllerContractVersion: 1;
   id: string;
   title: string;
   objective: string;
+  repo: string;
+  baseRef: string;
+  baseSha: string;
   parentIssue: number;
-  issues: ReleasePlanIssueV2[];
+  issues: ReleasePlanIssue[];
   releaseAcceptanceCriteria: string[];
   reviewFocus: string[];
+  plannerContextDigest?: string;
 };
-
-export type ReleasePlanIssue = ReleasePlanIssueV2;
-export type ReleasePlan = ReleasePlanV2;
 
 export type IssueSnapshot = {
   number: number;
   title: string;
-  body: string;
   state: "OPEN" | "CLOSED";
   labels: string[];
   assignees: string[];
@@ -313,7 +143,6 @@ export type WorkerResult = {
     outcome: "passed" | "failed" | "not-run";
   }>;
   residualRisks: string[];
-  observedRiskClasses: string[];
   blockedReason: string | null;
   blockedKind: "recoverable" | "replan_required" | null;
 };
@@ -336,7 +165,6 @@ export type ReviewResult = {
 
 export type ValidationCommandResult = {
   command: string;
-  oracles: OracleExecutionRef[];
   timeoutMs: number;
   exitCode: number | null;
   signal: string | null;
@@ -356,20 +184,7 @@ export type ValidationCommandResult = {
   verifiedAt: string;
 };
 
-export type OracleExecutionRef = {
-  issueNumber: number;
-  oracleId: string;
-};
-
-export type ValidationCommandConfig = CommandConfig & {
-  oracles?: OracleExecutionRef[];
-};
-
-export type RepositoryFileSnapshot = {
-  sha256: string;
-  byteCount: number;
-  bytes: Uint8Array;
-};
+export type ValidationCommandConfig = CommandConfig;
 
 export type ValidationProjectionEntry =
   | { path: string; mode: "100644" | "100755"; byteCount: number; sha256: string }
@@ -388,7 +203,6 @@ export type ValidationReceipt = {
   commandSetDigest?: string;
   configuredCommands?: Array<{
     command: string;
-    oracles: OracleExecutionRef[];
     timeoutMs: number;
   }>;
   projectionFileCount?: number;
@@ -478,66 +292,18 @@ export type PullRequestState = {
   mergeSha: string | null;
 };
 
-export type JobCompletionEvidence = {
-  version: 1;
-  planDigest: string;
-  controllerProvenanceDigest: string;
-  sourceBaseSha: string;
-  candidateSha: string;
-  issueCommits: Array<{ issueNumber: number; sha: string }>;
-  releaseValidationDigest: string;
-  reviewResultDigest: string;
-  pullRequest: {
-    number: number;
-    headRef: string;
-    baseRef: string;
-    headSha: string;
-    mergeSha: string;
-    mergedAt: string;
-  };
-  mergedMainSha: string;
-  requiredChecks: string[];
-  dependencyHandoffDigests: string[];
-  completedAt: string;
-  digest: string;
-};
-
-export type ReleaseCompletionV1 = {
-  schema: "herdr-codex-controller:release-completion:v1";
+export type ReleaseResultV1 = {
+  schema: "herdr-codex-controller:release-result:v1";
   releaseId: string;
-  repo: string;
-  baseRef: string;
   planDigest: string;
-  sourceBaseSha: string;
+  status: "merged";
+  baseSha: string;
   candidateSha: string;
-  issueCommits: Array<{ issueNumber: number; sha: string }>;
-  releaseValidationDigest: string;
-  reviewResultDigest: string;
-  pullRequest: {
-    number: number;
-    headRef: string;
-    headSha: string;
-    baseRef: string;
-    mergeSha: string;
-    mergedAt: string;
-  };
-  requiredChecks: string[];
-  mergedMainSha: string;
-  dependencyHandoffDigests: string[];
-  controllerProvenance: ControllerProvenance;
+  pullRequest: { number: number; url: string };
+  requiredChecks: { names: string[]; status: "passed" };
+  mergeSha: string;
   completedAt: string;
-  digest: string;
-};
-
-export type ReleaseCompletionV2 = Omit<ReleaseCompletionV1, "schema"> & {
-  schema: "herdr-codex-controller:release-completion:v2";
-};
-
-export type ReleaseCompletionV3 = Omit<ReleaseCompletionV1, "schema"> & {
-  schema: "herdr-codex-controller:release-completion:v3";
-  digestAlgorithm: "utf16-code-unit-canonical-json-v1+sha256-hex";
-  schemaSha256: string;
-  requiredCheckContractDigest: string;
+  reviewReportDigest?: string;
 };
 
 export type CiGateState = {
@@ -595,9 +361,8 @@ export type ReviewDemoBinding = {
 };
 
 export type JobState = {
-  version: 2 | 3 | 4;
+  version: 1;
   id: string;
-  provenance: ControllerProvenance;
   configPath: string;
   configDigest: string;
   planPath: string;
@@ -607,7 +372,6 @@ export type JobState = {
   baseRef: string;
   baseSha: string | null;
   remote: string;
-  remoteIdentityDigest?: string | null;
   branch: string;
   worktreePath: string;
   status: JobStatus;
@@ -640,8 +404,7 @@ export type JobState = {
   ciGate: CiGateState | null;
   deliveryAuthority: DeliveryAuthorityState | null;
   reviewDemo: ReviewDemoBinding | null;
-  completion: JobCompletionEvidence | null;
-  publicCompletion: ReleaseCompletionV3 | null;
+  result: ReleaseResultV1 | null;
   blocked: BlockedState | null;
   retryAuthorizations: RetryAuthorization[];
   createdAt: string;

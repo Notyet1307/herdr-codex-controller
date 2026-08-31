@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
-import type { ControllerConfig, GitRemoteIdentity } from "./types.js";
+import type { ControllerConfig, VerifiedGitRemote } from "./types.js";
 import { ControllerError } from "./errors.js";
-import { digestJson } from "./util.js";
 
 type Endpoint = {
   repo: string;
@@ -33,14 +32,13 @@ function exactObject(value: unknown, keys: string[], label: string): Record<stri
   return object;
 }
 
-export function configuredRemoteIdentity(config: ControllerConfig): GitRemoteIdentity {
+export function configuredRemoteIdentity(config: ControllerConfig): VerifiedGitRemote {
   if (!config.remoteIdentity) {
     throw new ControllerError("git_remote_identity_unavailable", "Controller config has no versioned Git remote identity contract.");
   }
   const fetch = endpoint(config.remoteIdentity.fetchUrl, "config.remoteIdentity.fetchUrl");
   const push = endpoint(config.remoteIdentity.pushUrl, "config.remoteIdentity.pushUrl");
-  const identity = {
-    version: 1 as const,
+  return {
     remote: config.remote,
     repo: config.repo.toLowerCase(),
     fetchUrl: fetch.url,
@@ -48,25 +46,9 @@ export function configuredRemoteIdentity(config: ControllerConfig): GitRemoteIde
     fetchTransport: fetch.transport,
     pushTransport: push.transport,
   };
-  return { ...identity, digest: digestJson(identity) };
 }
 
-export function assertGitRemoteIdentity(value: GitRemoteIdentity): void {
-  if (!value || value.version !== 1
-    || Object.keys(value as unknown as Record<string, unknown>).sort().join(",") !== "digest,fetchTransport,fetchUrl,pushTransport,pushUrl,remote,repo,version"
-    || !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/u.test(value.repo)
-    || !value.remote
-    || !["https", "ssh"].includes(value.fetchTransport)
-    || !["https", "ssh"].includes(value.pushTransport)) {
-    throw new Error("Git remote identity is invalid");
-  }
-  const { digest, ...identity } = value;
-  if (!/^[a-f0-9]{64}$/u.test(digest) || digest !== digestJson(identity)) {
-    throw new Error("Git remote identity digest is invalid");
-  }
-}
-
-export async function inspectGitRemoteIdentity(config: ControllerConfig): Promise<GitRemoteIdentity> {
+export async function inspectGitRemoteIdentity(config: ControllerConfig): Promise<VerifiedGitRemote> {
   const expected = configuredRemoteIdentity(config);
   const rewrites = gitConfigValues(config.localPath, ["config", "--null", "--get-regexp", "^url\\..*\\.(insteadOf|pushInsteadOf)$"]);
   if (rewrites.length > 0) {
@@ -79,8 +61,7 @@ export async function inspectGitRemoteIdentity(config: ControllerConfig): Promis
   }
   const observedFetch = endpoint(fetchUrls[0]!, "Git remote fetch URL");
   const observedPush = endpoint(pushUrls[0] ?? fetchUrls[0]!, "Git remote push URL");
-  const observedBody = {
-    version: 1 as const,
+  const observed = {
     remote: config.remote,
     repo: config.repo.toLowerCase(),
     fetchUrl: observedFetch.url,
@@ -88,9 +69,10 @@ export async function inspectGitRemoteIdentity(config: ControllerConfig): Promis
     fetchTransport: observedFetch.transport,
     pushTransport: observedPush.transport,
   };
-  const observed = { ...observedBody, digest: digestJson(observedBody) };
-  if (observedFetch.repo !== expected.repo || observedPush.repo !== expected.repo || observed.digest !== expected.digest) {
-    throw new ControllerError("git_remote_identity_mismatch", "Observed Git fetch/push endpoints differ from the Job-bound repository identity.");
+  if (observedFetch.repo !== expected.repo || observedPush.repo !== expected.repo
+    || observed.fetchUrl !== expected.fetchUrl || observed.pushUrl !== expected.pushUrl
+    || observed.fetchTransport !== expected.fetchTransport || observed.pushTransport !== expected.pushTransport) {
+    throw new ControllerError("git_remote_identity_mismatch", "Observed Git fetch/push endpoints differ from the configured repository identity.");
   }
   return observed;
 }

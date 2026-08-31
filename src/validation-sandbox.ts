@@ -1,11 +1,10 @@
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import type { CommandResult, ControllerConfig, ExecutableIdentity, ValidationSandboxIdentity } from "./types.js";
+import type { CommandResult, ControllerConfig } from "./types.js";
 import { runCommand } from "./command.js";
 import { ensurePrivateDir, writeTextAtomic } from "./fs-atomic.js";
 import { digestJson, pathWithin, sha256PrefixedUtf8 } from "./util.js";
-import { readExecutableIdentity } from "./executable-identity.js";
 
 export type SandboxRunInput = {
   runRoot: string;
@@ -55,7 +54,6 @@ for (const [stream, fd] of [[process.stdout, 1], [process.stderr, 2]]) {
 export class CodexSandboxProvider implements SandboxProvider {
   readonly contained = true;
   readonly policyDigest: string;
-  readonly binaryIdentity: ExecutableIdentity;
   private readonly deniedRoots: string[];
 
   constructor(private readonly config: CodexSandboxConfig) {
@@ -65,11 +63,9 @@ export class CodexSandboxProvider implements SandboxProvider {
       throw new Error("validation sandbox environmentPath must contain absolute directories");
     }
     this.deniedRoots = sensitiveRoots(config.deniedReadPaths ?? []);
-    this.binaryIdentity = readExecutableIdentity(config.codexBin, "/", "Validation sandbox executable");
     this.policyDigest = digestJson({
       version: 1,
       provider: "codex-permission-profile",
-      binary: this.binaryIdentity,
       profile: profileTemplate(this.deniedRoots, config.networkAccess ?? false),
       nodeStdioShimSha256: sha256PrefixedUtf8(NODE_STDIO_SHIM),
       environmentPath: config.environmentPath,
@@ -120,39 +116,6 @@ export class CodexSandboxProvider implements SandboxProvider {
       stderrByteLimit: input.stderrByteLimit,
       aggregateByteLimit: input.aggregateByteLimit,
     });
-  }
-}
-
-export function readValidationSandboxIdentity(config: ControllerConfig): ValidationSandboxIdentity {
-  const sandbox = config.validation.sandbox;
-  if (!sandbox) throw new Error("validation sandbox identity requires config version 2");
-  const provider = new CodexSandboxProvider({
-    codexBin: sandbox.bin,
-    shell: config.shell,
-    environmentPath: sandbox.environmentPath,
-    deniedReadPaths: [config.localPath, config.stateDir, config.worktreeRoot],
-    terminationGraceMs: config.codex.terminationGraceMs,
-  });
-  const identity = {
-    version: 1 as const,
-    provider: "codex-permission-profile" as const,
-    binary: provider.binaryIdentity,
-    policyDigest: provider.policyDigest,
-  };
-  return { ...identity, digest: digestJson(identity) };
-}
-
-export function assertValidationSandboxIdentity(value: ValidationSandboxIdentity): void {
-  if (!value || value.version !== 1 || value.provider !== "codex-permission-profile"
-    || Object.keys(value as unknown as Record<string, unknown>).sort().join(",") !== "binary,digest,policyDigest,provider,version"
-    || !value.binary || !/^sha256:[a-f0-9]{64}$/u.test(value.binary.sha256)
-    || Object.keys(value.binary as unknown as Record<string, unknown>).sort().join(",") !== "byteCount,configuredPathDigest,realPathDigest,sha256,versionOutput"
-    || !/^[a-f0-9]{64}$/u.test(value.policyDigest)) {
-    throw new Error("validation sandbox identity is invalid");
-  }
-  const { digest, ...identity } = value;
-  if (!/^[a-f0-9]{64}$/u.test(digest) || digest !== digestJson(identity)) {
-    throw new Error("validation sandbox identity digest is invalid");
   }
 }
 

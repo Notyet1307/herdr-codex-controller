@@ -2,8 +2,6 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
   ControllerConfig,
-  ControllerIdentity,
-  ControllerProvenance,
   JobState,
   ReleasePlan,
   RetryAuthorization,
@@ -12,48 +10,25 @@ import { copyJsonSnapshot, ensurePrivateDir, readJsonFile, writeJsonAtomic } fro
 import { digestJson, nowIso, pathWithin, safeToken, sha256 } from "./util.js";
 import { assertPlanCompatibleWithConfig } from "./plan.js";
 import { ControllerError } from "./errors.js";
-import {
-  assertControllerProvenance,
-  createControllerProvenance,
-  readControllerIdentity,
-} from "./provenance.js";
 import { assertReviewDemoResult } from "./demo.js";
 import type { ReviewDemoResult } from "./types.js";
+import { assertReleaseResult } from "./release-result.js";
 
 export const REPLAN_REQUIRED_CODE = "replan_required";
 
 const REPLAN_CAUSES = new Set([
-  "codex_hardening_blocked",
   "codex_hardening_replan_required",
-  "codex_worker_blocked",
   "codex_worker_replan_required",
   "issue_dependency_incomplete",
-  "issue_oracle_validation_missing",
-  "issue_risk_class_drift",
-  "issue_scope_budget_exceeded",
   "issue_scope_path_drift",
-  "invalid_expected_path_pattern",
-  "hardening_scope_unattributed",
-  "oracle_binding_drift",
-  "oracle_verifier_drift",
+  "repair_scope_unattributed",
   "plan_base_drift",
-  "plan_drift",
-  "plan_issue_drift",
-  "plan_issue_missing",
   "plan_issue_not_open",
-  "plan_parent_drift",
   "plan_parent_not_open",
-  "unknown_risk_class",
-  "plan_version_mismatch",
-  "protected_path_changed",
   "release_diff_too_large",
-  "release_hardening_exhausted",
   "release_repair_exhausted",
-  "release_oracle_validation_missing",
   "release_review_blocked",
   "release_too_many_issues",
-  "runtime_child_binding_drift",
-  "runtime_parent_binding_drift",
   "runtime_source_base_drift",
 ]);
 
@@ -62,18 +37,8 @@ export class JobStore {
 
   constructor(
     readonly config: ControllerConfig,
-    private readonly identityProvider: () => ControllerIdentity = readControllerIdentity,
   ) {
     this.jobsRoot = ensurePrivateDir(join(config.stateDir, "jobs"));
-  }
-
-  currentProvenance(plan: ReleasePlan): ControllerProvenance {
-    return createControllerProvenance(
-      this.identityProvider(),
-      this.config,
-      digestJson(this.config),
-      plan,
-    );
   }
 
   create(input: {
@@ -82,19 +47,10 @@ export class JobStore {
     plan: ReleasePlan;
     configDigest: string;
     planDigest: string;
-    expectedControllerProvenanceDigest?: string;
   }): JobState {
     assertPlanCompatibleWithConfig(input.plan, this.config);
     if (input.configDigest !== digestJson(this.config)) throw new Error("job configDigest is not the current validated config digest");
     if (input.planDigest !== digestJson(input.plan)) throw new Error("job planDigest is not the current validated plan digest");
-    const provenance = this.currentProvenance(input.plan);
-    if (input.expectedControllerProvenanceDigest !== undefined
-      && provenance.digest !== input.expectedControllerProvenanceDigest) {
-      throw new ControllerError(
-        "controller_provenance_drift",
-        "Controller provenance changed between the start gate and Job creation.",
-      );
-    }
     const id = safeToken(input.plan.id);
     const root = this.root(id);
     if (existsSync(root)) throw new Error(`job already exists: ${id}`);
@@ -105,9 +61,8 @@ export class JobStore {
     const worktreePath = resolve(this.config.worktreeRoot, id);
     const now = nowIso();
     const job: JobState = {
-      version: 4,
+      version: 1,
       id,
-      provenance,
       configPath: resolve(input.configPath),
       configDigest: input.configDigest,
       planPath: resolve(input.planPath),
@@ -117,7 +72,6 @@ export class JobStore {
       baseRef: this.config.baseRef,
       baseSha: null,
       remote: this.config.remote,
-      remoteIdentityDigest: provenance.remoteIdentity?.digest ?? null,
       branch,
       worktreePath,
       status: "running",
@@ -147,8 +101,7 @@ export class JobStore {
       ciGate: null,
       deliveryAuthority: null,
       reviewDemo: null,
-      completion: null,
-      publicCompletion: null,
+      result: null,
       blocked: null,
       retryAuthorizations: [],
       createdAt: now,
@@ -160,25 +113,6 @@ export class JobStore {
 
   load(id: string): JobState {
     const job = readJsonFile<JobState>(this.path(id));
-    if (job.blocked && REPLAN_CAUSES.has(job.blocked.code)) {
-      job.blocked = {
-        ...job.blocked,
-        code: REPLAN_REQUIRED_CODE,
-        message: `${job.blocked.code}: ${job.blocked.message}`,
-      };
-    }
-    if (job.retryAuthorizations === undefined) job.retryAuthorizations = [];
-    if (job.completion === undefined) job.completion = null;
-    const legacy = job as JobState & Record<string, any>;
-    job.codeRepairRounds ??= Number(legacy.releaseValidationRepairRounds ?? 0)
-      + Number(legacy.reviewRepairRounds ?? 0)
-      + Number(legacy.ciCodeRepairRounds ?? legacy.ciRepairRounds ?? 0);
-    job.infrastructureReruns ??= Number(legacy.ciInfrastructureReruns ?? 0);
-    job.repairReasonPath ??= legacy.hardeningReasonPath ?? null;
-    job.ciGate ??= null;
-    job.deliveryAuthority ??= null;
-    job.reviewDemo ??= null;
-    job.publicCompletion ??= null;
     assertJob(job);
     assertRetryEvidence(job, this.root(job.id));
     assertReviewDemoEvidence(job, this.root(job.id));
@@ -273,7 +207,7 @@ export function blockJob(job: JobState, code: string, message: string, detailsPa
 export function retryBlockedJob(job: JobState, authorization?: RetryAuthorization, jobRoot?: string): JobState {
   if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
   if (job.blocked.code === REPLAN_REQUIRED_CODE) {
-    throw new ControllerError(REPLAN_REQUIRED_CODE, "This Job requires abort, a new Release Plan v2, and a new Job.");
+    throw new ControllerError(REPLAN_REQUIRED_CODE, "This Job requires abort, a new Release Plan, and a new Job.");
   }
   if (!authorization) {
     throw new ControllerError("retry_evidence_required", "Retry requires new recovery evidence.");
@@ -298,45 +232,29 @@ export function retryBlockedJob(job: JobState, authorization?: RetryAuthorizatio
 }
 
 export function assertJob(job: JobState): void {
-  if (!job || (job.version !== 2 && job.version !== 3 && job.version !== 4) || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
+  if (!job || job.version !== 1 || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
     throw new Error("job state is invalid or its plan digest drifted");
   }
-  assertControllerProvenance(job.provenance);
-  if ((job.version === 2 && job.provenance.version !== 1)
-    || (job.version === 3 && job.provenance.version !== 2)
-    || (job.version === 4 && job.provenance.version !== 3)) {
-    throw new Error("job state and Controller provenance versions differ");
+  for (const value of [job.codeRepairRounds, job.infrastructureReruns]) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error("job repair counters are invalid");
   }
-  if (job.version >= 3 && job.remoteIdentityDigest !== job.provenance.remoteIdentity?.digest) {
-    throw new Error("job Git remote identity does not match Controller provenance");
+  if (job.ciGate && (job.ciGate.version !== 1 || job.ciGate.candidateSha !== job.candidateSha
+    || !/^[a-f0-9]{64}$/u.test(job.ciGate.checkContractDigest)
+    || !isCanonicalIsoTime(job.ciGate.firstObservedAt)
+    || !isCanonicalIsoTime(job.ciGate.firstAppearanceDeadlineAt)
+    || (job.ciGate.pendingDeadlineAt !== null && !isCanonicalIsoTime(job.ciGate.pendingDeadlineAt))
+    || !Number.isSafeInteger(job.ciGate.attempts) || job.ciGate.attempts < 0)) {
+    throw new Error("job CI gate state is invalid");
   }
-  if (job.version === 4) {
-    for (const value of [job.codeRepairRounds, job.infrastructureReruns]) {
-      if (!Number.isSafeInteger(value) || value < 0) throw new Error("job repair counters are invalid");
-    }
-    if (job.ciGate && (job.ciGate.version !== 1 || job.ciGate.candidateSha !== job.candidateSha
-      || job.ciGate.checkContractDigest !== job.provenance.requiredCheckContractDigest
-      || !isCanonicalIsoTime(job.ciGate.firstObservedAt)
-      || !isCanonicalIsoTime(job.ciGate.firstAppearanceDeadlineAt)
-      || (job.ciGate.pendingDeadlineAt !== null && !isCanonicalIsoTime(job.ciGate.pendingDeadlineAt))
-      || !Number.isSafeInteger(job.ciGate.attempts) || job.ciGate.attempts < 0)) {
-      throw new Error("job CI gate state is invalid");
-    }
-    if (job.deliveryAuthority && (job.deliveryAuthority.version !== 1
-      || job.deliveryAuthority.candidateSha !== job.deliveryAuthority.pullRequest.headSha
-      || (job.deliveryAuthority.status !== "revoked" && job.deliveryAuthority.candidateSha !== job.candidateSha)
-      || !/^[a-f0-9]{64}$/u.test(job.deliveryAuthority.proofDigest)
-      || !isCanonicalIsoTime(job.deliveryAuthority.lastVerifiedAt))) {
-      throw new Error("job delivery authority state is invalid");
-    }
+  if (job.deliveryAuthority && (job.deliveryAuthority.version !== 1
+    || job.deliveryAuthority.candidateSha !== job.deliveryAuthority.pullRequest.headSha
+    || (job.deliveryAuthority.status !== "revoked" && job.deliveryAuthority.candidateSha !== job.candidateSha)
+    || !/^[a-f0-9]{64}$/u.test(job.deliveryAuthority.proofDigest)
+    || !isCanonicalIsoTime(job.deliveryAuthority.lastVerifiedAt))) {
+    throw new Error("job delivery authority state is invalid");
   }
-  if (job.provenance.configDigest !== job.configDigest
-    || job.provenance.releasePlan.version !== job.plan.version
-    || job.provenance.releasePlan.digest !== job.planDigest) {
-    throw new Error("job Controller provenance does not bind its config and Release Plan");
-  }
-  if (job.baseSha !== null && job.baseSha !== job.plan.source.baseSha) {
-    throw new Error("job base SHA differs from its Release Plan v2 source binding");
+  if (job.baseSha !== null && job.baseSha !== job.plan.baseSha) {
+    throw new Error("job base SHA differs from its Release Plan binding");
   }
   const issueNumbers = job.issues.map((issue) => issue.number);
   if (new Set(issueNumbers).size !== issueNumbers.length) throw new Error("job contains duplicate issues");
@@ -348,32 +266,15 @@ export function assertJob(job: JobState): void {
   if (!Array.isArray(job.retryAuthorizations)) throw new Error("job retry authorizations are invalid");
   for (const authorization of job.retryAuthorizations) assertRetryAuthorization(authorization);
   if (job.status === "completed" && job.phase !== "complete") throw new Error("completed job must be in complete phase");
-  if (job.provenance.version === 3 && job.status === "completed" && (!job.completion || !job.publicCompletion)) {
-    throw new Error("completed production job must have private and public completion checkpoints");
-  }
-  if (job.publicCompletion !== null) {
-    const { digest, ...body } = job.publicCompletion;
-    if (job.provenance.version !== 3 || job.status !== "completed"
-      || digest !== `sha256:${digestJson(body)}`
-      || job.publicCompletion.controllerProvenance.digest !== job.provenance.digest
-      || job.publicCompletion.candidateSha !== job.candidateSha
-      || job.publicCompletion.pullRequest.mergeSha !== job.pullRequest?.mergeSha) {
-      throw new Error("job public completion checkpoint is invalid");
+  if (job.status === "completed") {
+    if (!job.result) throw new Error("completed Job must have a Release Result");
+    assertReleaseResult(job.result);
+    if (job.result.releaseId !== job.id || job.result.planDigest !== job.planDigest
+      || job.result.candidateSha !== job.candidateSha || job.result.mergeSha !== job.pullRequest?.mergeSha) {
+      throw new Error("job Release Result differs from its delivery state");
     }
-  }
-  if (job.completion !== null) {
-    const { digest, ...identity } = job.completion;
-    if (job.status !== "completed"
-      || digest !== digestJson(identity)
-      || job.completion.planDigest !== job.planDigest
-      || job.completion.controllerProvenanceDigest !== job.provenance.digest
-      || job.completion.candidateSha !== job.candidateSha
-      || job.completion.pullRequest.number !== job.pullRequest?.number
-      || job.completion.pullRequest.mergeSha !== job.pullRequest?.mergeSha
-      || job.completion.mergedMainSha !== job.completion.pullRequest.mergeSha
-      || !isCanonicalIsoTime(job.completion.completedAt)) {
-      throw new Error("job completion evidence is invalid");
-    }
+  } else if (job.result !== null) {
+    throw new Error("non-completed Job cannot have a Release Result");
   }
   if (job.activeRun && job.status !== "running") throw new Error("only running jobs may have an active run");
   if (job.reviewDemo && (job.reviewDemo.candidateSha.length !== 40
