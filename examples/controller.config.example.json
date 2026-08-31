@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "executionMode": "release-plan-v2-direct",
   "repo": "OWNER/REPOSITORY",
   "localPath": "/ABSOLUTE/PATH/TO/LOCAL/CHECKOUT",
@@ -54,8 +54,11 @@
   },
   "policy": {
     "maxIssueRepairRounds": 1,
-    "maxReleaseHardeningRounds": 1,
-    "maxCiRepairRounds": 1,
+    "maxReleaseValidationRepairRounds": 1,
+    "maxReviewRepairRounds": 1,
+    "maxCiCodeRepairRounds": 1,
+    "maxCiInfrastructureReruns": 1,
+    "maxProviderRetries": 0,
     "maxIssues": 8,
     "maxChangedFiles": 50,
     "maxChangedLines": 4000
@@ -67,10 +70,29 @@
   "delivery": {
     "createPullRequest": true,
     "draft": false,
-    "autoMerge": false,
+    "autoMerge": true,
     "mergeMethod": "squash",
     "allowNoChecks": false,
-    "requiredChecks": ["verify"],
+    "requiredChecks": {
+      "version": 1,
+      "firstAppearanceTimeoutMs": 300000,
+      "pendingTimeoutMs": 3600000,
+      "postMergeTimeoutMs": 900000,
+      "checks": [
+        {
+          "name": "verify",
+          "appId": 15368,
+          "workflowName": "CI",
+          "acceptedConclusions": ["SUCCESS", "NEUTRAL", "SKIPPED"],
+          "required": true
+        }
+      ]
+    },
+    "mergeAuthority": {
+      "version": 1,
+      "mode": "controller-auto-merge",
+      "quarantine": "delete-exact-head-branch"
+    },
     "pollIntervalMs": 15000
   }
 }

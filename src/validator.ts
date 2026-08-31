@@ -68,7 +68,7 @@ export class Validator {
     sourceHeadSha: string;
     sourceWorktreeDigest: string;
   }): Promise<{ receipt: ValidationReceipt; path: string }> {
-    if (input.job.provenance.version === 2
+    if (input.job.provenance.version >= 2
       && input.job.provenance.validationSandbox?.policyDigest !== this.executor.policyDigest) {
       throw new ControllerError(
         "validation_sandbox_drift",

@@ -9,6 +9,7 @@ import { ReleaseController } from "../src/controller.js";
 import { digestJson, sha256 } from "../src/util.js";
 import { ControllerError } from "../src/errors.js";
 import type { RetryAuthorization } from "../src/types.js";
+import { summarizeChecks } from "../src/github.js";
 import {
   FakeCodex,
   FakeGitHub,
@@ -146,6 +147,39 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     assert.equal(final.reviewRound, 2);
     assert.equal(codex.calls.filter((call) => call.kind === "release-harden").length, 1);
     assert.equal(git(final.worktreePath, ["rev-list", "--count", "HEAD"]), "3");
+  } finally { repo.cleanup(); }
+});
+
+test("semantically inconsistent aggregate review is rejected before push or PR creation", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      executionMode: "release-plan-v2-direct",
+      validation: { setup: [], issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }], release: [{ command: "test -f issue-1.txt" }], maxOutputBytes: 64 * 1024 },
+    } as any);
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    class NoPushGit extends TestGitClient {
+      pushes = 0;
+      override async push(job: any) { this.pushes += 1; return super.push(job); }
+    }
+    class NoPrGitHub extends FakeGitHub {
+      creates = 0;
+      override async createPullRequest(): Promise<any> { this.creates += 1; throw new Error("must not create PR"); }
+    }
+    const gitClient = new NoPushGit(config);
+    const github = new NoPrGitHub();
+    const minor = { severity: "minor" as const, path: null, line: null, summary: "audit", rationale: "minor only", recommendation: "later", relatedIssues: [] };
+    const codex = new FakeCodex(gitClient, async ({ kind }) => kind === "review"
+      ? { review: { status: "changes", summary: "inconsistent", findings: [minor] } }
+      : {});
+    const controller = new ReleaseController({ store, git: gitClient, github, codex, validator: new Validator(config) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    const final = await runToTerminal(controller, store, created.id);
+    assert.equal(final.status, "blocked");
+    assert.equal(gitClient.pushes, 0);
+    assert.equal(github.creates, 0);
   } finally { repo.cleanup(); }
 });
 
@@ -824,6 +858,7 @@ test("production v2 completes only after exact candidate, required checks, and m
       pr: any = null;
       merged = false;
       mergeSha: string | null = null;
+      autoMergeEnabled = false;
       override async createPullRequest(job: any) {
         this.pr = {
           number: 7,
@@ -838,19 +873,26 @@ test("production v2 completes only after exact candidate, required checks, and m
       }
       override async inspectPullRequest(_number: number) {
         const pullRequest = { ...this.pr, state: this.merged ? "MERGED" : "OPEN", mergeSha: this.mergeSha };
-        return { pullRequest, checks: { state: "success" as const, missing: [], failures: [], pending: [] }, mergedAt: this.merged ? new Date().toISOString() : null };
+        return {
+          pullRequest,
+          checks: summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }], config.delivery.requiredChecks),
+          mergedAt: this.merged ? new Date().toISOString() : null,
+          autoMergeEnabled: this.autoMergeEnabled,
+        };
       }
+      override async enableAutoMerge() { this.autoMergeEnabled = true; }
     }
     const github = new DeliveryGitHub();
     const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let observed = store.load(job.id);
-    for (let index = 0; index < 100 && observed.status !== "ready_to_merge"; index += 1) {
+    for (let index = 0; index < 100 && observed.phase !== "awaiting_merge"; index += 1) {
       await controller.step(job.id);
       observed = store.load(job.id);
       if (observed.status === "blocked") throw new Error(observed.blocked?.message);
     }
-    assert.equal(observed.status, "ready_to_merge");
+    assert.equal(observed.status, "running");
+    assert.equal(observed.deliveryAuthority?.status, "authorized");
     assert.equal(observed.pullRequest?.number, 7);
     assert.equal(observed.pullRequest?.headSha, observed.candidateSha);
     git(repo.source, ["merge", "--no-ff", observed.candidateSha!, "-m", "merge exact candidate"]);
@@ -858,7 +900,7 @@ test("production v2 completes only after exact candidate, required checks, and m
     github.mergeSha = git(repo.source, ["rev-parse", "HEAD"]);
     github.merged = true;
     const result = await controller.step(job.id);
-    assert.equal(result.action, "release_merged");
+    assert.equal(result.action, "release_merged", JSON.stringify(store.load(job.id).blocked));
     const completed = store.load(job.id);
     assert.equal(completed.status, "completed");
     assert.equal(completed.completion?.candidateSha, completed.candidateSha);
@@ -871,6 +913,7 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
+      executionMode: "release-plan-v2-direct",
       validation: {
         setup: [],
         issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }],
@@ -881,13 +924,13 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
         createPullRequest: true,
         draft: false,
         autoMerge: true,
-        mergeMethod: "squash",
+        mergeMethod: "merge",
         allowNoChecks: false,
-        requiredChecks: [],
+        requiredChecks: ["verify"],
         pollIntervalMs: 1_000,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -918,6 +961,7 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
           pullRequest,
           checks: { state: "success" as const, missing: [], failures: [], pending: [] },
           mergedAt: this.merged ? new Date().toISOString() : null,
+          autoMergeEnabled: this.enabled !== null,
         };
       }
       override async enableAutoMerge(number: number, candidateSha: string) {
@@ -946,7 +990,7 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
     github.mergeSha = git(repo.source, ["rev-parse", "HEAD"]);
     github.merged = true;
     const result = await controller.step(created.id);
-    assert.equal(result.action, "release_merged");
+    assert.equal(result.action, "release_merged", JSON.stringify(store.load(created.id).blocked));
     assert.equal(store.load(created.id).status, "completed");
   } finally { repo.cleanup(); }
 });
@@ -1045,7 +1089,7 @@ test("Git merge-result verification covers merge, squash, and rebase delivery me
   }
 });
 
-test("MERGED v2 cannot bypass the bound base or OPEN Child source gate", async () => {
+test("MERGED v2 without Controller authority is rejected before completion", async () => {
   for (const scenario of ["base-drift", "child-closed"] as const) {
     const repo = createTestRepo();
     try {
@@ -1110,11 +1154,7 @@ test("MERGED v2 cannot bypass the bound base or OPEN Child source gate", async (
       const result = await controller.step(job.id);
       const blocked = store.load(job.id);
       assert.equal(result.action, "blocked", scenario);
-      assert.equal(blocked.blocked?.code, "replan_required", scenario);
-      assert.match(
-        blocked.blocked?.message ?? "",
-        scenario === "base-drift" ? /runtime_source_base_drift/ : /runtime_child_binding_drift/,
-      );
+      assert.equal(blocked.blocked?.code, "merged_without_controller_authority", scenario);
       assert.notEqual(blocked.status, "completed");
     } finally { repo.cleanup(); }
   }
@@ -1259,6 +1299,329 @@ test("delivery rejects an existing PR that targets the wrong base branch", async
     assert.equal(final.status, "blocked");
     assert.equal(final.blocked?.code, "pull_request_identity_mismatch");
   } finally { repo.cleanup(); }
+});
+
+test("abort revokes auto-merge and quarantines the exact remote branch", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const candidateSha = git(repo.source, ["rev-parse", "HEAD"]);
+    let prState: "OPEN" | "CLOSED" = "OPEN";
+    let autoMergeEnabled = true;
+    let disabled = 0;
+    let closed = 0;
+    class LifecycleGitHub extends FakeGitHub {
+      override async inspectPullRequest() {
+        return {
+          pullRequest: { number: 44, url: "https://github.com/example/project/pull/44", state: prState, headRef: "agent/release/release-fixture-v2", baseRef: "main", headSha: candidateSha, mergeSha: null },
+          checks: { state: "success" as const, missing: [], failures: [], pending: [] },
+          mergedAt: null,
+          autoMergeEnabled,
+        };
+      }
+      override async disableAutoMerge(_number: number, sha: string) {
+        assert.equal(sha, candidateSha);
+        disabled += 1;
+        autoMergeEnabled = false;
+      }
+      override async closePullRequest(pullRequest: any) {
+        assert.equal(pullRequest.headSha, candidateSha);
+        closed += 1;
+        prState = "CLOSED";
+      }
+    }
+    const controller = new ReleaseController({ store, git: gitClient, github: new LifecycleGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.baseSha = plan.source.baseSha;
+    job.candidateSha = candidateSha;
+    job.phase = "awaiting_merge";
+    job.pullRequest = { number: 44, url: "https://github.com/example/project/pull/44", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
+    job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "a".repeat(64), status: "authorized", autoMergeEnabled: true, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
+    store.save(job);
+    job = await controller.abort(job.id, "operator requested stop");
+    assert.equal(job.status, "failed");
+    assert.equal(job.pullRequest?.state, "OPEN");
+    assert.equal(job.deliveryAuthority?.status, "revoked");
+    assert.equal(job.deliveryAuthority?.quarantined, true);
+    assert.equal(disabled, 1);
+    assert.equal(closed, 0);
+  } finally { repo.cleanup(); }
+});
+
+test("source drift after auto-merge authorization revokes and quarantines before terminal block", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      executionMode: "release-plan-v2-direct",
+      validation: { setup: [], issue: [{ command: "test -f issue-$HERDR_ISSUE_NUMBER.txt" }], release: [{ command: "test -f issue-1.txt" }], maxOutputBytes: 64 * 1024 },
+    } as any);
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    let pr: any = null;
+    let autoMergeEnabled = false;
+    let closed = false;
+    let drift = false;
+    let disabled = 0;
+    class DriftGitHub extends FakeGitHub {
+      override async fetchIssue(number: number) {
+        const snapshot = await super.fetchIssue(number);
+        if (!drift || number !== 1) return snapshot;
+        const { digest: _digest, ...body } = snapshot;
+        const changed = { ...body, title: `${body.title} drifted` };
+        return { ...changed, digest: digestJson(changed) };
+      }
+      override async createPullRequest(job: any) {
+        pr = { number: 48, url: "https://github.com/example/project/pull/48", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: job.candidateSha, mergeSha: null };
+        return pr;
+      }
+      override async inspectPullRequest() {
+        return {
+          pullRequest: { ...pr, state: closed ? "CLOSED" as const : "OPEN" as const },
+          checks: summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }], config.delivery.requiredChecks),
+          mergedAt: null,
+          autoMergeEnabled,
+        };
+      }
+      override async enableAutoMerge() { autoMergeEnabled = true; }
+      override async disableAutoMerge() { autoMergeEnabled = false; disabled += 1; }
+      override async closePullRequest() { closed = true; }
+    }
+    const github = new DriftGitHub();
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    let job = store.load(created.id);
+    for (let index = 0; index < 100 && job.phase !== "awaiting_merge"; index += 1) {
+      await controller.step(job.id);
+      job = store.load(job.id);
+      if (job.status === "blocked") throw new Error(job.blocked?.message);
+    }
+    assert.equal(job.deliveryAuthority?.status, "authorized");
+    drift = true;
+    const result = await controller.step(job.id);
+    job = store.load(job.id);
+    assert.equal(result.action, "blocked");
+    assert.equal(job.blocked?.code, "replan_required");
+    assert.match(job.blocked?.message ?? "", /runtime_child_binding_drift/u);
+    assert.equal(job.deliveryAuthority?.status, "revoked");
+    assert.equal(job.pullRequest?.state, "OPEN");
+    assert.equal(disabled, 1);
+  } finally { repo.cleanup(); }
+});
+
+test("revocation refuses a wrong PR identity without closing it", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const candidateSha = git(repo.source, ["rev-parse", "HEAD"]);
+    let closed = false;
+    class WrongIdentityGitHub extends FakeGitHub {
+      override async inspectPullRequest() {
+        return {
+          pullRequest: { number: 45, url: "https://github.com/example/project/pull/45", state: "OPEN" as const, headRef: "agent/release/release-fixture-v2", baseRef: "main", headSha: "f".repeat(40), mergeSha: null },
+          checks: { state: "success" as const, missing: [], failures: [], pending: [] },
+          mergedAt: null,
+          autoMergeEnabled: true,
+        };
+      }
+      override async closePullRequest() { closed = true; }
+    }
+    const controller = new ReleaseController({ store, git: gitClient, github: new WrongIdentityGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.baseSha = plan.source.baseSha;
+    job.candidateSha = candidateSha;
+    job.phase = "awaiting_merge";
+    job.pullRequest = { number: 45, url: "https://github.com/example/project/pull/45", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
+    job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "b".repeat(64), status: "authorized", autoMergeEnabled: true, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
+    store.save(job);
+    await assert.rejects(() => controller.abort(job.id, "stop"), (error: any) => error?.code === "delivery_authority_revocation_failed");
+    assert.equal(closed, false);
+    assert.equal(store.load(job.id).deliveryAuthority?.status, "revocation_failed");
+  } finally { repo.cleanup(); }
+});
+
+test("revocation resumes after interruption between disable and quarantine", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    class InterruptedQuarantineGit extends TestGitClient {
+      quarantineAttempts = 0;
+      override async quarantineRemoteBranch(job: any, sha: string) {
+        this.quarantineAttempts += 1;
+        if (this.quarantineAttempts === 1) throw new Error("transport interrupted");
+        return super.quarantineRemoteBranch(job, sha);
+      }
+    }
+    const gitClient = new InterruptedQuarantineGit(config);
+    const candidateSha = git(repo.source, ["rev-parse", "HEAD"]);
+    let autoMergeEnabled = true;
+    class InterruptedLifecycleGitHub extends FakeGitHub {
+      override async inspectPullRequest() {
+        return {
+          pullRequest: { number: 49, url: "https://github.com/example/project/pull/49", state: "OPEN" as const, headRef: "agent/release/release-fixture-v2", baseRef: "main", headSha: candidateSha, mergeSha: null },
+          checks: { state: "success" as const, missing: [], failures: [], pending: [] },
+          mergedAt: null,
+          autoMergeEnabled,
+        };
+      }
+      override async disableAutoMerge() { autoMergeEnabled = false; }
+    }
+    const github = new InterruptedLifecycleGitHub();
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.baseSha = plan.source.baseSha;
+    job.candidateSha = candidateSha;
+    job.phase = "awaiting_merge";
+    job.pullRequest = { number: 49, url: "https://github.com/example/project/pull/49", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
+    job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "e".repeat(64), status: "authorized", autoMergeEnabled: true, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
+    store.save(job);
+    await assert.rejects(() => controller.abort(job.id, "first abort"), (error: any) => error?.code === "delivery_authority_revocation_failed");
+    assert.equal(store.load(job.id).deliveryAuthority?.status, "revocation_failed");
+    job = await new ReleaseController({ store: new JobStore(config), git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) }).abort(job.id, "resume abort");
+    assert.equal(job.status, "failed");
+    assert.equal(job.deliveryAuthority?.status, "revoked");
+    assert.equal(job.pullRequest?.state, "OPEN");
+    assert.equal(job.deliveryAuthority?.quarantined, true);
+    assert.equal(gitClient.quarantineAttempts, 2);
+  } finally { repo.cleanup(); }
+});
+
+test("missing and pending required checks reach durable deadlines without resetting on restart", async () => {
+  for (const scenario of ["missing", "pending"] as const) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const contract = config.delivery.requiredChecks as Exclude<typeof config.delivery.requiredChecks, string[]>;
+      const plan = testPlanV2(repo, [1]);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const gitClient = new TestGitClient(config);
+      const candidateSha = git(repo.source, ["rev-parse", "HEAD"]);
+      let prState: "OPEN" | "CLOSED" = "OPEN";
+      class DeadlineGitHub extends FakeGitHub {
+        override async inspectPullRequest() {
+          const checks = scenario === "missing"
+            ? summarizeChecks([], contract)
+            : summarizeChecks([{ name: "verify", status: "IN_PROGRESS", conclusion: null, app: { id: 15368 } }], contract);
+          return {
+            pullRequest: { number: 46, url: "https://github.com/example/project/pull/46", state: prState, headRef: "agent/release/release-fixture-v2", baseRef: "main", headSha: candidateSha, mergeSha: null },
+            checks,
+            mergedAt: null,
+            autoMergeEnabled: false,
+          };
+        }
+        override async closePullRequest() { prState = "CLOSED"; }
+      }
+      const controller = new ReleaseController({ store, git: gitClient, github: new DeadlineGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+      let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      job.baseSha = plan.source.baseSha;
+      job.candidateSha = candidateSha;
+      job.phase = "ci";
+      job.pullRequest = { number: 46, url: "https://github.com/example/project/pull/46", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
+      job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "c".repeat(64), status: "pending", autoMergeEnabled: false, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
+      job.ciGate = {
+        version: 1,
+        candidateSha,
+        checkContractDigest: job.provenance.requiredCheckContractDigest!,
+        firstObservedAt: "2026-08-30T00:00:00.000Z",
+        firstAppearanceDeadlineAt: scenario === "missing" ? "2026-08-30T00:00:01.000Z" : "2099-01-01T00:00:00.000Z",
+        pendingDeadlineAt: scenario === "pending" ? "2026-08-30T00:00:01.000Z" : null,
+        postMergeDeadlineAt: null,
+        attempts: 1,
+        lastObservation: null,
+      };
+      store.save(job);
+      const first = await controller.step(job.id);
+      job = store.load(job.id);
+      assert.equal(first.action, "blocked");
+      assert.equal(job.blocked?.code, scenario === "missing" ? "required_check_missing_deadline" : "required_check_pending_deadline");
+      assert.equal(job.deliveryAuthority?.status, "revoked");
+      assert.equal(job.pullRequest?.state, "OPEN");
+      const deadline = scenario === "missing" ? job.ciGate?.firstAppearanceDeadlineAt : job.ciGate?.pendingDeadlineAt;
+      await controller.step(job.id);
+      assert.equal(scenario === "missing" ? store.load(job.id).ciGate?.firstAppearanceDeadlineAt : store.load(job.id).ciGate?.pendingDeadlineAt, deadline);
+    } finally { repo.cleanup(); }
+  }
+});
+
+test("CI code and infrastructure failures consume separate budgets and only code gets bounded evidence", async () => {
+  for (const scenario of ["code", "infrastructure"] as const) {
+    const repo = createTestRepo();
+    try {
+      const config = testConfig(repo, {
+        executionMode: "release-plan-v2-direct",
+        policy: { ...testConfig(repo).policy, maxCiRepairRounds: 1 },
+      } as any);
+      const contract = config.delivery.requiredChecks as Exclude<typeof config.delivery.requiredChecks, string[]>;
+      const plan = testPlanV2(repo, [1]);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const gitClient = new TestGitClient(config);
+      const candidateSha = git(repo.source, ["rev-parse", "HEAD"]);
+      let prState: "OPEN" | "CLOSED" = "OPEN";
+      let evidenceReads = 0;
+      let reruns = 0;
+      class ClassifiedGitHub extends FakeGitHub {
+        override async inspectPullRequest() {
+          const conclusion = scenario === "code" ? "FAILURE" : "CANCELLED";
+          return {
+            pullRequest: { number: 47, url: "https://github.com/example/project/pull/47", state: prState, headRef: "agent/release/release-fixture-v2", baseRef: "main", headSha: candidateSha, mergeSha: null },
+            checks: summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion, app: { id: 15368 }, detailsUrl: "https://github.com/example/project/actions/runs/123/job/456" }], contract),
+            mergedAt: null,
+            autoMergeEnabled: false,
+          };
+        }
+        override async closePullRequest() { prState = "CLOSED"; }
+        override async fetchCheckFailureEvidence(check: any, sha: string) {
+          evidenceReads += 1;
+          const body = { version: 1 as const, candidateSha: sha, check, log: "bounded failure", logBytes: 15, logSha256: `sha256:${"1".repeat(64)}`, observedAt: new Date().toISOString() };
+          return { ...body, digest: `sha256:${digestJson(body)}` };
+        }
+        override async rerunCheck(_check: any, sha: string) { assert.equal(sha, candidateSha); reruns += 1; }
+      }
+      const controller = new ReleaseController({ store, git: gitClient, github: new ClassifiedGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+      let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      job.baseSha = plan.source.baseSha;
+      job.candidateSha = candidateSha;
+      job.phase = "ci";
+      job.pullRequest = { number: 47, url: "https://github.com/example/project/pull/47", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
+      job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "d".repeat(64), status: "pending", autoMergeEnabled: false, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
+      store.save(job);
+      const result = await controller.step(job.id);
+      job = store.load(job.id);
+      if (scenario === "code") {
+        assert.equal(result.action, "release_hardening_scheduled");
+        assert.equal(job.phase, "harden");
+        assert.equal(job.ciCodeRepairRounds, 1);
+        assert.equal(job.ciInfrastructureReruns, 0);
+        assert.equal(job.reviewRepairRounds, 0);
+        assert.equal(evidenceReads, 1);
+        assert.equal(reruns, 0);
+        assert.equal(job.deliveryAuthority?.status, "revoked");
+      } else {
+        assert.equal(result.action, "ci_infrastructure_rerun");
+        assert.equal(job.phase, "ci");
+        assert.equal(job.ciInfrastructureReruns, 1);
+        assert.equal(job.ciCodeRepairRounds, 0);
+        assert.equal(job.hardeningRounds, 0);
+        assert.equal(evidenceReads, 0);
+        assert.equal(reruns, 1);
+        assert.equal(job.pullRequest?.state, "OPEN");
+      }
+    } finally { repo.cleanup(); }
+  }
 });
 
 test("a Controller hardening commit is salvaged after a crash before job state update", async () => {

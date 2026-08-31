@@ -18,15 +18,15 @@ export function loadConfig(path: string): ControllerConfig {
   return validateConfig(value, absolute);
 }
 
-export function validateConfig(value: unknown, sourcePath = "config.json"): ControllerConfig {
+export function validateConfig(value: unknown, sourcePath = "config.json", options: { allowHistoricalDirectV2?: boolean } = {}): ControllerConfig {
   const root = expectObject(value, "config");
-  if (root.version !== 1 && root.version !== 2) throw new Error("config.version must be 1 or 2");
+  if (root.version !== 1 && root.version !== 2 && root.version !== 3) throw new Error("config.version must be 1, 2, or 3");
   const version = root.version;
   const keys = [
     "baseRef", "branchPrefix", "codex", "delivery", "executionMode", "localPath", "policy", "remote", "repo",
     "review", "shell", "stateDir", "validation", "version", "worktreeRoot",
   ];
-  if (version === 2) keys.push("remoteIdentity");
+  if (version >= 2) keys.push("remoteIdentity");
   expectExactKeys(root, keys, "config", ["executionMode"]);
   const repo = boundedText(root.repo, "config.repo", 300);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("config.repo must be OWNER/REPO");
@@ -44,24 +44,24 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
   }
   const baseRef = safeGitName(root.baseRef, "config.baseRef");
   const remote = safeGitName(root.remote, "config.remote");
-  const remoteIdentity = version === 2 ? parseRemoteIdentityContract(root.remoteIdentity, repo) : null;
+  const remoteIdentity = version >= 2 ? parseRemoteIdentityContract(root.remoteIdentity, repo) : null;
   const branchPrefix = boundedText(root.branchPrefix, "config.branchPrefix", 120);
   if (!/^[A-Za-z0-9._/-]+$/.test(branchPrefix) || branchPrefix.startsWith("/") || branchPrefix.endsWith("/")) {
     throw new Error("config.branchPrefix is not a safe branch prefix");
   }
   const shell = boundedText(root.shell, "config.shell", 4096);
   const executionMode = validateExecutionMode(root.executionMode);
+  if (version === 3 && executionMode !== "release-plan-v2-direct") {
+    throw new Error("config version 3 is reserved for release-plan-v2-direct production");
+  }
   const codex = validateCodex(root.codex, version);
   const validation = validateValidation(root.validation, version);
   if (validation.sandbox && [localPath, stateDir, worktreeRoot].some((entry) => pathsOverlap(entry, validation.sandbox!.root))) {
     throw new Error("validation sandbox root must not overlap localPath, stateDir, or worktreeRoot");
   }
-  const policy = validatePolicy(root.policy);
+  const policy = validatePolicy(root.policy, version);
   const review = validateReview(root.review);
-  const delivery = validateDelivery(root.delivery, executionMode);
-  if (!review.enabled && policy.maxReleaseHardeningRounds > 0) {
-    // Hardening can still repair release validation/CI; this is intentionally allowed.
-  }
+  const delivery = validateDelivery(root.delivery, executionMode, version);
   const config: ControllerConfig = {
     version,
     executionMode,
@@ -80,18 +80,20 @@ export function validateConfig(value: unknown, sourcePath = "config.json"): Cont
     review,
     delivery,
   };
-  assertProductionDeliveryPolicy(config);
+  if (!(options.allowHistoricalDirectV2 && version === 2 && executionMode === "release-plan-v2-direct")) {
+    assertProductionDeliveryPolicy(config);
+  }
   return config;
 }
 
 export function assertProductionDeliveryPolicy(
-  config: Pick<ControllerConfig, "version" | "executionMode" | "codex" | "delivery" | "remoteIdentity" | "shell" | "validation">,
+  config: Pick<ControllerConfig, "version" | "executionMode" | "codex" | "delivery" | "remoteIdentity" | "review" | "shell" | "validation">,
 ): void {
   if (config.executionMode !== "release-plan-v2-direct") return;
-  if (config.version !== 2 || config.validation.sandbox === null || config.remoteIdentity === null) {
+  if (config.version !== 3 || config.validation.sandbox === null || config.remoteIdentity === null) {
     throw new ControllerError(
       "production_config_migration_required",
-      "release-plan-v2-direct requires config version 2 with an explicit validation sandbox contract.",
+      "release-plan-v2-direct requires config version 3 with explicit sandbox, check, and merge-authority contracts.",
     );
   }
   if (config.codex.workerProfile !== null
@@ -103,16 +105,39 @@ export function assertProductionDeliveryPolicy(
       "release-plan-v2-direct requires absolute Codex/shell binaries and disallows custom Codex profiles.",
     );
   }
-  if (!config.delivery.createPullRequest
-    || config.delivery.allowNoChecks
-    || !Array.isArray(config.delivery.requiredChecks)
-    || config.delivery.requiredChecks.length === 0
-    || new Set(config.delivery.requiredChecks).size !== config.delivery.requiredChecks.length) {
+  const checks = requiredCheckContract(config);
+  if (!config.review.enabled
+    || config.review.blockingSeverities.length !== 2
+    || new Set(config.review.blockingSeverities).size !== 2
+    || !config.review.blockingSeverities.includes("critical")
+    || !config.review.blockingSeverities.includes("major")) {
     throw new ControllerError(
-      "production_delivery_policy_invalid",
-      "release-plan-v2-direct requires createPullRequest=true, allowNoChecks=false, and non-empty unique requiredChecks.",
+      "production_review_policy_invalid",
+      "release-plan-v2-direct requires aggregate review and exact critical/major blocking semantics.",
     );
   }
+  if (!config.delivery.createPullRequest
+    || !config.delivery.autoMerge
+    || config.delivery.allowNoChecks
+    || checks === null
+    || checks.checks.filter((check) => check.required).length === 0
+    || checks.checks.some((check) => check.required && check.appId === null && check.workflowName === null)
+    || config.delivery.mergeAuthority?.mode !== "controller-auto-merge"
+    || config.delivery.mergeAuthority.quarantine !== "delete-exact-head-branch") {
+    throw new ControllerError(
+      "production_delivery_policy_invalid",
+      "release-plan-v2-direct requires Controller auto-merge, exact required-check contracts, and close-on-revocation authority.",
+    );
+  }
+}
+
+export function requiredCheckContract(config: Pick<ControllerConfig, "delivery">) {
+  return Array.isArray(config.delivery.requiredChecks) ? null : config.delivery.requiredChecks;
+}
+
+export function requiredCheckNames(config: Pick<ControllerConfig, "delivery">): string[] {
+  const contract = requiredCheckContract(config);
+  return contract ? contract.checks.filter((check) => check.required).map((check) => check.name) : [...config.delivery.requiredChecks as string[]];
 }
 
 function validateExecutionMode(value: unknown): ExecutionMode {
@@ -125,25 +150,25 @@ function validateExecutionMode(value: unknown): ExecutionMode {
   return value;
 }
 
-function validateCodex(value: unknown, version: 1 | 2): ControllerConfig["codex"] {
+function validateCodex(value: unknown, version: 1 | 2 | 3): ControllerConfig["codex"] {
   const object = expectObject(value, "config.codex");
   const keys = [
     "bin", "networkAccess", "reviewerProfile", "reviewerTimeoutMs", "terminationGraceMs",
     "workerProfile", "workerTimeoutMs",
   ];
-  if (version === 2) keys.push("maxAggregateBytes", "maxEventBytes", "maxResultBytes", "maxStderrBytes");
+  if (version >= 2) keys.push("maxAggregateBytes", "maxEventBytes", "maxResultBytes", "maxStderrBytes");
   expectExactKeys(object, keys, "config.codex");
   if (object.networkAccess !== false) throw new Error("config.codex.networkAccess must be false in v1");
-  const maxEventBytes = version === 2
+  const maxEventBytes = version >= 2
     ? parsePositiveInteger(object.maxEventBytes, "config.codex.maxEventBytes", 4_096, 16 * 1024 * 1024)
     : 8 * 1024 * 1024;
-  const maxStderrBytes = version === 2
+  const maxStderrBytes = version >= 2
     ? parsePositiveInteger(object.maxStderrBytes, "config.codex.maxStderrBytes", 4_096, 16 * 1024 * 1024)
     : 8 * 1024 * 1024;
-  const maxResultBytes = version === 2
+  const maxResultBytes = version >= 2
     ? parsePositiveInteger(object.maxResultBytes, "config.codex.maxResultBytes", 4_096, 4 * 1024 * 1024)
     : 1024 * 1024;
-  const maxAggregateBytes = version === 2
+  const maxAggregateBytes = version >= 2
     ? parsePositiveInteger(object.maxAggregateBytes, "config.codex.maxAggregateBytes", 4_096, 32 * 1024 * 1024)
     : 16 * 1024 * 1024;
   if (maxAggregateBytes < Math.max(maxEventBytes, maxStderrBytes, maxResultBytes)) {
@@ -164,14 +189,14 @@ function validateCodex(value: unknown, version: 1 | 2): ControllerConfig["codex"
   };
 }
 
-function validateValidation(value: unknown, version: 1 | 2): ControllerConfig["validation"] {
+function validateValidation(value: unknown, version: 1 | 2 | 3): ControllerConfig["validation"] {
   const object = expectObject(value, "config.validation");
   const version2Keys = [
     "issue", "maxAggregateBytes", "maxOutputBytes", "maxStderrBytes", "maxStdoutBytes", "release", "sandbox", "setup",
   ];
   expectExactKeys(
     object,
-    version === 2 ? version2Keys : ["issue", "maxOutputBytes", "release", "setup"],
+    version >= 2 ? version2Keys : ["issue", "maxOutputBytes", "release", "setup"],
     "config.validation",
   );
   const maxOutputBytes = parsePositiveInteger(object.maxOutputBytes, "config.validation.maxOutputBytes", 4_096, 8 * 1024 * 1024);
@@ -236,16 +261,25 @@ function validateSandbox(value: unknown): NonNullable<ControllerConfig["validati
   return { version: 1, provider: "codex-permission-profile", bin, root, environmentPath };
 }
 
-function validatePolicy(value: unknown): ControllerConfig["policy"] {
+function validatePolicy(value: unknown, version: 1 | 2 | 3): ControllerConfig["policy"] {
   const object = expectObject(value, "config.policy");
-  expectExactKeys(object, [
-    "maxChangedFiles", "maxChangedLines", "maxCiRepairRounds", "maxIssueRepairRounds",
-    "maxIssues", "maxReleaseHardeningRounds",
-  ], "config.policy");
+  const common = ["maxChangedFiles", "maxChangedLines", "maxIssueRepairRounds", "maxIssues"];
+  const versioned = version === 3
+    ? ["maxCiCodeRepairRounds", "maxCiInfrastructureReruns", "maxProviderRetries", "maxReleaseValidationRepairRounds", "maxReviewRepairRounds"]
+    : ["maxCiRepairRounds", "maxReleaseHardeningRounds"];
+  expectExactKeys(object, [...common, ...versioned], "config.policy");
   return {
     maxIssueRepairRounds: parsePositiveInteger(object.maxIssueRepairRounds, "config.policy.maxIssueRepairRounds", 0, 2),
-    maxReleaseHardeningRounds: parsePositiveInteger(object.maxReleaseHardeningRounds, "config.policy.maxReleaseHardeningRounds", 0, 2),
-    maxCiRepairRounds: parsePositiveInteger(object.maxCiRepairRounds, "config.policy.maxCiRepairRounds", 0, 1),
+    ...(version === 3 ? {
+      maxReleaseValidationRepairRounds: parsePositiveInteger(object.maxReleaseValidationRepairRounds, "config.policy.maxReleaseValidationRepairRounds", 0, 2),
+      maxReviewRepairRounds: parsePositiveInteger(object.maxReviewRepairRounds, "config.policy.maxReviewRepairRounds", 0, 2),
+      maxCiCodeRepairRounds: parsePositiveInteger(object.maxCiCodeRepairRounds, "config.policy.maxCiCodeRepairRounds", 0, 2),
+      maxCiInfrastructureReruns: parsePositiveInteger(object.maxCiInfrastructureReruns, "config.policy.maxCiInfrastructureReruns", 0, 3),
+      maxProviderRetries: parsePositiveInteger(object.maxProviderRetries, "config.policy.maxProviderRetries", 0, 3),
+    } : {
+      maxReleaseHardeningRounds: parsePositiveInteger(object.maxReleaseHardeningRounds, "config.policy.maxReleaseHardeningRounds", 0, 2),
+      maxCiRepairRounds: parsePositiveInteger(object.maxCiRepairRounds, "config.policy.maxCiRepairRounds", 0, 1),
+    }),
     maxIssues: parsePositiveInteger(object.maxIssues, "config.policy.maxIssues", 1, 50),
     maxChangedFiles: parsePositiveInteger(object.maxChangedFiles, "config.policy.maxChangedFiles", 1, 1000),
     maxChangedLines: parsePositiveInteger(object.maxChangedLines, "config.policy.maxChangedLines", 1, 100_000),
@@ -263,30 +297,34 @@ function validateReview(value: unknown): ControllerConfig["review"] {
     if (entry !== "critical" && entry !== "major") throw new Error("blocking severity must be critical or major");
     return entry;
   });
-  return { enabled: object.enabled, blockingSeverities: [...new Set(severities)] };
+  if (new Set(severities).size !== severities.length) throw new Error("config.review.blockingSeverities contains duplicates");
+  return { enabled: object.enabled, blockingSeverities: severities };
 }
 
-function validateDelivery(value: unknown, executionMode: ExecutionMode): ControllerConfig["delivery"] {
+function validateDelivery(value: unknown, executionMode: ExecutionMode, version: 1 | 2 | 3): ControllerConfig["delivery"] {
   const object = expectObject(value, "config.delivery");
-  expectExactKeys(object, [
+  const keys = [
     "allowNoChecks", "autoMerge", "createPullRequest", "draft", "mergeMethod", "pollIntervalMs", "requiredChecks",
-  ], "config.delivery");
+  ];
+  if (version === 3) keys.push("mergeAuthority");
+  expectExactKeys(object, keys, "config.delivery");
   for (const key of ["allowNoChecks", "autoMerge", "createPullRequest", "draft"] as const) {
     if (typeof object[key] !== "boolean") throw new Error(`config.delivery.${key} must be boolean`);
   }
-  if (!object.createPullRequest && object.autoMerge) throw new Error("autoMerge requires createPullRequest");
+  if (!object.createPullRequest && object.autoMerge && executionMode !== "release-plan-v2-direct") throw new Error("autoMerge requires createPullRequest");
   if (object.mergeMethod !== "merge" && object.mergeMethod !== "squash" && object.mergeMethod !== "rebase") {
     throw new Error("config.delivery.mergeMethod must be merge, squash, or rebase");
   }
-  let requiredChecks: string[];
+  let requiredChecks: ControllerConfig["delivery"]["requiredChecks"];
+  let mergeAuthority: Exclude<ControllerConfig["delivery"]["mergeAuthority"], undefined> = null;
   try {
-    requiredChecks = boundedStringArray(object.requiredChecks, "config.delivery.requiredChecks", 100, 500);
+    requiredChecks = version === 3
+      ? validateRequiredCheckContract(object.requiredChecks)
+      : boundedStringArray(object.requiredChecks, "config.delivery.requiredChecks", 100, 500);
+    mergeAuthority = version === 3 ? validateMergeAuthority(object.mergeAuthority) : null;
   } catch (error) {
     if (executionMode === "release-plan-v2-direct") {
-      throw new ControllerError(
-        "production_delivery_policy_invalid",
-        `release-plan-v2-direct requires valid unique requiredChecks: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      throw new ControllerError("production_delivery_policy_invalid", error instanceof Error ? error.message : String(error));
     }
     throw error;
   }
@@ -297,8 +335,55 @@ function validateDelivery(value: unknown, executionMode: ExecutionMode): Control
     mergeMethod: object.mergeMethod,
     allowNoChecks: object.allowNoChecks as boolean,
     requiredChecks,
+    ...(version === 3 ? { mergeAuthority } : {}),
     pollIntervalMs: parsePositiveInteger(object.pollIntervalMs, "config.delivery.pollIntervalMs", 1_000, 10 * 60_000),
   };
+}
+
+function validateRequiredCheckContract(value: unknown): ControllerConfig["delivery"]["requiredChecks"] {
+  const object = expectObject(value, "config.delivery.requiredChecks");
+  expectExactKeys(object, ["checks", "firstAppearanceTimeoutMs", "pendingTimeoutMs", "postMergeTimeoutMs", "version"], "config.delivery.requiredChecks");
+  if (object.version !== 1 || !Array.isArray(object.checks) || object.checks.length === 0 || object.checks.length > 100) {
+    throw new Error("config.delivery.requiredChecks must be a non-empty version 1 contract");
+  }
+  const checks = object.checks.map((value, index) => {
+    const check = expectObject(value, `config.delivery.requiredChecks.checks[${index}]`);
+    expectExactKeys(check, ["acceptedConclusions", "appId", "name", "required", "workflowName"], `config.delivery.requiredChecks.checks[${index}]`);
+    const name = boundedText(check.name, `config.delivery.requiredChecks.checks[${index}].name`, 500);
+    if (check.appId !== null && (!Number.isSafeInteger(check.appId) || Number(check.appId) < 1)) throw new Error("required check appId is invalid");
+    if (check.workflowName !== null && typeof check.workflowName !== "string") throw new Error("required check workflowName is invalid");
+    if (typeof check.required !== "boolean") throw new Error("required check required flag is invalid");
+    if (!Array.isArray(check.acceptedConclusions) || check.acceptedConclusions.length === 0) throw new Error("required check acceptedConclusions is invalid");
+    const acceptedConclusions = check.acceptedConclusions.map((conclusion) => {
+      if (conclusion !== "SUCCESS" && conclusion !== "NEUTRAL" && conclusion !== "SKIPPED") throw new Error("required check accepted conclusion is invalid");
+      return conclusion;
+    });
+    if (new Set(acceptedConclusions).size !== acceptedConclusions.length) throw new Error("required check acceptedConclusions contains duplicates");
+    return {
+      name,
+      appId: check.appId === null ? null : Number(check.appId),
+      workflowName: check.workflowName === null ? null : boundedText(check.workflowName, "required check workflowName", 500),
+      acceptedConclusions,
+      required: check.required,
+    };
+  });
+  if (new Set(checks.map(({ name }) => name)).size !== checks.length) throw new Error("required check contract contains duplicate names");
+  return {
+    version: 1,
+    checks,
+    firstAppearanceTimeoutMs: parsePositiveInteger(object.firstAppearanceTimeoutMs, "config.delivery.requiredChecks.firstAppearanceTimeoutMs", 1_000, 7 * 24 * 60 * 60_000),
+    pendingTimeoutMs: parsePositiveInteger(object.pendingTimeoutMs, "config.delivery.requiredChecks.pendingTimeoutMs", 1_000, 7 * 24 * 60 * 60_000),
+    postMergeTimeoutMs: parsePositiveInteger(object.postMergeTimeoutMs, "config.delivery.requiredChecks.postMergeTimeoutMs", 1_000, 7 * 24 * 60 * 60_000),
+  };
+}
+
+function validateMergeAuthority(value: unknown): Exclude<ControllerConfig["delivery"]["mergeAuthority"], null | undefined> {
+  const object = expectObject(value, "config.delivery.mergeAuthority");
+  expectExactKeys(object, ["mode", "quarantine", "version"], "config.delivery.mergeAuthority");
+  if (object.version !== 1 || object.mode !== "controller-auto-merge" || object.quarantine !== "delete-exact-head-branch") {
+    throw new Error("config.delivery.mergeAuthority is invalid");
+  }
+  return { version: 1, mode: "controller-auto-merge", quarantine: "delete-exact-head-branch" };
 }
 
 export function validateCommands(value: unknown, label: string, maximum: number): CommandConfig[] {

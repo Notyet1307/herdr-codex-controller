@@ -12,15 +12,23 @@
 
 ## Operator migration
 
-1. Start from `examples/controller.config.example.json`; do not add new authority to a v1 file in place.
+1. Start from the config v3 `examples/controller.config.example.json`; v1/v2 direct configs are not silently upgraded.
 2. Set absolute `codex.bin` and `validation.sandbox.bin` paths to reviewed executables.
 3. Put `validation.sandbox.root` outside checkout, state, worktree, HOME, and system temp roots (for example a private directory under `/var/tmp`).
-4. Declare exact `remoteIdentity.fetchUrl` and `pushUrl`; run `doctor` and confirm the returned identity and sandbox policy digest.
+4. Declare exact remote identity, app-bound required check conclusions/deadlines, and expected-head remote-branch quarantine; `doctor` must confirm strict server policy and all contract digests.
 5. Each validation command gets a fresh projection. Combine isolated dependency installation and its check in one command, such as `npm ci --ignore-scripts --no-audit --no-fund && npm test`.
-6. Re-run `plan validate`; obtain fresh approval for the new config/provenance digest. Never rewrite an active old Job into Job State v3.
+6. Re-run `plan validate`; obtain fresh approval for config v3 / provenance v3. Never rewrite an active old Job into Job State v4.
 
-Old config v1 remains readable only in explicit `release-plan-v1-compatibility` or `dispatcher-experimental` mode. Attempting direct production use returns `production_config_migration_required`.
+Old config v1/v2 remains readable only in explicit compatibility/experimental modes or the private historical completion verifier. Attempting a new direct production handoff returns `production_config_migration_required`.
 
-## Not claimed by PR A
+## Controller PR B: lifecycle and historical trust
 
-Canonical review/CI semantics, durable CI deadlines and budgets, remote merge-authority revocation/quarantine, and historical Controller completion trust are delivered by dependent Controller PR B. PR A does not qualify Dispatcher or Legacy Herdr and does not add automatic rebasing or Oracle v2/package mutation.
+- Canonical review accepts PASS only with zero critical/major findings; `changes` requires at least one such finding. Direct production requires review enabled and exact critical/major blocking semantics.
+- Required Check Contract v1 binds check/source/workflow identity, accepted conclusions, required versus observational status, and first/pending/post-merge deadlines. Repair, infrastructure, and provider counters are separate.
+- Job State v4 durably records CI observations and delivery authority. Production uses only exact-head Controller auto-merge; block/replan/abort/drift disables it and deletes only the exact Controller branch with force-with-lease/readback.
+- Verified merge checkpoints public completion v3 bytes. The append-only Controller identity history permits exact unrevoked v2 historical publication without allowing an inactive identity to authorize new handoffs.
+- Controller upgrades are two-phase: before activating C, build exact clean outgoing B and run `npm run history:append -- --controller-root /clean/B --activated-at ISO --write` in C. This appends B without the impossible self-reference of making B contain its own source-manifest digest.
+
+## Not claimed
+
+These PRs do not qualify Dispatcher or Legacy Herdr and do not add automatic rebasing, Oracle v2, or package/verifier mutation.

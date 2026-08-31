@@ -19,7 +19,7 @@ test("runtime contract lock reads back exact schemas and Planner risk registry b
     assert.equal(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, true, artifact.path);
     assert.equal(sha256(readFileSync(path)), artifact.sha256, artifact.path);
   }
-  assert.equal(lock.plannerRiskRegistry.byteSha256, lock.artifacts[0].sha256);
+  assert.equal(lock.plannerRiskRegistry.byteSha256, lock.artifacts.find(({ path }: { path: string }) => path === "contracts/risk-class-registry.json").sha256);
   const registryBytes = readFileSync(resolve("contracts", "risk-class-registry.json"));
   const driftedLock = structuredClone(lock);
   driftedLock.plannerRiskRegistry.byteSha256 = "0".repeat(64);

@@ -20,9 +20,9 @@ node --version
 
 ## 推荐上线顺序
 
-1. 保持 `executionMode=release-plan-v2-direct`；`delivery.createPullRequest=false`，使用 1 个 source-bound v2 disposable Issue 做本地 candidate 演练。
-2. 启用 PR，但保持 `autoMerge=false`。
-3. 连续完成数个小 Release 后，再考虑 auto-merge。
+1. 使用 config v3 与 `executionMode=release-plan-v2-direct`，先在隔离测试仓库校验 sandbox、check contract 和 server merge policy。
+2. 生产 direct 固定 `createPullRequest=true`、`autoMerge=true`；不存在 qualified manual merge 门。
+3. required checks 必须声明 source/workflow、accepted conclusions 与 durable deadlines；observational checks 不参与交付门。
 4. 先保持单仓库单 Job；多仓库并发由独立进程和独立目录实现。
 
 ## 实验 Dispatcher 与定时执行

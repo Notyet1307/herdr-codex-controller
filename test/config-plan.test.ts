@@ -45,39 +45,44 @@ test("config rejects overlapping source and state paths", () => {
   } finally { repo.cleanup(); }
 });
 
-test("execution mode defaults to v2 direct and legacy paths require explicit opt-in", () => {
+test("execution mode defaults to direct but production requires explicit config v3", () => {
   const repo = createTestRepo();
   try {
-    const raw: any = testConfig(repo);
-    raw.delivery.createPullRequest = true;
-    raw.delivery.requiredChecks = ["verify"];
-    delete raw.executionMode;
-    const direct = validateConfig(raw);
+    const legacyDefault: any = testConfig(repo);
+    delete legacyDefault.executionMode;
+    assert.throws(
+      () => validateConfig(legacyDefault),
+      (error: any) => error?.code === "production_config_migration_required",
+    );
+    const direct = validateConfig(testConfig(repo, { executionMode: "release-plan-v2-direct" }));
     assert.equal(direct.executionMode, "release-plan-v2-direct");
     assert.throws(
       () => assertPlanCompatibleWithConfig(testPlan([1]), direct),
       (error: any) => error?.code === "production_plan_v1_rejected",
     );
 
-    const compatibility = validateConfig({ ...raw, executionMode: "release-plan-v1-compatibility" });
+    const compatibility = validateConfig(testConfig(repo));
     assert.doesNotThrow(() => assertPlanCompatibleWithConfig(testPlan([1]), compatibility));
     assert.throws(
-      () => validateConfig({ ...raw, executionMode: "qualified-dispatcher" }),
+      () => validateConfig({ ...testConfig(repo), executionMode: "qualified-dispatcher" }),
       /config\.executionMode/,
     );
   } finally { repo.cleanup(); }
 });
 
-test("production direct delivery policy requires a PR and exact non-empty checks", () => {
+test("production direct policy requires canonical review, versioned checks, and Controller auto-merge", () => {
   const repo = createTestRepo();
   try {
     const valid = testConfig(repo, { executionMode: "release-plan-v2-direct" });
     assert.doesNotThrow(() => validateConfig(valid));
     const cases: Array<(config: any) => void> = [
       (config) => { config.delivery.createPullRequest = false; },
+      (config) => { config.delivery.autoMerge = false; },
       (config) => { config.delivery.allowNoChecks = true; },
-      (config) => { config.delivery.requiredChecks = []; },
-      (config) => { config.delivery.requiredChecks = ["verify", "verify"]; },
+      (config) => { config.delivery.requiredChecks.checks = []; },
+      (config) => { config.delivery.requiredChecks.checks.push(structuredClone(config.delivery.requiredChecks.checks[0])); },
+      (config) => { config.delivery.requiredChecks.checks[0].appId = null; config.delivery.requiredChecks.checks[0].workflowName = null; },
+      (config) => { config.delivery.mergeAuthority.quarantine = "leave-open"; },
     ];
     for (const mutate of cases) {
       const config = structuredClone(valid) as any;
@@ -87,50 +92,30 @@ test("production direct delivery policy requires a PR and exact non-empty checks
         (error: any) => error?.code === "production_delivery_policy_invalid",
       );
     }
+    for (const mutate of [
+      (config: any) => { config.review.enabled = false; },
+      (config: any) => { config.review.blockingSeverities = ["critical"]; },
+      (config: any) => { config.review.blockingSeverities = ["critical", "critical"]; },
+    ]) {
+      const config = structuredClone(valid) as any;
+      mutate(config);
+      assert.throws(() => validateConfig(config), (error: any) => (
+        error?.code === "production_review_policy_invalid" || /duplicates/u.test(error?.message ?? "")
+      ));
+    }
   } finally { repo.cleanup(); }
 });
 
 test("legacy direct config requires an explicit validation sandbox migration", () => {
   const repo = createTestRepo();
   try {
-    const legacy: any = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    legacy.version = 1;
-    delete legacy.remoteIdentity;
-    delete legacy.codex.maxEventBytes;
-    delete legacy.codex.maxStderrBytes;
-    delete legacy.codex.maxResultBytes;
-    delete legacy.codex.maxAggregateBytes;
-    delete legacy.validation.sandbox;
-    delete legacy.validation.maxStdoutBytes;
-    delete legacy.validation.maxStderrBytes;
-    delete legacy.validation.maxAggregateBytes;
+    const legacy: any = testConfig(repo);
+    legacy.executionMode = "release-plan-v2-direct";
     assert.throws(
       () => validateConfig(legacy),
       (error: any) => error?.code === "production_config_migration_required",
     );
-    const migrated = structuredClone(legacy) as any;
-    migrated.version = 2;
-    Object.assign(migrated.codex, {
-      maxEventBytes: 1024 * 1024,
-      maxStderrBytes: 1024 * 1024,
-      maxResultBytes: 256 * 1024,
-      maxAggregateBytes: 2 * 1024 * 1024,
-    });
-    migrated.remoteIdentity = {
-      version: 1,
-      fetchUrl: "https://github.com/example/project.git",
-      pushUrl: "https://github.com/example/project.git",
-    };
-    migrated.validation.sandbox = {
-      version: 1,
-      provider: "codex-permission-profile",
-      bin: "/usr/bin/false",
-      root: "/var/tmp/herdr-validation-test",
-      environmentPath: ["/usr/bin", "/bin"],
-    };
-    migrated.validation.maxStdoutBytes = 64 * 1024;
-    migrated.validation.maxStderrBytes = 64 * 1024;
-    migrated.validation.maxAggregateBytes = 96 * 1024;
+    const migrated = testConfig(repo, { executionMode: "release-plan-v2-direct" });
     assert.doesNotThrow(() => validateConfig(migrated));
   } finally { repo.cleanup(); }
 });

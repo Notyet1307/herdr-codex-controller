@@ -113,3 +113,28 @@ test("Controller commits and pushes cannot execute repository-configured hooks",
     assert.equal(existsSync(sentinel), false);
   } finally { repo.cleanup(); }
 });
+
+test("remote branch quarantine is expected-head CAS and never deletes a changed head", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const client = new TestGitClient(config);
+    const branch = "agent/release/quarantine";
+    git(repo.source, ["checkout", "-b", branch]);
+    writeFileSync(join(repo.source, "candidate-a.txt"), "a\n", "utf8");
+    git(repo.source, ["add", "candidate-a.txt"]);
+    git(repo.source, ["commit", "-m", "candidate A"]);
+    const candidateA = git(repo.source, ["rev-parse", "HEAD"]);
+    git(repo.source, ["push", "origin", branch]);
+    writeFileSync(join(repo.source, "candidate-b.txt"), "b\n", "utf8");
+    git(repo.source, ["add", "candidate-b.txt"]);
+    git(repo.source, ["commit", "-m", "candidate B"]);
+    const candidateB = git(repo.source, ["rev-parse", "HEAD"]);
+    git(repo.source, ["push", "origin", branch]);
+    const job = { worktreePath: repo.source, remote: "origin", branch } as any;
+    await assert.rejects(() => client.quarantineRemoteBranch(job, candidateA), /identity mismatch/u);
+    assert.equal(git(repo.remote, ["rev-parse", `refs/heads/${branch}`]), candidateB);
+    await client.quarantineRemoteBranch(job, candidateB);
+    assert.throws(() => git(repo.remote, ["rev-parse", `refs/heads/${branch}`]));
+  } finally { repo.cleanup(); }
+});

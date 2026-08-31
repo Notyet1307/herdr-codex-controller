@@ -1,0 +1,34 @@
+{
+  "schema": "herdr-codex-controller:identity-history:v1",
+  "version": 1,
+  "digestAlgorithm": "utf16-code-unit-canonical-json-v1+sha256-hex",
+  "entries": [
+    {
+      "identity": {
+        "version": 1,
+        "sourceRevision": "1d532133657e763f8e50429774eabf01c45f98e9",
+        "sourceManifestDigest": "1791bc4ba77b4f6e790138f8ae4fba51706f496f3771df33502cd02369871119",
+        "buildDigest": "d459a0be9843072882d5cd23c16a1363eb4f86306f75eb0e988a4fa05bbd9e97",
+        "digest": "310bc0727db0dd94eb9369320416c4b4230ffc14be161c765c5d388d917e4d04"
+      },
+      "ownedSchemas": [
+        {
+          "schema": "herdr-codex-controller:release-completion:v2",
+          "sha256": "sha256:d3c67f7d6abea0b86eed716cd27cd75759800a7b83e51931a58a92c08c791e7d"
+        },
+        {
+          "schema": "herdr-codex-controller:release-plan:v2",
+          "sha256": "sha256:362c9ae154c502ce80df16f17527c7136f4de2804da55c1c7c1314882160f363"
+        },
+        {
+          "schema": "herdr-codex-controller:config:v2",
+          "sha256": "sha256:d737bd7b59c392c815b7baf4805f3de891752815e868fbff81ffb066e8cb9778"
+        }
+      ],
+      "qualificationStatus": "qualified",
+      "activatedAt": "2026-08-31T04:56:08.000Z",
+      "revocation": null
+    }
+  ],
+  "digest": "sha256:72c71aeee8b7bba52e6de70ff9c719ae2fe66eb95c9c46e3fdbb7d08fe8a07c2"
+}

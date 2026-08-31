@@ -459,6 +459,24 @@ export class GitClient {
       : ["push", "--no-verify", "--set-upstream", job.remote, job.branch], "git push release branch", 15 * 60_000);
   }
 
+  async quarantineRemoteBranch(job: JobState, candidateSha: string): Promise<void> {
+    assertSha(candidateSha);
+    const identity = await this.verifiedRemoteIdentity();
+    if (!identity) throw new Error("production branch quarantine requires an exact remote identity");
+    const ref = `refs/heads/${job.branch}`;
+    const read = async () => (await this.textRawBounded(this.config.localPath, ["ls-remote", "--heads", identity.pushUrl, ref], 16 * 1024)).trim();
+    const before = await read();
+    if (!before) return;
+    const [sha, observedRef, ...extra] = before.split(/\s+/u);
+    if (extra.length > 0 || sha !== candidateSha || observedRef !== ref) {
+      throw new Error("remote quarantine branch identity mismatch");
+    }
+    await this.success(this.config.localPath, [
+      "push", "--no-verify", `--force-with-lease=${ref}:${candidateSha}`, identity.pushUrl, `:${ref}`,
+    ], "git quarantine exact release branch", 15 * 60_000);
+    if (await read()) throw new Error("remote release branch quarantine was not read back");
+  }
+
   async removeWorktree(job: JobState): Promise<void> {
     if (!existsSync(job.worktreePath)) return;
     if (!(await this.isClean(job.worktreePath))) throw new Error("refusing to remove a dirty worktree");

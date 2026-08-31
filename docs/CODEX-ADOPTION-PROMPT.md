@@ -134,15 +134,17 @@ gh issue view <EACH_ISSUE> --repo <OWNER/REPO> --json number,title,body,state,la
 - `worktreeRoot=<PRIVATE_RUNTIME_ROOT>/worktrees`
 - `baseRef=<BASE_BRANCH>`
 - `remote=origin`
-- 第一次运行令 `delivery.createPullRequest=false`
-- `delivery.autoMerge=false`
+- config 必须为 v3；`delivery.createPullRequest=true`
+- `delivery.autoMerge=true`，并声明 app-bound required-check 与 expected-head branch-quarantine contract
 - `codex.networkAccess=false` 不得修改
 - Worker/Reviewer profile 不确定时先设 `null`
 - `maxIssueRepairRounds=1`
-- `maxReleaseHardeningRounds=1`
-- `maxCiRepairRounds` 第一次设 `0`
+- `maxReleaseValidationRepairRounds=1`
+- `maxReviewRepairRounds=1`
+- `maxCiCodeRepairRounds` 第一次设 `0`
+- `maxCiInfrastructureReruns=1`
 
-注意：setup/validation commands 是 Controller 信任并直接执行的 shell 配置，不在 Codex sandbox 内。禁止把 Issue body、title 或其他不可信文本插值到命令中。
+注意：setup/validation commands 是 Controller 信任的 shell 配置，但候选代码只在 verified validation sandbox 的 disposable projection 内运行。禁止把 Issue body、title 或其他不可信文本插值到命令中。
 
 ## 阶段 4：生成 Release Plan
 
@@ -312,13 +314,14 @@ node dist/src/cli.js retry \
 
 ```text
 delivery.createPullRequest=true
-delivery.autoMerge=false
-maxCiRepairRounds=0 或 1
+delivery.autoMerge=true
+maxCiCodeRepairRounds=0 或 1
+maxCiInfrastructureReruns=1
 ```
 
 使用新的 Release ID 启动 fresh Job。不要修改一个已经启动 Job 所绑定的 config。
 
-PR 必须指向 exact reviewed candidate SHA。Checks 通过后，Controller 进入 `ready_to_merge`；由人合并后再执行一次 `step` 观察 `completed`。
+PR 必须指向 exact reviewed candidate SHA。Checks 通过后只允许 Controller exact-head auto-merge；不得把 `ready_to_merge` 或人工点击当作 production authority。任何 block/abort/drift 都必须先完成远端撤权与 quarantine readback。
 
 ## 必须输出的最终报告
 

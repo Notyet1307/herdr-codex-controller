@@ -8,11 +8,11 @@ import { validatePlan } from "../src/plan.js";
 import { validateDispatcherConfig } from "../src/dispatcher-config.js";
 import { validateConfig } from "../src/config.js";
 import { assertReleaseCompletion } from "../src/completion-export.js";
-import { digestJson } from "../src/util.js";
+import { digestJson, sha256 } from "../src/util.js";
 import { createTestRepo, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
 import { createControllerProvenance, readControllerIdentity } from "../src/provenance.js";
 
-test("release completion v2 binds runtime, sandbox, and remote identities without local paths", () => {
+test("release completion v3 binds lifecycle, runtime, sandbox, and remote identities without local paths", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
@@ -20,7 +20,7 @@ test("release completion v2 binds runtime, sandbox, and remote identities withou
     const planDigest = digestJson(plan);
     const provenance = createControllerProvenance(readControllerIdentity(), config, digestJson(config), plan);
     const body = {
-      schema: "herdr-codex-controller:release-completion:v2" as const,
+      schema: "herdr-codex-controller:release-completion:v3" as const,
       releaseId: "release-v2",
       repo: "example/project",
       baseRef: "main",
@@ -36,10 +36,13 @@ test("release completion v2 binds runtime, sandbox, and remote identities withou
       dependencyHandoffDigests: [],
       controllerProvenance: provenance,
       completedAt: "2026-08-30T00:01:00.000Z",
+      digestAlgorithm: "utf16-code-unit-canonical-json-v1+sha256-hex" as const,
+      schemaSha256: `sha256:${sha256(readFileSync(resolve("schemas", "release-completion-v3.schema.json")))}`,
+      requiredCheckContractDigest: provenance.requiredCheckContractDigest!,
     };
     const completion = { ...body, digest: `sha256:${digestJson(body)}` };
     const validate = new Ajv2020({ allErrors: true, strict: false, validateFormats: false })
-      .compile(readSchema("release-completion-v2.schema.json"));
+      .compile(readSchema("release-completion-v3.schema.json"));
     assert.equal(validate(completion), true, JSON.stringify(validate.errors));
     assert.doesNotThrow(() => assertReleaseCompletion(completion));
     const rendered = JSON.stringify(completion);
@@ -146,9 +149,10 @@ test("Controller config schema exposes only the explicit execution modes", () =>
     { valid: true, mutate: (value) => { delete value.executionMode; } },
     { valid: false, mutate: (value) => { value.executionMode = "dispatcher-qualified"; } },
     { valid: false, mutate: (value) => { value.delivery.createPullRequest = false; } },
+    { valid: false, mutate: (value) => { value.delivery.autoMerge = false; } },
     { valid: false, mutate: (value) => { value.delivery.allowNoChecks = true; } },
-    { valid: false, mutate: (value) => { value.delivery.requiredChecks = []; } },
-    { valid: false, mutate: (value) => { value.delivery.requiredChecks = ["verify", "verify"]; } },
+    { valid: false, mutate: (value) => { value.delivery.requiredChecks.checks = []; } },
+    { valid: false, mutate: (value) => { value.delivery.mergeAuthority.quarantine = "leave-open"; } },
   ];
   for (const fixture of fixtures) {
     const value = structuredClone(positive);

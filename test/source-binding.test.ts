@@ -86,6 +86,7 @@ class SourceGitHub extends FakeGitHub {
 
 class ObservingSourceGitHub extends SourceGitHub {
   observedPullRequest: NonNullable<JobState["pullRequest"]> | null = null;
+  autoMergeEnabled = true;
 
   override async inspectPullRequest() {
     if (!this.observedPullRequest) throw new Error("test pull request is missing");
@@ -93,7 +94,14 @@ class ObservingSourceGitHub extends SourceGitHub {
       pullRequest: this.observedPullRequest,
       checks: { state: "success" as const, missing: [], failures: [], pending: [] },
       mergedAt: null,
+      autoMergeEnabled: this.autoMergeEnabled,
     };
+  }
+
+  override async disableAutoMerge() { this.autoMergeEnabled = false; }
+  override async closePullRequest() {
+    if (!this.observedPullRequest) throw new Error("test pull request is missing");
+    this.observedPullRequest = { ...this.observedPullRequest, state: "CLOSED" };
   }
 }
 
@@ -249,7 +257,18 @@ test("runtime base drift blocks Worker, Delivery, CI, and merge observation", as
           mergeSha: null,
         };
         github.observedPullRequest = job.pullRequest;
-        if (phase === "awaiting_merge") job.status = "ready_to_merge";
+        job.deliveryAuthority = {
+          version: 1,
+          pullRequest: job.pullRequest,
+          candidateSha: job.candidateSha!,
+          proofDigest: "a".repeat(64),
+          status: phase === "awaiting_merge" ? "authorized" : "pending",
+          autoMergeEnabled: true,
+          quarantined: false,
+          lastVerifiedAt: new Date().toISOString(),
+          revocationReason: null,
+          error: null,
+        };
       }
       store.save(job);
 
@@ -265,6 +284,11 @@ test("runtime base drift blocks Worker, Delivery, CI, and merge observation", as
       assert.match(blocked.blocked?.message ?? "", /runtime_source_base_drift/, phase);
       assert.equal(codex.calls.length, 0, phase);
       assert.equal(gitClient.pushCalls, 0, phase);
+      if (phase === "ci" || phase === "awaiting_merge") {
+        assert.equal(blocked.deliveryAuthority?.status, "revoked", phase);
+        assert.equal(blocked.pullRequest?.state, "OPEN", phase);
+        assert.equal(blocked.deliveryAuthority?.quarantined, true, phase);
+      }
     } finally { repo.cleanup(); }
   }
 });

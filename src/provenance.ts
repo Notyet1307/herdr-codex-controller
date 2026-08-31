@@ -13,6 +13,8 @@ import { digestJson, pathWithin, sha256 } from "./util.js";
 import { assertExecutionRuntimeIdentity, readExecutionRuntimeIdentity } from "./runtime-identity.js";
 import { assertGitRemoteIdentity, configuredRemoteIdentity } from "./remote-identity.js";
 import { assertValidationSandboxIdentity, readValidationSandboxIdentity } from "./validation-sandbox.js";
+import { requiredCheckContract } from "./config.js";
+import { readControllerIdentityHistory } from "./identity-history.js";
 
 const HEX_40 = /^[a-f0-9]{40}$/;
 const HEX_64 = /^[a-f0-9]{64}$/;
@@ -52,8 +54,21 @@ export function createControllerProvenance(
   assertControllerIdentity(controller);
   if (!HEX_64.test(configDigest)) throw new Error("Controller config digest is invalid");
   const releasePlan = { version: plan.version, digest: digestJson(plan) };
-  const provenance = config.version === 2
+  const provenance = config.version === 3
     ? {
+      version: 3 as const,
+      controller,
+      executionRuntime: readExecutionRuntimeIdentity(config),
+      remoteIdentity: configuredRemoteIdentity(config),
+      validationSandbox: readValidationSandboxIdentity(config),
+      requiredCheckContractDigest: digestJson(requiredCheckContract(config)),
+      mergeAuthorityDigest: digestJson(config.delivery.mergeAuthority),
+      identityHistoryDigest: readControllerIdentityHistory().digest,
+      executionMode: config.executionMode,
+      configDigest,
+      releasePlan,
+    }
+    : config.version === 2 ? {
       version: 2 as const,
       controller,
       executionRuntime: readExecutionRuntimeIdentity(config),
@@ -68,15 +83,17 @@ export function createControllerProvenance(
 }
 
 export function assertControllerProvenance(value: ControllerProvenance): void {
-  if (!value || (value.version !== 1 && value.version !== 2)) throw new Error("job Controller provenance is invalid");
+  if (!value || (value.version !== 1 && value.version !== 2 && value.version !== 3)) throw new Error("job Controller provenance is invalid");
   const expectedKeys = value.version === 1
     ? ["configDigest", "controller", "digest", "executionMode", "releasePlan", "version"]
-    : ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "remoteIdentity", "releasePlan", "validationSandbox", "version"];
+    : value.version === 2
+      ? ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "remoteIdentity", "releasePlan", "validationSandbox", "version"]
+      : ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "identityHistoryDigest", "mergeAuthorityDigest", "remoteIdentity", "releasePlan", "requiredCheckContractDigest", "validationSandbox", "version"];
   if (Object.keys(value as unknown as Record<string, unknown>).sort().join("\n") !== expectedKeys.sort().join("\n")) {
     throw new Error("job Controller provenance keys are invalid");
   }
   assertControllerIdentity(value.controller);
-  if (value.version === 2) {
+  if (value.version === 2 || value.version === 3) {
     assertExecutionRuntimeIdentity(value.executionRuntime!);
     assertGitRemoteIdentity(value.remoteIdentity!);
     assertValidationSandboxIdentity(value.validationSandbox!);
@@ -85,6 +102,9 @@ export function assertControllerProvenance(value: ControllerProvenance): void {
   }
   if (!["release-plan-v2-direct", "release-plan-v1-compatibility", "dispatcher-experimental"].includes(value.executionMode)
     || !HEX_64.test(value.configDigest)
+    || (value.version === 3 && (!HEX_64.test(value.requiredCheckContractDigest ?? "")
+      || !HEX_64.test(value.mergeAuthorityDigest ?? "")
+      || !/^sha256:[a-f0-9]{64}$/u.test(value.identityHistoryDigest ?? "")))
     || (value.releasePlan?.version !== 1 && value.releasePlan?.version !== 2)
     || !HEX_64.test(value.releasePlan?.digest ?? "")) {
     throw new Error("job Controller provenance is invalid");
@@ -95,7 +115,7 @@ export function assertControllerProvenance(value: ControllerProvenance): void {
   }
 }
 
-function assertControllerIdentity(value: ControllerIdentity): void {
+export function assertControllerIdentity(value: ControllerIdentity): void {
   if (!value
     || Object.keys(value as unknown as Record<string, unknown>).sort().join(",") !== "buildDigest,digest,sourceManifestDigest,sourceRevision,version"
     || value.version !== 1

@@ -165,10 +165,37 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
     },
   };
   const merged = deepMerge(base, overrides);
-  if (merged.executionMode === "release-plan-v2-direct" && overrides.delivery === undefined) {
+  if (merged.executionMode === "release-plan-v2-direct") {
+    merged.version = 3;
+    const releaseRepairs = merged.policy.maxReleaseHardeningRounds ?? 1;
+    const ciRepairs = merged.policy.maxCiRepairRounds ?? 0;
+    delete merged.policy.maxReleaseHardeningRounds;
+    delete merged.policy.maxCiRepairRounds;
+    merged.policy.maxReleaseValidationRepairRounds = releaseRepairs;
+    merged.policy.maxReviewRepairRounds = releaseRepairs;
+    merged.policy.maxCiCodeRepairRounds = ciRepairs;
+    merged.policy.maxCiInfrastructureReruns = 1;
+    merged.policy.maxProviderRetries = 0;
     merged.delivery.createPullRequest = true;
+    merged.delivery.autoMerge = true;
     merged.delivery.allowNoChecks = false;
-    merged.delivery.requiredChecks = ["verify"];
+    const names = Array.isArray(merged.delivery.requiredChecks) && merged.delivery.requiredChecks.length > 0
+      ? merged.delivery.requiredChecks
+      : ["verify"];
+    merged.delivery.requiredChecks = {
+      version: 1,
+      firstAppearanceTimeoutMs: 60_000,
+      pendingTimeoutMs: 60_000,
+      postMergeTimeoutMs: 60_000,
+      checks: names.map((name) => ({
+        name,
+        appId: 15368,
+        workflowName: null,
+        acceptedConclusions: ["SUCCESS", "NEUTRAL", "SKIPPED"],
+        required: true,
+      })),
+    };
+    merged.delivery.mergeAuthority = { version: 1, mode: "controller-auto-merge", quarantine: "delete-exact-head-branch" };
   }
   for (const [index, fixture] of [...ORACLE_FIXTURES.entries()].reverse()) {
     if (!merged.validation.release.some(({ command }) => command === fixture.command)) {
@@ -194,6 +221,19 @@ export class TestGitClient extends GitClient {
 
   override async push(job: JobState): Promise<void> {
     git(job.worktreePath, ["push", "--no-verify", "--set-upstream", job.remote, job.branch]);
+  }
+
+  override async quarantineRemoteBranch(job: JobState, candidateSha: string): Promise<void> {
+    const ref = `refs/heads/${job.branch}`;
+    const observed = spawnSync("git", ["-C", this.testControllerConfig.localPath, "ls-remote", "--heads", job.remote, ref], { encoding: "utf8" });
+    if (observed.status !== 0) throw new Error(String(observed.stderr || "cannot read remote branch"));
+    const line = String(observed.stdout).trim();
+    if (!line) return;
+    const [sha, observedRef] = line.split(/\s+/u);
+    if (sha !== candidateSha || observedRef !== ref) throw new Error("remote quarantine branch identity mismatch");
+    git(this.testControllerConfig.localPath, ["push", "--no-verify", `--force-with-lease=${ref}:${candidateSha}`, job.remote, `:${ref}`]);
+    const after = spawnSync("git", ["-C", this.testControllerConfig.localPath, "ls-remote", "--heads", job.remote, ref], { encoding: "utf8" });
+    if (after.status !== 0 || String(after.stdout).trim()) throw new Error("remote release branch quarantine was not read back");
   }
 
   protected override async verifiedRemoteIdentity() {
@@ -340,6 +380,10 @@ export class FakeGitHub implements GitHubPort {
   async inspectPullRequest(_number: number): Promise<{ pullRequest: PullRequestState; checks: any; mergedAt: string | null }> { throw new Error("not used"); }
   async baseAllowsUpToDateAutoMerge(): Promise<boolean> { return true; }
   async enableAutoMerge(_number: number, _candidateSha: string): Promise<void> { throw new Error("not used"); }
+  async disableAutoMerge(_number: number, _candidateSha: string): Promise<void> { throw new Error("not used"); }
+  async closePullRequest(_pullRequest: PullRequestState): Promise<void> { throw new Error("not used"); }
+  async fetchCheckFailureEvidence(_check: any, _candidateSha: string): Promise<any> { throw new Error("not used"); }
+  async rerunCheck(_check: any, _candidateSha: string): Promise<void> { throw new Error("not used"); }
   async currentLogin(): Promise<string> { return "test-user"; }
   async listSubIssues(_parentIssue: number): Promise<QueueIssue[]> { return []; }
   async fetchQueueIssue(_number: number): Promise<QueueIssue> { throw new Error("not used"); }

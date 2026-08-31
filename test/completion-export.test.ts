@@ -5,12 +5,14 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { exportReleaseCompletion } from "../src/completion-export.js";
+import { summarizeChecks } from "../src/github.js";
 import { ReleaseController } from "../src/controller.js";
 import { GitClient } from "../src/git.js";
-import { readControllerIdentity } from "../src/provenance.js";
 import { JobStore } from "../src/state.js";
 import { Validator } from "../src/validator.js";
 import { digestJson } from "../src/util.js";
+import { createControllerProvenance } from "../src/provenance.js";
+import { readControllerIdentityHistory } from "../src/identity-history.js";
 import {
   FakeCodex,
   FakeGitHub,
@@ -55,7 +57,7 @@ process.exit(result.status ?? 1);
     assert.equal(first.status, 0, first.stderr);
     const artifact = JSON.parse(first.stdout);
     const firstBytes = readFileSync(output);
-    assert.equal(artifact.schema, "herdr-codex-controller:release-completion:v2");
+    assert.equal(artifact.schema, "herdr-codex-controller:release-completion:v3");
     assert.equal(artifact.candidateSha, fixture.candidateSha);
     assert.equal(artifact.pullRequest.mergeSha, fixture.mergeSha);
     assert.equal(artifact.pullRequest.mergedAt, "2026-08-30T01:00:00.000Z");
@@ -89,6 +91,48 @@ process.exit(result.status ?? 1);
     });
     assert.equal(second.digest, artifact.digest);
     assert.deepEqual(readFileSync(output), firstBytes);
+  } finally { fixture.repo.cleanup(); }
+});
+
+test("qualified Controller A completion remains exportable after Controller B is active", async () => {
+  const fixture = await completedFixture();
+  try {
+    const historicalConfig: any = structuredClone(fixture.config);
+    historicalConfig.version = 2;
+    historicalConfig.policy = {
+      maxIssueRepairRounds: fixture.config.policy.maxIssueRepairRounds,
+      maxReleaseHardeningRounds: fixture.config.policy.maxReleaseValidationRepairRounds,
+      maxCiRepairRounds: fixture.config.policy.maxCiCodeRepairRounds,
+      maxIssues: fixture.config.policy.maxIssues,
+      maxChangedFiles: fixture.config.policy.maxChangedFiles,
+      maxChangedLines: fixture.config.policy.maxChangedLines,
+    };
+    historicalConfig.delivery.requiredChecks = ["verify"];
+    delete historicalConfig.delivery.mergeAuthority;
+    const configDigest = digestJson(historicalConfig);
+    const historicalIdentity = readControllerIdentityHistory().entries[0]!.identity;
+    const job = fixture.store.load(fixture.jobId);
+    job.version = 3;
+    job.configDigest = configDigest;
+    job.provenance = createControllerProvenance(historicalIdentity, historicalConfig, configDigest, job.plan);
+    job.remoteIdentityDigest = job.provenance.remoteIdentity!.digest;
+    job.publicCompletion = null;
+    job.ciGate = null;
+    job.deliveryAuthority = null;
+    job.completion!.controllerProvenanceDigest = job.provenance.digest;
+    const { digest: _checkpointDigest, ...checkpointBody } = job.completion!;
+    job.completion!.digest = digestJson(checkpointBody);
+    writeFileSync(join(fixture.store.root(job.id), "config.snapshot.json"), `${JSON.stringify(historicalConfig, null, 2)}\n`, "utf8");
+    fixture.store.save(job);
+
+    const firstPath = join(fixture.repo.root, "historical-a-1.json");
+    const secondPath = join(fixture.repo.root, "historical-a-2.json");
+    const first = await exportReleaseCompletion({ store: fixture.store, git: new TestGitClient(fixture.config), github: new FakeGitHub(), jobId: job.id, outputPath: firstPath });
+    const second = await exportReleaseCompletion({ store: fixture.store, git: new TestGitClient(fixture.config), github: new FakeGitHub(), jobId: job.id, outputPath: secondPath });
+    assert.equal(first.schema, "herdr-codex-controller:release-completion:v2");
+    assert.equal(first.controllerProvenance.controller.digest, historicalIdentity.digest);
+    assert.equal(second.digest, first.digest);
+    assert.deepEqual(readFileSync(secondPath), readFileSync(firstPath));
   } finally { fixture.repo.cleanup(); }
 });
 
@@ -158,12 +202,6 @@ test("completion export rejects incomplete, drifted, private, and forged evidenc
     fixture.github.checks = { state: "failure", missing: [], failures: [{ name: "verify", state: "FAILURE", link: null }], pending: [] };
     await rejectsCode(run(join(publicRoot, "failed-check.json")), "completion_export_required_checks_unverified");
     fixture.github.checks = { state: "success", missing: [], failures: [], pending: [] };
-
-    const identity = readControllerIdentity();
-    const changedBody = { ...identity, sourceRevision: identity.sourceRevision === "f".repeat(40) ? "e".repeat(40) : "f".repeat(40) };
-    const { digest: _digest, ...changedIdentity } = changedBody;
-    const driftStore = new JobStore(fixture.config, () => ({ ...changedIdentity, digest: digestJson(changedIdentity) }));
-    await rejectsCode(run(join(publicRoot, "provenance.json"), driftStore), "completion_export_provenance_drift");
 
     const job = fixture.store.load(fixture.jobId);
     const release = [...job.validations].reverse().find(({ scope }) => scope === "release")!;
@@ -245,13 +283,15 @@ async function completedFixture() {
     mergeSha: string | null = null;
     mergedAt: string | null = null;
     checks: any = { state: "success", missing: [], failures: [], pending: [] };
+    autoMergeEnabled = false;
     override async createPullRequest(job: any) {
       this.pr = { number: 41, url: "https://github.com/example/project/pull/41", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: job.candidateSha, mergeSha: null };
       return this.pr;
     }
     override async inspectPullRequest() {
-      return { pullRequest: { ...this.pr, state: this.mergedAt ? "MERGED" as const : "OPEN" as const, mergeSha: this.mergeSha }, checks: this.checks, mergedAt: this.mergedAt };
+      return { pullRequest: { ...this.pr, state: this.mergedAt ? "MERGED" as const : "OPEN" as const, mergeSha: this.mergeSha }, checks: this.checks, mergedAt: this.mergedAt, autoMergeEnabled: this.autoMergeEnabled };
     }
+    override async enableAutoMerge() { this.autoMergeEnabled = true; }
     githubResponse() {
       return {
         number: this.pr.number,
@@ -262,15 +302,16 @@ async function completedFixture() {
         headRefOid: this.pr.headSha,
         mergedAt: this.mergedAt,
         mergeCommit: { oid: this.mergeSha },
-        statusCheckRollup: [{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS" }],
+        statusCheckRollup: [{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }],
       };
     }
   }
   const github = new CompletionGitHub();
+  github.checks = summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }], config.delivery.requiredChecks);
   const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
   const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
   let job = store.load(created.id);
-  for (let index = 0; index < 100 && job.status !== "ready_to_merge"; index += 1) {
+  for (let index = 0; index < 100 && job.phase !== "awaiting_merge"; index += 1) {
     await controller.step(job.id);
     job = store.load(job.id);
     if (job.status === "blocked") throw new Error(job.blocked?.message);

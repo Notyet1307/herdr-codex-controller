@@ -4,12 +4,33 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { CodexRunner, validateWorkerResult } from "../src/codex.js";
+import { CodexRunner, validateReviewResult, validateWorkerResult } from "../src/codex.js";
 import { GitClient } from "../src/git.js";
 import { JobStore } from "../src/state.js";
 import { digestJson } from "../src/util.js";
 import { createTestRepo, TestGitClient, testConfig, testPlan, writeInputs } from "./support.js";
 import { codexRuntimeControlArgs } from "../src/runtime-identity.js";
+
+test("canonical review status is derived from blocking findings", () => {
+  const finding = {
+    severity: "minor",
+    path: null,
+    line: null,
+    summary: "minor",
+    rationale: "audit only",
+    recommendation: "consider later",
+    relatedIssues: [],
+  };
+  assert.doesNotThrow(() => validateReviewResult({ status: "pass", summary: "pass", findings: [finding] }));
+  assert.throws(() => validateReviewResult({ status: "changes", summary: "wrong", findings: [] }), /changes.*blocking/iu);
+  assert.throws(() => validateReviewResult({ status: "changes", summary: "wrong", findings: [finding] }), /changes.*blocking/iu);
+  assert.throws(() => validateReviewResult({
+    status: "pass",
+    summary: "wrong",
+    findings: [{ ...finding, severity: "major" }],
+  }), /pass.*blocking/iu);
+  assert.throws(() => validateReviewResult({ status: "pass", summary: "duplicate", findings: [finding, finding] }), /duplicate/iu);
+});
 
 test("fixed Codex config parses and excludes repository AGENTS from model input", () => {
   const codexHome = mkdtempSync(join(tmpdir(), "herdr-codex-config-probe-"));

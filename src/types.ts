@@ -10,8 +10,30 @@ export type CommandConfig = {
   timeoutMs?: number;
 };
 
+export type CheckConclusion = "SUCCESS" | "NEUTRAL" | "SKIPPED" | "FAILURE" | "ACTION_REQUIRED" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "STARTUP_FAILURE" | "STALE";
+
+export type RequiredCheckContractV1 = {
+  version: 1;
+  firstAppearanceTimeoutMs: number;
+  pendingTimeoutMs: number;
+  postMergeTimeoutMs: number;
+  checks: Array<{
+    name: string;
+    appId: number | null;
+    workflowName: string | null;
+    acceptedConclusions: Array<"SUCCESS" | "NEUTRAL" | "SKIPPED">;
+    required: boolean;
+  }>;
+};
+
+export type MergeAuthorityContractV1 = {
+  version: 1;
+  mode: "controller-auto-merge";
+  quarantine: "delete-exact-head-branch";
+};
+
 export type ControllerConfig = {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   executionMode: ExecutionMode;
   repo: string;
   localPath: string;
@@ -57,8 +79,13 @@ export type ControllerConfig = {
   };
   policy: {
     maxIssueRepairRounds: number;
-    maxReleaseHardeningRounds: number;
-    maxCiRepairRounds: number;
+    maxReleaseHardeningRounds?: number;
+    maxCiRepairRounds?: number;
+    maxReleaseValidationRepairRounds?: number;
+    maxReviewRepairRounds?: number;
+    maxCiCodeRepairRounds?: number;
+    maxCiInfrastructureReruns?: number;
+    maxProviderRetries?: number;
     maxIssues: number;
     maxChangedFiles: number;
     maxChangedLines: number;
@@ -73,7 +100,8 @@ export type ControllerConfig = {
     autoMerge: boolean;
     mergeMethod: "merge" | "squash" | "rebase";
     allowNoChecks: boolean;
-    requiredChecks: string[];
+    requiredChecks: string[] | RequiredCheckContractV1;
+    mergeAuthority?: MergeAuthorityContractV1 | null;
     pollIntervalMs: number;
   };
 };
@@ -83,6 +111,20 @@ export type ControllerIdentity = {
   sourceRevision: string;
   sourceManifestDigest: string;
   buildDigest: string;
+  digest: string;
+};
+
+export type ControllerIdentityHistory = {
+  schema: "herdr-codex-controller:identity-history:v1";
+  version: 1;
+  digestAlgorithm: "utf16-code-unit-canonical-json-v1+sha256-hex";
+  entries: Array<{
+    identity: ControllerIdentity;
+    ownedSchemas: Array<{ schema: string; sha256: string }>;
+    qualificationStatus: "qualified";
+    activatedAt: string;
+    revocation: { revokedAt: string; reason: string } | null;
+  }>;
   digest: string;
 };
 
@@ -122,11 +164,14 @@ export type GitRemoteIdentity = {
 };
 
 export type ControllerProvenance = {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   controller: ControllerIdentity;
   executionRuntime?: ExecutionRuntimeIdentity;
   remoteIdentity?: GitRemoteIdentity;
   validationSandbox?: ValidationSandboxIdentity;
+  requiredCheckContractDigest?: string;
+  mergeAuthorityDigest?: string;
+  identityHistoryDigest?: string;
   executionMode: ExecutionMode;
   configDigest: string;
   releasePlan: {
@@ -593,8 +638,40 @@ export type ReleaseCompletionV2 = Omit<ReleaseCompletionV1, "schema"> & {
   schema: "herdr-codex-controller:release-completion:v2";
 };
 
+export type ReleaseCompletionV3 = Omit<ReleaseCompletionV1, "schema"> & {
+  schema: "herdr-codex-controller:release-completion:v3";
+  digestAlgorithm: "utf16-code-unit-canonical-json-v1+sha256-hex";
+  schemaSha256: string;
+  requiredCheckContractDigest: string;
+};
+
+export type CiGateState = {
+  version: 1;
+  candidateSha: string;
+  checkContractDigest: string;
+  firstObservedAt: string;
+  firstAppearanceDeadlineAt: string;
+  pendingDeadlineAt: string | null;
+  postMergeDeadlineAt: string | null;
+  attempts: number;
+  lastObservation: GhCheckSummary | null;
+};
+
+export type DeliveryAuthorityState = {
+  version: 1;
+  pullRequest: PullRequestState;
+  candidateSha: string;
+  proofDigest: string;
+  status: "pending" | "authorizing" | "authorized" | "consumed" | "revocation_required" | "revoked" | "revocation_failed";
+  autoMergeEnabled: boolean;
+  quarantined: boolean;
+  lastVerifiedAt: string;
+  revocationReason: string | null;
+  error: string | null;
+};
+
 export type JobState = {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   id: string;
   provenance: ControllerProvenance;
   configPath: string;
@@ -633,10 +710,18 @@ export type JobState = {
   reviewRound: number;
   hardeningRounds: number;
   ciRepairRounds: number;
+  releaseValidationRepairRounds: number;
+  reviewRepairRounds: number;
+  ciCodeRepairRounds: number;
+  ciInfrastructureReruns: number;
+  providerRetryAttempts: number;
   lastReviewPath: string | null;
   hardeningReasonPath: string | null;
   pullRequest: PullRequestState | null;
+  ciGate: CiGateState | null;
+  deliveryAuthority: DeliveryAuthorityState | null;
   completion: JobCompletionEvidence | null;
+  publicCompletion: ReleaseCompletionV3 | null;
   blocked: BlockedState | null;
   retryAuthorizations: RetryAuthorization[];
   createdAt: string;
@@ -675,4 +760,29 @@ export type GhCheckSummary = {
   missing: string[];
   failures: Array<{ name: string; state: string; link: string | null }>;
   pending: Array<{ name: string; state: string; link: string | null }>;
+  successes?: Array<{ name: string; state: string; link: string | null }>;
+  ambiguous?: string[];
+  observations?: GhCheckObservation[];
+  observedAt?: string;
+};
+
+export type GhCheckObservation = {
+  name: string;
+  status: string;
+  conclusion: string;
+  link: string | null;
+  appId: number | null;
+  workflowName: string | null;
+  runId: number | null;
+};
+
+export type CiFailureEvidence = {
+  version: 1;
+  candidateSha: string;
+  check: GhCheckObservation;
+  log: string;
+  logBytes: number;
+  logSha256: string;
+  observedAt: string;
+  digest: string;
 };
