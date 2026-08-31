@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import type { CommandResult, ControllerConfig, ExecutableIdentity, ValidationSandboxIdentity } from "./types.js";
 import { runCommand } from "./command.js";
 import { ensurePrivateDir, writeTextAtomic } from "./fs-atomic.js";
-import { digestJson, pathWithin } from "./util.js";
+import { digestJson, pathWithin, sha256PrefixedUtf8 } from "./util.js";
 import { readExecutableIdentity } from "./executable-identity.js";
 
 export type SandboxRunInput = {
@@ -34,6 +34,23 @@ type CodexSandboxConfig = {
   terminationGraceMs: number;
 };
 
+const NODE_STDIO_SHIM = `"use strict";
+const fs = require("node:fs");
+for (const [stream, fd] of [[process.stdout, 1], [process.stderr, 2]]) {
+  if (stream?.constructor?.name !== "Writable" || stream._handle !== undefined) continue;
+  stream.write = function (chunk, encoding, callback) {
+    if (typeof encoding === "function") { callback = encoding; encoding = undefined; }
+    const bytes = typeof chunk === "string"
+      ? Buffer.from(chunk, typeof encoding === "string" ? encoding : "utf8")
+      : Buffer.from(chunk);
+    let offset = 0;
+    while (offset < bytes.length) offset += fs.writeSync(fd, bytes, offset, bytes.length - offset);
+    if (typeof callback === "function") queueMicrotask(callback);
+    return true;
+  };
+}
+`;
+
 export class CodexSandboxProvider implements SandboxProvider {
   readonly contained = true;
   readonly policyDigest: string;
@@ -53,6 +70,7 @@ export class CodexSandboxProvider implements SandboxProvider {
       provider: "codex-permission-profile",
       binary: this.binaryIdentity,
       profile: profileTemplate(this.deniedRoots),
+      nodeStdioShimSha256: sha256PrefixedUtf8(NODE_STDIO_SHIM),
       environmentPath: config.environmentPath,
       shell: config.shell,
       terminationGraceMs: config.terminationGraceMs,
@@ -67,13 +85,16 @@ export class CodexSandboxProvider implements SandboxProvider {
     const isolatedHome = ensurePrivateDir(join(workspace, ".herdr-home"));
     const isolatedTmp = ensurePrivateDir(join(workspace, ".herdr-tmp"));
     const cacheRoot = ensurePrivateDir(join(workspace, ".herdr-cache"));
+    const nodeStdioShim = join(profileRoot, "node-stdio.cjs");
     writeTextAtomic(join(profileRoot, "config.toml"), profileTemplate(this.deniedRoots));
+    writeTextAtomic(nodeStdioShim, NODE_STDIO_SHIM);
     const environment = sandboxEnvironment({
       configured: input.environment,
       profileRoot,
       isolatedHome,
       isolatedTmp,
       cacheRoot,
+      nodeStdioShim,
       environmentPath: this.config.environmentPath,
     });
     return runCommand({
@@ -169,6 +190,7 @@ function sandboxEnvironment(input: {
   isolatedHome: string;
   isolatedTmp: string;
   cacheRoot: string;
+  nodeStdioShim: string;
   environmentPath: string[];
 }): Record<string, string> {
   for (const [name, value] of Object.entries(input.configured)) {
@@ -194,6 +216,7 @@ function sandboxEnvironment(input: {
     LC_ALL: "C.UTF-8",
     TZ: "UTC",
     CODEX_HOME: input.profileRoot,
+    NODE_OPTIONS: `--require=${JSON.stringify(input.nodeStdioShim)}`,
     ...input.configured,
   };
 }

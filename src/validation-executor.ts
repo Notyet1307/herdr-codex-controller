@@ -59,7 +59,7 @@ report.network = await new Promise((resolve) => {
   socket.once("error", () => resolve(false));
   setTimeout(() => { socket.destroy(); resolve(false); }, 1000);
 });
-console.log(JSON.stringify(report));
+fs.writeSync(1, JSON.stringify(report) + "\\n");
 `);
       const result = await this.provider.run({
         runRoot,

@@ -15,7 +15,7 @@
     "contract:generate": "node scripts/generate-runtime-contract-lock.mjs --write",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/src/cli.js",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
     "verify": "npm run typecheck && npm run test && npm run contract:check"
   },
   "devDependencies": {

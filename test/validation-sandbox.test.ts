@@ -463,6 +463,8 @@ test("validation sandbox denies Controller env, network, and reads or writes out
 import fs from "node:fs";
 import net from "node:net";
 const report = { env: process.env.CONTROLLER_SENTINEL ?? null, readOutside: false, writeOutside: false, network: false };
+process.stdout.write("sandbox-stdout\\n");
+process.stderr.write("sandbox-stderr\\n");
 try { fs.readFileSync(${JSON.stringify(join(secretRoot, "secret.txt"))}); report.readOutside = true; } catch {}
 try { fs.writeFileSync(${JSON.stringify(join(outside, "written.txt"))}, "unsafe"); report.writeOutside = true; } catch {}
 report.network = await new Promise((resolve) => {
@@ -495,6 +497,8 @@ fs.writeFileSync("report.json", JSON.stringify(report));
     });
 
     assert.equal(result.exitCode, 0, result.stderrTail || result.stdoutTail);
+    assert.match(result.stdoutTail, /sandbox-stdout/u);
+    assert.match(result.stderrTail, /sandbox-stderr/u);
     assert.deepEqual(JSON.parse(readFileSync(join(workspace, "report.json"), "utf8")), {
       env: null,
       readOutside: false,

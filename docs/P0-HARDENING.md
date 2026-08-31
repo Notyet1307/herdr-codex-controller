@@ -4,7 +4,7 @@
 
 - Config v2 / Job State v3 / Controller provenance v2 are required for `release-plan-v2-direct`.
 - Validation Receipt v3 binds a clean per-command candidate projection, sandbox policy, command set, bounded streamed outputs, termination reason, and restart-safe cleanup.
-- Production validation uses a verified Codex permission-profile sandbox with isolated HOME/TMP/cache, closed `HERDR_*` environment, network and Unix sockets denied, private Controller roots unreadable, and projection-external writes denied.
+- Production validation uses a verified Codex permission-profile sandbox with isolated HOME/TMP/cache, closed `HERDR_*` environment, a digest-bound Node stdio normalization shim, network and Unix sockets denied, private Controller roots unreadable, and projection-external writes denied.
 - Ignored implementation state is never projected. Changed symlinks/hardlinks/devices/FIFOs/sockets are rejected; unchanged tracked symlinks are accepted only when they resolve inside the projection.
 - Codex execution binds binary bytes/version/path digests and fixed no-profile/no-user-config/no-rules/no-AGENTS/no-MCP/no-hooks/no-plugins runtime controls. Events, stderr, and final result files are byte-bounded.
 - Git fetch/push endpoints are explicit GitHub identities bound to `repo`; raw remote drift, pushurl ambiguity, URL rewrites, helpers, and local/file transports fail before production Git side effects. Controller Git hooks and fsmonitor are disabled.
