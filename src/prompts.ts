@@ -1,21 +1,12 @@
 import { lstatSync, readFileSync } from "node:fs";
 import type { IssueExecution, JobState, ReleasePlanIssue, ValidationReceipt } from "./types.js";
 import { sha256 } from "./util.js";
-import { isReleasePlanV2, oracleVerifierProtectedPaths } from "./plan.js";
+import { oracleVerifierProtectedPaths } from "./plan.js";
 
 const MAX_PROMPT_DATA_BYTES = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES = 1024 * 1024;
 
 function executionContract(job: JobState, issueNumber: number | null) {
-  if (!isReleasePlanV2(job.plan)) {
-    return {
-      plannedRiskClasses: [],
-      protectedPaths: [],
-      scopeBudgets: [],
-      expectedPathFamilies: [],
-      legacySummary: "Planned risk classes: []\nReturn observedRiskClasses=[] in the structured result.",
-    };
-  }
   const entries = issueNumber === null
     ? job.plan.issues
     : job.plan.issues.filter((issue) => issue.number === issueNumber);

@@ -3,10 +3,7 @@ import { resolve } from "node:path";
 import type {
   ControllerConfig,
   ReleasePlan,
-  ReleasePlanIssue,
-  ReleasePlanIssueV1,
   ReleasePlanIssueV2,
-  ReleasePlanV1,
   ReleasePlanV2,
 } from "./types.js";
 import {
@@ -17,19 +14,16 @@ import {
   parsePositiveInteger,
   safeToken,
 } from "./util.js";
-import { assertProductionDeliveryPolicy, expectExactKeys, expectObject, validateCommands } from "./config.js";
+import { assertProductionDeliveryPolicy, expectExactKeys, expectObject } from "./config.js";
 import { ControllerError } from "./errors.js";
 import { assertCanonicalRiskClasses } from "./risk-classes.js";
 
-const PLAN_KEYS_V1 = [
+const PLAN_KEYS = [
   "id", "issues", "objective", "parentIssue", "releaseAcceptanceCriteria", "reviewFocus", "title", "version",
+  "source",
 ];
-const PLAN_KEYS_V2 = [...PLAN_KEYS_V1, "source"];
-const ISSUE_KEYS_V1 = [
+const ISSUE_KEYS = [
   "acceptanceCriteria", "allowNoop", "dependsOn", "number", "objective", "order", "suggestedValidation",
-];
-const ISSUE_KEYS_V2 = [
-  ...ISSUE_KEYS_V1,
   "expectedBodyHash",
   "expectedPaths",
   "expectedTitle",
@@ -57,17 +51,12 @@ export function loadPlan(path: string): ReleasePlan {
 
 export function validatePlan(value: unknown): ReleasePlan {
   const object = expectObject(value, "plan");
-  if (object.version === 1) return validatePlanV1(object);
-  if (object.version === 2) return validatePlanV2(object);
-  throw new Error("plan.version must be 1 or 2");
-}
-
-export function isReleasePlanV2(plan: ReleasePlan): plan is ReleasePlanV2 {
-  return plan.version === 2;
+  if (object.version !== 2) throw new Error("plan.version must be 2");
+  return validatePlanV2(object);
 }
 
 export function oracleVerifierProtectedPaths(plan: ReleasePlan): string[] {
-  if (!isReleasePlanV2(plan)) return [];
+  if (plan.issues.every((issue) => issue.oracleBindings.length === 0)) return [];
   return [...new Set([
     "package.json",
     ...plan.issues.flatMap((issue) => issue.oracleBindings.flatMap((binding) => (
@@ -78,15 +67,6 @@ export function oracleVerifierProtectedPaths(plan: ReleasePlan): string[] {
 
 export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: ControllerConfig): void {
   assertProductionDeliveryPolicy(config);
-  if (!isReleasePlanV2(plan)) {
-    if (config.executionMode === "release-plan-v2-direct") {
-      throw new ControllerError(
-        "production_plan_v1_rejected",
-        "release-plan-v2-direct mode rejects Release Plan v1.",
-      );
-    }
-    return;
-  }
   if (plan.source.repo !== config.repo) {
     throw new ControllerError(
       "plan_source_repo_mismatch",
@@ -118,30 +98,8 @@ export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: Contro
   }
 }
 
-function validatePlanV1(object: Record<string, unknown>): ReleasePlanV1 {
-  expectExactKeys(object, PLAN_KEYS_V1, "plan");
-  const issues = validateIssueGraph(object.issues, validateIssueV1);
-  return {
-    version: 1,
-    id: safeToken(boundedText(object.id, "plan.id", 120)),
-    title: boundedText(object.title, "plan.title", 500),
-    objective: boundedText(object.objective, "plan.objective", 8_000),
-    parentIssue: object.parentIssue === null
-      ? null
-      : parsePositiveInteger(object.parentIssue, "plan.parentIssue", 1, Number.MAX_SAFE_INTEGER),
-    issues,
-    releaseAcceptanceCriteria: boundedStringArray(
-      object.releaseAcceptanceCriteria,
-      "plan.releaseAcceptanceCriteria",
-      50,
-      2_000,
-    ),
-    reviewFocus: boundedStringArray(object.reviewFocus, "plan.reviewFocus", 50, 2_000),
-  };
-}
-
 function validatePlanV2(object: Record<string, unknown>): ReleasePlanV2 {
-  expectExactKeys(object, PLAN_KEYS_V2, "plan");
+  expectExactKeys(object, PLAN_KEYS, "plan");
   const parentIssue = parsePositiveInteger(object.parentIssue, "plan.parentIssue", 1, Number.MAX_SAFE_INTEGER);
   const source = validateSourceV2(object.source);
   if (source.parentBinding.number !== parentIssue) {
@@ -229,27 +187,10 @@ function validateSourceV2(value: unknown): ReleasePlanV2["source"] {
   };
 }
 
-function validateIssueV1(value: unknown, index: number): ReleasePlanIssueV1 {
-  const label = `plan.issues[${index}]`;
-  const object = expectObject(value, label);
-  expectExactKeys(object, ISSUE_KEYS_V1, label);
-  const common = validateIssueCommon(object, label);
-  if (object.allowNoop !== true && object.allowNoop !== false) {
-    throw new Error(`${label}.allowNoop must be boolean`);
-  }
-  return {
-    ...common,
-    objective: object.objective === null ? null : boundedText(object.objective, `${label}.objective`, 8_000),
-    acceptanceCriteria: boundedStringArray(object.acceptanceCriteria, `${label}.acceptanceCriteria`, 50, 2_000),
-    suggestedValidation: validateCommands(object.suggestedValidation, `${label}.suggestedValidation`, 20),
-    allowNoop: object.allowNoop,
-  };
-}
-
 function validateIssueV2(value: unknown, index: number): ReleasePlanIssueV2 {
   const label = `plan.issues[${index}]`;
   const object = expectObject(value, label);
-  expectExactKeys(object, ISSUE_KEYS_V2, label);
+  expectExactKeys(object, ISSUE_KEYS, label);
   const common = validateIssueCommon(object, label);
   const acceptanceCriteria = boundedStringArray(object.acceptanceCriteria, `${label}.acceptanceCriteria`, 8, 2_000);
   if (acceptanceCriteria.length < 3) {
@@ -259,7 +200,7 @@ function validateIssueV2(value: unknown, index: number): ReleasePlanIssueV2 {
     throw new Error(`${label}.suggestedValidation must be exactly []`);
   }
   if (object.allowNoop !== false) throw new Error(`${label}.allowNoop must be false`);
-  const oracleBindings = array(object.oracleBindings, `${label}.oracleBindings`, 1, 8)
+  const oracleBindings = array(object.oracleBindings, `${label}.oracleBindings`, 0, 8)
     .map((binding, oracleIndex) => validateOracleBinding(binding, `${label}.oracleBindings[${oracleIndex}]`));
   if (new Set(oracleBindings.map((binding) => binding.id)).size !== oracleBindings.length) {
     throw new Error(`${label}.oracleBindings contains duplicate ids`);
@@ -272,7 +213,7 @@ function validateIssueV2(value: unknown, index: number): ReleasePlanIssueV2 {
   const scopeBudget = expectObject(object.scopeBudget, `${label}.scopeBudget`);
   expectExactKeys(scopeBudget, ["maxChangedLines", "maxFiles"], `${label}.scopeBudget`);
   const expectedPaths = pathArray(object.expectedPaths, `${label}.expectedPaths`, 1, 8, true);
-  const protectedPaths = pathArray(object.protectedPaths, `${label}.protectedPaths`, 1, 100, false);
+  const protectedPaths = pathArray(object.protectedPaths, `${label}.protectedPaths`, 0, 100, false);
   if (oracleBindings.some((binding) => !protectedPaths.includes(binding.artifact.path))) {
     throw new Error(`${label}.protectedPaths must include every Oracle artifact path`);
   }
@@ -482,7 +423,7 @@ function expectedRepoPath(value: unknown, label: string): string {
 }
 
 function validateIssueCommon(object: Record<string, unknown>, label: string): Pick<
-  ReleasePlanIssue,
+  ReleasePlanIssueV2,
   "number" | "order" | "dependsOn"
 > {
   const number = parsePositiveInteger(object.number, `${label}.number`, 1, Number.MAX_SAFE_INTEGER);
@@ -497,10 +438,10 @@ function validateIssueCommon(object: Record<string, unknown>, label: string): Pi
   return { number, order, dependsOn };
 }
 
-function validateIssueGraph<T extends ReleasePlanIssue>(
+function validateIssueGraph(
   value: unknown,
-  validateIssue: (entry: unknown, index: number) => T,
-): T[] {
+  validateIssue: (entry: unknown, index: number) => ReleasePlanIssueV2,
+): ReleasePlanIssueV2[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
     throw new Error("plan.issues must contain 1 to 50 issues");
   }

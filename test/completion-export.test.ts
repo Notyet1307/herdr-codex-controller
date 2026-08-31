@@ -101,8 +101,8 @@ test("qualified Controller A completion remains exportable after Controller B is
     historicalConfig.version = 2;
     historicalConfig.policy = {
       maxIssueRepairRounds: fixture.config.policy.maxIssueRepairRounds,
-      maxReleaseHardeningRounds: fixture.config.policy.maxReleaseValidationRepairRounds,
-      maxCiRepairRounds: fixture.config.policy.maxCiCodeRepairRounds,
+      maxReleaseHardeningRounds: fixture.config.policy.maxCodeRepairRounds,
+      maxCiRepairRounds: fixture.config.policy.maxCodeRepairRounds,
       maxIssues: fixture.config.policy.maxIssues,
       maxChangedFiles: fixture.config.policy.maxChangedFiles,
       maxChangedLines: fixture.config.policy.maxChangedLines,
@@ -221,7 +221,7 @@ test("completion export rejects incomplete, drifted, private, and forged evidenc
     await rejectsCode(run(conflict), "completion_export_output_conflict");
 
     const compatibility = testConfig(fixture.repo);
-    const plan = testPlan([2]);
+    const plan = testPlan(fixture.repo, [2]);
     const input = writeInputs(fixture.repo, compatibility, plan);
     const legacyStore = new JobStore(compatibility);
     const legacy = legacyStore.create({
@@ -232,8 +232,6 @@ test("completion export rejects incomplete, drifted, private, and forged evidenc
     });
     legacy.baseSha = git(fixture.repo.source, ["rev-parse", "origin/main"]);
     legacy.candidateSha = legacy.baseSha;
-    legacy.phase = "complete";
-    legacy.status = "completed";
     legacyStore.save(legacy);
     await rejectsCode(exportReleaseCompletion({
       store: legacyStore,
@@ -265,13 +263,8 @@ async function completedFixture() {
       maxOutputBytes: 64 * 1024,
     },
     delivery: {
-      createPullRequest: true,
-      draft: false,
-      autoMerge: false,
+      ...testConfig(repo).delivery,
       mergeMethod: "merge",
-      allowNoChecks: false,
-      requiredChecks: ["verify"],
-      pollIntervalMs: 1_000,
     },
   } as any);
   const plan = testPlanV2(repo, [1]);
@@ -311,7 +304,7 @@ async function completedFixture() {
   const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
   const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
   let job = store.load(created.id);
-  for (let index = 0; index < 100 && job.phase !== "awaiting_merge"; index += 1) {
+  for (let index = 0; index < 100 && job.deliveryAuthority?.status !== "authorized"; index += 1) {
     await controller.step(job.id);
     job = store.load(job.id);
     if (job.status === "blocked") throw new Error(job.blocked?.message);

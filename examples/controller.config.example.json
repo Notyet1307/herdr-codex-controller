@@ -1,6 +1,5 @@
 {
-  "version": 3,
-  "executionMode": "release-plan-v2-direct",
+  "version": 4,
   "repo": "OWNER/REPOSITORY",
   "localPath": "/ABSOLUTE/PATH/TO/LOCAL/CHECKOUT",
   "stateDir": "/ABSOLUTE/PRIVATE/PATH/herdr-codex-state",
@@ -16,16 +15,13 @@
   "shell": "/bin/bash",
   "codex": {
     "bin": "/ABSOLUTE/PATH/TO/codex",
-    "workerProfile": null,
-    "reviewerProfile": null,
     "workerTimeoutMs": 3600000,
     "reviewerTimeoutMs": 1800000,
     "terminationGraceMs": 10000,
     "maxEventBytes": 8388608,
     "maxStderrBytes": 4194304,
     "maxResultBytes": 1048576,
-    "maxAggregateBytes": 12582912,
-    "networkAccess": false
+    "maxAggregateBytes": 12582912
   },
   "validation": {
     "setup": [
@@ -54,30 +50,19 @@
   },
   "policy": {
     "maxIssueRepairRounds": 1,
-    "maxReleaseValidationRepairRounds": 1,
-    "maxReviewRepairRounds": 1,
-    "maxCiCodeRepairRounds": 1,
-    "maxCiInfrastructureReruns": 1,
-    "maxProviderRetries": 0,
+    "maxCodeRepairRounds": 1,
+    "maxInfrastructureReruns": 1,
     "maxIssues": 8,
     "maxChangedFiles": 50,
     "maxChangedLines": 4000
   },
-  "review": {
-    "enabled": true,
-    "blockingSeverities": ["critical", "major"]
-  },
   "delivery": {
-    "createPullRequest": true,
     "draft": false,
-    "autoMerge": true,
     "mergeMethod": "squash",
-    "allowNoChecks": false,
     "requiredChecks": {
       "version": 1,
       "firstAppearanceTimeoutMs": 300000,
       "pendingTimeoutMs": 3600000,
-      "postMergeTimeoutMs": 900000,
       "checks": [
         {
           "name": "verify",
@@ -87,11 +72,6 @@
           "required": true
         }
       ]
-    },
-    "mergeAuthority": {
-      "version": 1,
-      "mode": "controller-auto-merge",
-      "quarantine": "delete-exact-head-branch"
     },
     "pollIntervalMs": 15000
   }

@@ -1,16 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Herdr Codex Controller Config v3 with explicit v1/v2 compatibility",
+  "title": "Herdr Codex Controller production config v4",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "repo", "localPath", "stateDir", "worktreeRoot", "baseRef", "remote", "branchPrefix", "shell", "codex", "validation", "policy", "review", "delivery"],
+  "required": ["version", "repo", "localPath", "stateDir", "worktreeRoot", "baseRef", "remote", "remoteIdentity", "branchPrefix", "shell", "codex", "validation", "policy", "delivery"],
   "properties": {
-    "version": { "enum": [1, 2, 3] },
-    "executionMode": {
-      "enum": ["release-plan-v2-direct", "release-plan-v1-compatibility", "dispatcher-experimental"],
-      "default": "release-plan-v2-direct",
-      "description": "Qualified production uses release-plan-v2-direct. Release Plan v1 and Dispatcher require explicit non-production modes."
-    },
+    "version": { "const": 4 },
     "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
     "localPath": { "type": "string", "minLength": 1 },
     "stateDir": { "type": "string", "minLength": 1 },
@@ -32,25 +27,22 @@
     "codex": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bin", "workerProfile", "reviewerProfile", "workerTimeoutMs", "reviewerTimeoutMs", "terminationGraceMs", "networkAccess"],
+      "required": ["bin", "workerTimeoutMs", "reviewerTimeoutMs", "terminationGraceMs", "maxEventBytes", "maxStderrBytes", "maxResultBytes", "maxAggregateBytes"],
       "properties": {
-        "bin": { "type": "string", "minLength": 1 },
-        "workerProfile": { "type": ["string", "null"] },
-        "reviewerProfile": { "type": ["string", "null"] },
+        "bin": { "type": "string", "pattern": "^/" },
         "workerTimeoutMs": { "type": "integer", "minimum": 60000 },
         "reviewerTimeoutMs": { "type": "integer", "minimum": 60000 },
         "terminationGraceMs": { "type": "integer", "minimum": 1000 },
         "maxEventBytes": { "type": "integer", "minimum": 4096, "maximum": 16777216 },
         "maxStderrBytes": { "type": "integer", "minimum": 4096, "maximum": 16777216 },
         "maxResultBytes": { "type": "integer", "minimum": 4096, "maximum": 4194304 },
-        "maxAggregateBytes": { "type": "integer", "minimum": 4096, "maximum": 33554432 },
-        "networkAccess": { "const": false }
+        "maxAggregateBytes": { "type": "integer", "minimum": 4096, "maximum": 33554432 }
       }
     },
     "validation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["setup", "issue", "release", "maxOutputBytes"],
+      "required": ["setup", "issue", "release", "maxOutputBytes", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes", "sandbox"],
       "properties": {
         "setup": { "$ref": "#/$defs/commands" },
         "issue": { "$ref": "#/$defs/commands" },
@@ -82,180 +74,28 @@
     "policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maxIssueRepairRounds", "maxIssues", "maxChangedFiles", "maxChangedLines"],
+      "required": ["maxIssueRepairRounds", "maxCodeRepairRounds", "maxInfrastructureReruns", "maxIssues", "maxChangedFiles", "maxChangedLines"],
       "properties": {
         "maxIssueRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
-        "maxReleaseHardeningRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
-        "maxCiRepairRounds": { "type": "integer", "minimum": 0, "maximum": 1 },
-        "maxReleaseValidationRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
-        "maxReviewRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
-        "maxCiCodeRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
-        "maxCiInfrastructureReruns": { "type": "integer", "minimum": 0, "maximum": 3 },
-        "maxProviderRetries": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "maxCodeRepairRounds": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "maxInfrastructureReruns": { "type": "integer", "minimum": 0, "maximum": 3 },
         "maxIssues": { "type": "integer", "minimum": 1, "maximum": 50 },
-        "maxChangedFiles": { "type": "integer", "minimum": 1 },
-        "maxChangedLines": { "type": "integer", "minimum": 1 }
-      }
-    },
-    "review": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled", "blockingSeverities"],
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "blockingSeverities": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["critical", "major"] }
-        }
+        "maxChangedFiles": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "maxChangedLines": { "type": "integer", "minimum": 1, "maximum": 100000 }
       }
     },
     "delivery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["createPullRequest", "draft", "autoMerge", "mergeMethod", "allowNoChecks", "requiredChecks", "pollIntervalMs"],
+      "required": ["draft", "mergeMethod", "requiredChecks", "pollIntervalMs"],
       "properties": {
-        "createPullRequest": { "type": "boolean" },
         "draft": { "type": "boolean" },
-        "autoMerge": { "type": "boolean" },
         "mergeMethod": { "enum": ["merge", "squash", "rebase"] },
-        "allowNoChecks": { "type": "boolean" },
-        "requiredChecks": {
-          "oneOf": [
-            {
-              "type": "array",
-              "maxItems": 100,
-              "uniqueItems": true,
-              "items": { "type": "string", "minLength": 1, "maxLength": 500 }
-            },
-            { "$ref": "#/$defs/requiredCheckContract" }
-          ]
-        },
-        "mergeAuthority": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["version", "mode", "quarantine"],
-          "properties": {
-            "version": { "const": 1 },
-            "mode": { "const": "controller-auto-merge" },
-            "quarantine": { "const": "delete-exact-head-branch" }
-          }
-        },
-        "pollIntervalMs": { "type": "integer", "minimum": 1000 }
+        "requiredChecks": { "$ref": "#/$defs/requiredCheckContract" },
+        "pollIntervalMs": { "type": "integer", "minimum": 1000, "maximum": 600000 }
       }
     }
   },
-  "allOf": [
-    {
-      "if": { "properties": { "version": { "const": 1 } }, "required": ["version"] },
-      "then": {
-        "required": ["executionMode"],
-        "properties": {
-          "executionMode": { "enum": ["release-plan-v1-compatibility", "dispatcher-experimental"] },
-          "validation": {
-            "not": {
-              "anyOf": [
-                { "required": ["sandbox"] },
-                { "required": ["maxStdoutBytes"] },
-                { "required": ["maxStderrBytes"] },
-                { "required": ["maxAggregateBytes"] }
-              ]
-            }
-          },
-          "policy": { "required": ["maxReleaseHardeningRounds", "maxCiRepairRounds"] },
-          "delivery": {
-            "properties": { "requiredChecks": { "type": "array" } },
-            "not": { "required": ["mergeAuthority"] }
-          }
-        }
-      }
-    },
-    {
-      "if": { "properties": { "version": { "const": 2 } }, "required": ["version"] },
-      "then": {
-        "required": ["remoteIdentity"],
-        "properties": {
-          "codex": {
-            "required": ["bin", "workerProfile", "reviewerProfile", "workerTimeoutMs", "reviewerTimeoutMs", "terminationGraceMs", "maxEventBytes", "maxStderrBytes", "maxResultBytes", "maxAggregateBytes", "networkAccess"]
-          },
-          "validation": {
-            "required": ["setup", "issue", "release", "maxOutputBytes", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes", "sandbox"]
-          },
-          "policy": { "required": ["maxReleaseHardeningRounds", "maxCiRepairRounds"] },
-          "delivery": {
-            "properties": { "requiredChecks": { "type": "array" } },
-            "not": { "required": ["mergeAuthority"] }
-          }
-        }
-      }
-    },
-    {
-      "if": { "properties": { "version": { "const": 3 } }, "required": ["version"] },
-      "then": {
-        "required": ["remoteIdentity"],
-        "properties": {
-          "executionMode": { "const": "release-plan-v2-direct" },
-          "codex": {
-            "required": ["bin", "workerProfile", "reviewerProfile", "workerTimeoutMs", "reviewerTimeoutMs", "terminationGraceMs", "maxEventBytes", "maxStderrBytes", "maxResultBytes", "maxAggregateBytes", "networkAccess"]
-          },
-          "validation": {
-            "required": ["setup", "issue", "release", "maxOutputBytes", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes", "sandbox"]
-          },
-          "policy": {
-            "required": ["maxReleaseValidationRepairRounds", "maxReviewRepairRounds", "maxCiCodeRepairRounds", "maxCiInfrastructureReruns", "maxProviderRetries"],
-            "not": { "anyOf": [{ "required": ["maxReleaseHardeningRounds"] }, { "required": ["maxCiRepairRounds"] }] }
-          },
-          "review": {
-            "properties": {
-              "enabled": { "const": true },
-              "blockingSeverities": {
-                "minItems": 2,
-                "maxItems": 2,
-                "allOf": [{ "contains": { "const": "critical" } }, { "contains": { "const": "major" } }]
-              }
-            }
-          },
-          "delivery": {
-            "required": ["mergeAuthority"],
-            "properties": {
-              "createPullRequest": { "const": true },
-              "autoMerge": { "const": true },
-              "allowNoChecks": { "const": false },
-              "requiredChecks": { "$ref": "#/$defs/requiredCheckContract" }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "anyOf": [
-          { "required": ["executionMode"], "properties": { "executionMode": { "const": "release-plan-v2-direct" } } },
-          { "not": { "required": ["executionMode"] } }
-        ]
-      },
-      "then": {
-        "properties": { "version": { "const": 3 },
-          "codex": {
-            "properties": {
-              "bin": { "pattern": "^/" },
-              "workerProfile": { "const": null },
-              "reviewerProfile": { "const": null }
-            }
-          },
-          "delivery": {
-            "properties": {
-              "createPullRequest": { "const": true },
-              "autoMerge": { "const": true },
-              "allowNoChecks": { "const": false },
-              "requiredChecks": { "$ref": "#/$defs/requiredCheckContract" }
-            }
-          }
-        }
-      }
-    }
-  ],
   "$defs": {
     "commands": {
       "type": "array",
@@ -267,7 +107,7 @@
             "additionalProperties": false,
             "required": ["command"],
             "properties": {
-              "command": { "type": "string", "minLength": 1 },
+              "command": { "type": "string", "minLength": 1, "maxLength": 8192 },
               "timeoutMs": { "type": "integer", "minimum": 1000 }
             }
           }
@@ -277,16 +117,16 @@
     "requiredCheckContract": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "firstAppearanceTimeoutMs", "pendingTimeoutMs", "postMergeTimeoutMs", "checks"],
+      "required": ["version", "firstAppearanceTimeoutMs", "pendingTimeoutMs", "checks"],
       "properties": {
         "version": { "const": 1 },
         "firstAppearanceTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
         "pendingTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
-        "postMergeTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
         "checks": {
           "type": "array",
           "minItems": 1,
           "maxItems": 100,
+          "contains": { "type": "object", "properties": { "required": { "const": true } }, "required": ["required"] },
           "items": {
             "type": "object",
             "additionalProperties": false,

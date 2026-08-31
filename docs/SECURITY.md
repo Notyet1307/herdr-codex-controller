@@ -16,7 +16,7 @@ The Codex permission-profile sandbox uses an isolated HOME/TMP/cache and a close
 
 ## Git and GitHub
 
-Config v3 retains exact remote binding and adds an app-bound required-check contract plus Controller-owned exact-head auto-merge. Direct production has no manual `ready_to_merge` authority. On block, replan, abort, or drift, the Controller verifies the exact PR, disables auto-merge, and quarantines by deleting only the exact expected remote head with `--force-with-lease`; a changed head is untouched and the failure remains visibly unsafe.
+Config v4 retains exact remote binding and an app-bound required-check contract. Controller-owned exact-head auto-merge is the only merge authority. On block, replan, abort, or drift, the Controller verifies the exact PR, disables auto-merge, and quarantines by deleting only the exact expected remote head with `--force-with-lease`; a changed head is untouched and the failure remains visibly unsafe.
 
 ## Evidence and residual trust
 

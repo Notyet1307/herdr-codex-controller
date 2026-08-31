@@ -28,7 +28,7 @@ const MAX_CRITERIA = 200;
 
 export type ReleaseReportModel = {
   result: {
-    status: "RUNNING" | "BLOCKED" | "READY" | "COMPLETED" | "FAILED";
+    status: "RUNNING" | "BLOCKED" | "COMPLETED" | "FAILED";
     phase: string;
     releaseId: string;
     baseSha: string | null;
@@ -39,7 +39,6 @@ export type ReleaseReportModel = {
   goal: {
     title: string;
     objective: string;
-    issueVerb: "Issue" | "Closes";
     issues: Array<{
       number: number;
       objective: string;
@@ -207,7 +206,6 @@ export async function buildReleaseReportModel(input: {
     goal: {
       title: clean(input.job.plan.title, 500),
       objective: clean(input.job.plan.objective, 4_000),
-      issueVerb: input.job.plan.version === 2 ? "Issue" : "Closes",
       issues,
       omittedCriteria: Math.max(0, criteria.length - (MAX_CRITERIA - remainingCriteria)),
       releaseAcceptanceCriteria: input.job.plan.releaseAcceptanceCriteria.slice(0, 50).map((item) => clean(item, 500)),
@@ -383,7 +381,7 @@ export function renderReleaseReport(model: ReleaseReportModel): string {
 }
 
 export function renderPullRequestBody(model: ReleaseReportModel): string {
-  const issues = model.goal.issues.map((issue) => `- ${model.goal.issueVerb} #${issue.number}`).join("\n") || "- None";
+  const issues = model.goal.issues.map((issue) => `- Issue #${issue.number}`).join("\n") || "- None";
   const checks = model.checks.slice(-12).map((check) => `- ${inline(check.stage)}: ${inline(check.command)} — ${check.status}`).join("\n") || "- No checks recorded";
   const risks = model.remainingConcerns.items.map((item) => `- ${inline(item)}`).join("\n") || "- None observed";
   const diff = model.change.available ? `${model.change.files} files, ${model.change.changedLines} changed lines` : "Not available yet";
@@ -570,7 +568,6 @@ function reportStatus(job: JobState): ReleaseReportModel["result"]["status"] {
   if (job.status === "completed") return "COMPLETED";
   if (job.status === "failed") return "FAILED";
   if (job.status === "blocked") return "BLOCKED";
-  if (job.status === "ready_to_merge") return "READY";
   return "RUNNING";
 }
 

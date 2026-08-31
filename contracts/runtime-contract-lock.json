@@ -18,7 +18,7 @@
     },
     {
       "path": "schemas/controller-config.schema.json",
-      "sha256": "40a7684a3f8abef18015618509f01b409534aaddebdf88054acbc533fa7e6af5"
+      "sha256": "ae6da7d5749599e9be23c869e07c1fca2972a58636638f1a976617f148c4172a"
     },
     {
       "path": "schemas/controller-identity-history-v1.schema.json",
@@ -30,8 +30,8 @@
     },
     {
       "path": "schemas/release-plan-v2.schema.json",
-      "sha256": "362c9ae154c502ce80df16f17527c7136f4de2804da55c1c7c1314882160f363"
+      "sha256": "c32c6cfa13bcdb8766852f2d1c2d0cfe46b8f05ed6c9f577e2aefa092d3d6ebb"
     }
   ],
-  "digest": "sha256:5f71be7e7b0f3f7e55feaa19cd2097bb3c2ea2eae669d904aa034ee7702d40ad"
+  "digest": "sha256:bfcd0fdf46bba9585720da2dd2f17788285e1fbdf90b9f618618a1969dd896aa"
 }

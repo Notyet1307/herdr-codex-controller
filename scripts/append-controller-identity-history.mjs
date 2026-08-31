@@ -24,7 +24,8 @@ if (identityResult.status !== 0) throw new Error(`outgoing Controller identity i
 const identity = JSON.parse(identityResult.stdout);
 const completionSchema = JSON.parse(readFileSync(resolve(controllerRoot, "schemas/release-completion-v3.schema.json"), "utf8"));
 const configSchema = JSON.parse(readFileSync(resolve(controllerRoot, "schemas/controller-config.schema.json"), "utf8"));
-const configVersion = Math.max(...configSchema.properties.version.enum);
+const configVersion = configSchema.properties.version.const
+  ?? Math.max(...configSchema.properties.version.enum);
 const ownedSchemas = [
   { schema: completionSchema.properties.schema.const, path: "schemas/release-completion-v3.schema.json" },
   { schema: "herdr-codex-controller:release-plan:v2", path: "schemas/release-plan-v2.schema.json" },

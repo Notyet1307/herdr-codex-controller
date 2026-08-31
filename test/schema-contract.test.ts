@@ -5,11 +5,10 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { validatePlan } from "../src/plan.js";
-import { validateDispatcherConfig } from "../src/dispatcher-config.js";
 import { validateConfig } from "../src/config.js";
 import { assertReleaseCompletion } from "../src/completion-export.js";
 import { digestJson, sha256 } from "../src/util.js";
-import { createTestRepo, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
+import { createTestRepo, testConfig, testPlanV2, writeInputs } from "./support.js";
 import { createControllerProvenance, readControllerIdentity } from "../src/provenance.js";
 
 test("release completion v3 binds lifecycle, runtime, sandbox, and remote identities without local paths", () => {
@@ -59,23 +58,12 @@ function readSchema(name: string): Record<string, unknown> {
 function releasePlanSchemaValidator() {
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   ajv.addSchema(readSchema("controller-config.schema.json"), "controller-config.schema.json");
-  ajv.addSchema(readSchema("release-plan-v1.schema.json"), "release-plan-v1.schema.json");
   ajv.addSchema(readSchema("release-plan-v2.schema.json"), "release-plan-v2.schema.json");
   ajv.addSchema(readSchema("release-plan.schema.json"), "release-plan.schema.json");
   const validate = ajv.getSchema("release-plan.schema.json");
   if (!validate) throw new Error("release-plan.schema.json did not compile");
   return validate;
 }
-
-test("aggregate JSON Schema preserves Release Plan v1 and closes unknown keys", () => {
-  const validateSchema = releasePlanSchemaValidator();
-  const v1 = testPlan([1]);
-  assert.equal(validateSchema(v1), true, JSON.stringify(validateSchema.errors));
-  assert.doesNotThrow(() => validatePlan(v1));
-  const invalid = { ...v1, unexpected: true };
-  assert.equal(validateSchema(invalid), false);
-  assert.throws(() => validatePlan(invalid), /unknown keys/);
-});
 
 test("v2 fixed fixtures agree across JSON Schema, validatePlan, and CLI plan validate", () => {
   const repo = createTestRepo();
@@ -119,40 +107,22 @@ test("v2 fixed fixtures agree across JSON Schema, validatePlan, and CLI plan val
   } finally { repo.cleanup(); }
 });
 
-test("dispatcher JSON Schema and runtime validator agree on the closed policy", () => {
-  const schema = readSchema("dispatcher-config.schema.json");
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  const validateSchema = ajv.compile(schema);
-  const positive = JSON.parse(readFileSync(resolve("examples", "dispatcher.config.example.json"), "utf8"));
-  const fixtures: Array<{ valid: boolean; mutate(value: any): void }> = [
-    { valid: true, mutate: () => {} },
-    { valid: false, mutate: (value) => { value.extra = true; } },
-    { valid: false, mutate: (value) => { value.readyLabel = "agent:claimed"; } },
-    { valid: false, mutate: (value) => { value.postMerge.requiredWorkflows = []; } },
-  ];
-  for (const fixture of fixtures) {
-    const value = structuredClone(positive);
-    fixture.mutate(value);
-    assert.equal(validateSchema(value), fixture.valid, JSON.stringify(validateSchema.errors));
-    if (fixture.valid) assert.doesNotThrow(() => validateDispatcherConfig(value));
-    else assert.throws(() => validateDispatcherConfig(value));
-  }
-});
-
-test("Controller config schema exposes only the explicit execution modes", () => {
+test("Controller config schema exposes only production operator choices", () => {
   const schema = readSchema("controller-config.schema.json");
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   const validateSchema = ajv.compile(schema);
   const positive = JSON.parse(readFileSync(resolve("examples", "controller.config.example.json"), "utf8"));
   const fixtures: Array<{ valid: boolean; mutate(value: any): void }> = [
     { valid: true, mutate: () => {} },
-    { valid: true, mutate: (value) => { delete value.executionMode; } },
-    { valid: false, mutate: (value) => { value.executionMode = "dispatcher-qualified"; } },
+    { valid: false, mutate: (value) => { value.executionMode = "release-plan-v2-direct"; } },
+    { valid: false, mutate: (value) => { value.review = { enabled: false }; } },
+    { valid: false, mutate: (value) => { value.codex.workerProfile = "custom"; } },
+    { valid: false, mutate: (value) => { value.codex.networkAccess = true; } },
     { valid: false, mutate: (value) => { value.delivery.createPullRequest = false; } },
     { valid: false, mutate: (value) => { value.delivery.autoMerge = false; } },
     { valid: false, mutate: (value) => { value.delivery.allowNoChecks = true; } },
     { valid: false, mutate: (value) => { value.delivery.requiredChecks.checks = []; } },
-    { valid: false, mutate: (value) => { value.delivery.mergeAuthority.quarantine = "leave-open"; } },
+    { valid: false, mutate: (value) => { value.delivery.mergeAuthority = {}; } },
   ];
   for (const fixture of fixtures) {
     const value = structuredClone(positive);
@@ -161,27 +131,6 @@ test("Controller config schema exposes only the explicit execution modes", () =>
     if (fixture.valid) assert.doesNotThrow(() => validateConfig(value));
     else assert.throws(() => validateConfig(value));
   }
-});
-
-test("config v1 remains readable only in explicit non-production modes", () => {
-  const repo = createTestRepo();
-  try {
-    const legacy = structuredClone(testConfig(repo)) as any;
-    legacy.version = 1;
-    legacy.executionMode = "release-plan-v1-compatibility";
-    delete legacy.remoteIdentity;
-    for (const key of ["maxEventBytes", "maxStderrBytes", "maxResultBytes", "maxAggregateBytes"]) delete legacy.codex[key];
-    for (const key of ["sandbox", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes"]) delete legacy.validation[key];
-    const validate = new Ajv2020({ allErrors: true, strict: false }).compile(readSchema("controller-config.schema.json"));
-    assert.equal(validate(legacy), true, JSON.stringify(validate.errors));
-    assert.doesNotThrow(() => validateConfig(legacy));
-    legacy.executionMode = "release-plan-v2-direct";
-    assert.equal(validate(legacy), false);
-    assert.throws(
-      () => validateConfig(legacy),
-      (error: any) => error?.code === "production_config_migration_required",
-    );
-  } finally { repo.cleanup(); }
 });
 
 test("release completion schema and runtime validator are closed and self-digested", () => {

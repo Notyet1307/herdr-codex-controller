@@ -54,7 +54,7 @@ export function createControllerProvenance(
   assertControllerIdentity(controller);
   if (!HEX_64.test(configDigest)) throw new Error("Controller config digest is invalid");
   const releasePlan = { version: plan.version, digest: digestJson(plan) };
-  const provenance = config.version === 3
+  const provenance = config.version >= 3
     ? {
       version: 3 as const,
       controller,
@@ -100,7 +100,7 @@ export function assertControllerProvenance(value: ControllerProvenance): void {
   } else if (value.executionRuntime !== undefined || value.remoteIdentity !== undefined || value.validationSandbox !== undefined) {
     throw new Error("job Controller provenance is invalid");
   }
-  if (!["release-plan-v2-direct", "release-plan-v1-compatibility", "dispatcher-experimental"].includes(value.executionMode)
+  if (value.executionMode !== "release-plan-v2-direct"
     || !HEX_64.test(value.configDigest)
     || (value.version === 3 && (!HEX_64.test(value.requiredCheckContractDigest ?? "")
       || !HEX_64.test(value.mergeAuthorityDigest ?? "")

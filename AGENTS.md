@@ -15,7 +15,7 @@ This repository is a thin Codex-first release delivery controller. It executes a
 - Validation commands are trusted operator configuration and must remain observational: they may not change the Git-visible worktree.
 - Worker and hardening Codex runs may not commit, push, invoke `gh`, change branches/remotes, or modify GitHub state.
 - The release reviewer is read-only and reviews one exact `baseSha...candidateSha` aggregate candidate.
-- Qualified production uses `release-plan-v2-direct`; Release Plan v1 and Dispatcher remain explicit compatibility/experimental paths only.
+- Production accepts only source-bound Release Plan v2 and always delivers through reviewed PR checks plus exact-head Controller auto-merge; Release Plan v1, Dispatcher, and manual merge paths do not exist.
 
 ## Build and verification
 

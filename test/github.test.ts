@@ -29,7 +29,6 @@ test("versioned required checks accept configured conclusions and ignore observa
     version: 1,
     firstAppearanceTimeoutMs: 60_000,
     pendingTimeoutMs: 60_000,
-    postMergeTimeoutMs: 60_000,
     checks: [
       { name: "verify", appId: 15368, workflowName: "CI", acceptedConclusions: ["SUCCESS", "NEUTRAL", "SKIPPED"], required: true },
       { name: "lint", appId: null, workflowName: null, acceptedConclusions: ["SUCCESS"], required: false },
@@ -63,10 +62,10 @@ test("versioned required checks accept configured conclusions and ignore observa
   assert.equal(ambiguous.state, "failure");
 });
 
-test("v2 pull request bodies keep source-bound Issues OPEN while legacy delivery keeps closure behavior", () => {
+test("pull request bodies keep source-bound Issues open", () => {
   const report = {
     result: { releaseId: "release", candidateSha: "a".repeat(40) },
-    goal: { issueVerb: "Issue", objective: "Ship it", issues: [{ number: 1 }] },
+    goal: { objective: "Ship it", issues: [{ number: 1 }] },
     change: { available: true, files: 1, changedLines: 1 },
     checks: [],
     aggregateReview: { status: "PASS", summary: "pass" },
@@ -75,8 +74,6 @@ test("v2 pull request bodies keep source-bound Issues OPEN while legacy delivery
   } as any;
   assert.match(renderPullRequestBody(report), /- Issue #1/);
   assert.doesNotMatch(renderPullRequestBody(report), /Closes #1/);
-  report.goal.issueVerb = "Closes";
-  assert.match(renderPullRequestBody(report), /- Closes #1/);
 });
 
 test("auto-merge policy requires a pull-request rule and strict protection for every configured check", async () => {

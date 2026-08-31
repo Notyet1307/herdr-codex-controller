@@ -69,7 +69,7 @@ test("review bundle renders every Job status from one bounded, redacted model", 
 
     const statuses: Array<[JobState["status"], JobState["phase"], string]> = [
       ["running", "implement", "RUNNING"],
-      ["blocked", "release_validate", "BLOCKED"],
+      ["blocked", "verify", "BLOCKED"],
       ["completed", "complete", "COMPLETED"],
       ["failed", "review", "FAILED"],
     ];
@@ -157,7 +157,7 @@ test("report export CLI is outside private state, conflict-aware, and byte-idemp
 function reportFixture() {
   const repo = createTestRepo();
   const config = testConfig(repo);
-  const plan = testPlan([1]);
+  const plan = testPlan(repo, [1]);
   const { configPath, planPath } = writeInputs(repo, config, plan);
   const store = new JobStore(config);
   let job = store.create({
@@ -172,7 +172,7 @@ function reportFixture() {
   git(repo.source, ["add", "report-target.txt"]);
   git(repo.source, ["commit", "-m", "add report target"]);
   job.candidateSha = git(repo.source, ["rev-parse", "HEAD"]);
-  job.phase = "ci";
+  job.phase = "deliver";
   job.pullRequest = {
     number: 77,
     url: "https://github.com/example/project/pull/77",
@@ -185,11 +185,10 @@ function reportFixture() {
   job.ciGate = {
     version: 1,
     candidateSha: job.candidateSha,
-    checkContractDigest: "a".repeat(64),
+    checkContractDigest: job.provenance.requiredCheckContractDigest!,
     firstObservedAt: nowIso(),
     firstAppearanceDeadlineAt: nowIso(),
     pendingDeadlineAt: null,
-    postMergeDeadlineAt: null,
     attempts: 1,
     lastObservation: {
       state: "success",
