@@ -77,7 +77,16 @@ console.log(JSON.stringify(report));
       const report = line ? JSON.parse(line) as Record<string, unknown> : null;
       if (result.exitCode !== 0 || result.signal !== null || result.timedOut || result.outputLimitExceeded
         || !report || report.env !== null || report.outsideWrite !== false || report.network !== false) {
-        throw new Error(result.stderrTail || "sandbox capability probe did not enforce its policy");
+        const diagnostic = JSON.stringify({
+          exited: result.exitCode === 0 && result.signal === null,
+          timedOut: result.timedOut,
+          outputBounded: !result.outputLimitExceeded,
+          reportPresent: report !== null,
+          environmentCleared: report?.env === null,
+          outsideWriteDenied: report?.outsideWrite === false,
+          networkDenied: report?.network === false,
+        });
+        throw new Error(`${result.stderrTail || "sandbox capability probe did not enforce its policy"}; ${diagnostic}`);
       }
       return { verified: true, policyDigest: this.provider.policyDigest };
     } catch (error) {
