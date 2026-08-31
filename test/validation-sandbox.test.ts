@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { CodexSandboxProvider } from "../src/validation-sandbox.js";
 import { GitClient } from "../src/git.js";
-import { createTestRepo, git, testConfig } from "./support.js";
+import { createTestRepo, git, testConfig, testSandboxBin } from "./support.js";
 import { testPlanV2, writeInputs } from "./support.js";
 import { JobStore } from "../src/state.js";
 import { Validator } from "../src/validator.js";
@@ -476,7 +476,7 @@ fs.writeFileSync("report.json", JSON.stringify(report));
     chmodSync(script, 0o700);
     process.env.CONTROLLER_SENTINEL = "must-not-cross";
     const provider = new CodexSandboxProvider({
-      codexBin: resolve("node_modules/.bin/codex"),
+      codexBin: testSandboxBin,
       shell: "/bin/sh",
       environmentPath: [dirname(realpathSync(process.argv[0]!)), "/usr/bin", "/bin"],
       terminationGraceMs: 500,

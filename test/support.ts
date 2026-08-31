@@ -23,6 +23,8 @@ import { ensurePrivateDir, writeJsonAtomic, writeTextAtomic } from "../src/fs-at
 import { GitClient } from "../src/git.js";
 import { configuredRemoteIdentity } from "../src/remote-identity.js";
 
+export const testSandboxBin = process.env.HERDR_TEST_SANDBOX_BIN ?? resolve("node_modules/.bin/codex");
+
 export type TestRepo = {
   root: string;
   source: string;
@@ -138,7 +140,7 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
       sandbox: {
         version: 1,
         provider: "codex-permission-profile",
-        bin: resolve("node_modules/.bin/codex"),
+        bin: testSandboxBin,
         root: repo.sandbox,
         environmentPath: [dirname(realpathSync(process.argv[0]!)), "/usr/bin", "/bin"],
       },
