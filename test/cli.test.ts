@@ -8,7 +8,7 @@ import { blockJob, JobStore } from "../src/state.js";
 import { ReleaseController } from "../src/controller.js";
 import { GitClient } from "../src/git.js";
 import { Validator } from "../src/validator.js";
-import { createTestRepo, FakeCodex, FakeGitHub, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
+import { createTestRepo, FakeCodex, FakeGitHub, TestGitClient, git, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
 import { createControllerProvenance, readControllerIdentity } from "../src/provenance.js";
 import type { ControllerConfig, ReleasePlan } from "../src/types.js";
 
@@ -21,12 +21,24 @@ test("CLI release-plan-v2-direct Job stops at the exact manual merge gate", () =
     writeFileSync(fakeGh, `#!/usr/bin/env node\nimport{execFileSync}from'node:child_process';\nconst a=process.argv.slice(2);\nif(a[0]==='auth'&&a[1]==='status') process.exit(0);\nif(a[0]==='repo'&&a[1]==='view'){console.log(JSON.stringify({nameWithOwner:'example/project'}));process.exit(0)}\nif(a[0]==='issue'&&a[1]==='view'){const n=Number(a[2]);console.log(JSON.stringify({number:n,title:'Issue '+n,body:'Create issue-'+n+'.txt.',state:'OPEN',labels:[{name:'ready'}],assignees:[],url:'https://github.com/example/project/issues/'+n}));process.exit(0)}\nif(a[0]==='pr'&&a[1]==='create'){console.log('https://github.com/example/project/pull/23');process.exit(0)}\nif(a[0]==='pr'&&a[1]==='view'){const branch='agent/release/release-fixture-v2';const head=execFileSync('git',['rev-parse',branch],{encoding:'utf8'}).trim();console.log(JSON.stringify({number:23,url:'https://github.com/example/project/pull/23',state:'OPEN',headRefName:branch,baseRefName:'main',headRefOid:head,mergedAt:null,mergeCommit:null,statusCheckRollup:[{name:'verify',status:'COMPLETED',conclusion:'SUCCESS'}]}));process.exit(0)}\nconsole.error('unsupported gh '+a.join(' '));process.exit(2);\n`, "utf8");
     chmodSync(fakeGh, 0o700);
     const fakeCodex = join(bin, "codex");
-    writeFileSync(fakeCodex, `#!/usr/bin/env node\nimport fs from 'node:fs';import path from 'node:path';\nconst a=process.argv.slice(2);\nif(a[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(a[0]==='login'&&a[1]==='status'){console.log('logged in');process.exit(0)}\nlet prompt='';for await(const c of process.stdin)prompt+=c;\nconst out=a[a.indexOf('--output-last-message')+1];const review=a.includes('read-only');\nif(!review){const m=prompt.match(/Issue #(\\d+)/);if(m)fs.writeFileSync(path.join(process.cwd(),'issue-'+m[1]+'.txt'),'implemented\\n')}\nconst risks=JSON.parse(prompt.match(/Planned risk classes: (\\[[^\\n]*\\])/)?.[1]??'[]');\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],observedRiskClasses:risks,blockedReason:null,blockedKind:null};\nfs.writeFileSync(out,JSON.stringify(result));console.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
+    writeFileSync(fakeCodex, `#!/usr/bin/env node\nimport fs from 'node:fs';import path from 'node:path';\nconst a=process.argv.slice(2);\nif(a[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(a[0]==='exec'&&a[1]==='--help'){console.log('--ignore-user-config --ignore-rules --output-schema --output-last-message');process.exit(0)}\nif(a[0]==='login'&&a[1]==='status'){console.log('logged in');process.exit(0)}\nlet prompt='';for await(const c of process.stdin)prompt+=c;\nconst out=a[a.indexOf('--output-last-message')+1];const review=a.includes('read-only');\nconst match=prompt.match(/<HERDR_UNTRUSTED_DATA[^>]*>\\n([\\s\\S]*?)\\n<\\/HERDR_UNTRUSTED_DATA>/);const data=JSON.parse(match?.[1]??'{}');\nif(!review&&data.issue?.number)fs.writeFileSync(path.join(process.cwd(),'issue-'+data.issue.number+'.txt'),'implemented\\n');\nconst risks=data.executionContract?.plannedRiskClasses??[];\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],observedRiskClasses:risks,blockedReason:null,blockedKind:null};\nfs.writeFileSync(out,JSON.stringify(result));console.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
     chmodSync(fakeCodex, 0o700);
     const config = testConfig(repo, {
       executionMode: "release-plan-v2-direct",
       codex: { ...testConfig(repo).codex, bin: fakeCodex },
     } as any);
+    git(repo.source, ["remote", "set-url", "origin", config.remoteIdentity!.fetchUrl]);
+    const realGit = String(spawnSync("which", ["git"], { encoding: "utf8" }).stdout).trim();
+    const fakeGit = join(bin, "git");
+    writeFileSync(fakeGit, `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2).map((value) => value === ${JSON.stringify(config.remoteIdentity!.fetchUrl)}
+  ? ${JSON.stringify(repo.remote)}
+  : value === "protocol.file.allow=never" ? "protocol.file.allow=always" : value);
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`, "utf8");
+    chmodSync(fakeGit, 0o700);
     const plan = testPlanV2(repo, [1, 2]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
@@ -49,12 +61,12 @@ test("CLI release-plan-v2-direct Job stops at the exact manual merge gate", () =
     const startedJob = JSON.parse(String(start.stdout));
     assert.equal(startedJob.provenanceMatches, true);
     const jobId = startedJob.id as string;
-    const run = spawnSync("node", [cli, "run", "--config", configPath, "--job", jobId, "--max-steps", "100", "--json"], { cwd: resolve("."), env, encoding: "utf8", timeout: 60_000 });
+    const run = spawnSync("node", [cli, "run", "--config", configPath, "--job", jobId, "--max-steps", "100", "--json"], { cwd: resolve("."), env, encoding: "utf8", timeout: 120_000 });
     assert.equal(run.status, 0, run.stderr);
     const status = spawnSync("node", [cli, "status", "--config", configPath, "--job", jobId, "--json"], { cwd: resolve("."), env, encoding: "utf8" });
     assert.equal(status.status, 0, status.stderr);
     const job = JSON.parse(String(status.stdout));
-    assert.equal(job.status, "ready_to_merge");
+    assert.equal(job.status, "ready_to_merge", JSON.stringify(job));
     assert.deepEqual(job.issues.map((issue: any) => issue.status), ["committed", "committed"]);
     assert.equal(job.provenanceMatches, true);
     assert.deepEqual(job.provenance, job.currentProvenance);
@@ -143,6 +155,7 @@ test("CLI v2 start requires the exact approved config digest before Job creation
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const startEnv = installStartPreflightFakes(repo, config);
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const cli = resolve("dist/src/cli.js");
@@ -181,7 +194,7 @@ test("CLI v2 start requires the exact approved config digest before Job creation
     assert.equal(existsSync(jobPath), false);
 
     const controller = readControllerIdentity();
-    const provenance = createControllerProvenance(controller, config.executionMode, approvedDigest, plan);
+    const provenance = createControllerProvenance(controller, config, approvedDigest, plan);
     const revisionOnly = [...baseArgs, "--expected-config-digest", approvedDigest];
     const missingRevision = spawnSync("node", revisionOnly, { cwd: resolve("."), encoding: "utf8" });
     assert.notEqual(missingRevision.status, 0);
@@ -238,7 +251,7 @@ test("CLI v2 start requires the exact approved config digest before Job creation
     assert.equal(existsSync(jobPath), false);
 
     const exact = spawnSync("node", [...baseArgs, ...expectedProvenanceArgs(config, plan)], {
-      cwd: resolve("."), encoding: "utf8",
+      cwd: resolve("."), env: startEnv, encoding: "utf8",
     });
     assert.equal(exact.status, 0, exact.stderr);
     const started = JSON.parse(String(exact.stdout));
@@ -322,7 +335,7 @@ test("CLI snapshots recovery evidence and the next failure stays fail closed", a
     assert.equal(pathWithin(store.root(job.id), authorization.recoveryEvidencePath), true);
     assert.deepEqual(readFileSync(authorization.recoveryEvidencePath), evidence);
 
-    const gitClient = new GitClient(config);
+    const gitClient = new TestGitClient(config);
     const controller = new ReleaseController({
       store,
       git: gitClient,
@@ -349,6 +362,7 @@ test("abort followed by a new Release Plan v2 Job is the only replan recovery pa
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const startEnv = installStartPreflightFakes(repo, config);
     const plan = testPlanV2(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
@@ -396,7 +410,7 @@ test("abort followed by a new Release Plan v2 Job is the only replan recovery pa
     assert.equal(abort.status, 0, abort.stderr);
     assert.equal(store.load(job.id).status, "failed");
 
-    const started = spawnSync("node", startArgs, { cwd: resolve("."), encoding: "utf8" });
+    const started = spawnSync("node", startArgs, { cwd: resolve("."), env: startEnv, encoding: "utf8" });
     assert.equal(started.status, 0, started.stderr);
     const newJob = store.load(nextPlan.id);
     assert.equal(newJob.status, "running");
@@ -409,7 +423,7 @@ function expectedProvenanceArgs(config: ControllerConfig, plan: ReleasePlan): st
   const configDigest = digestJson(config);
   const provenance = createControllerProvenance(
     readControllerIdentity(),
-    config.executionMode,
+    config,
     configDigest,
     plan,
   );
@@ -418,4 +432,29 @@ function expectedProvenanceArgs(config: ControllerConfig, plan: ReleasePlan): st
     "--expected-controller-revision", provenance.controller.sourceRevision,
     "--expected-controller-provenance-digest", provenance.digest,
   ];
+}
+
+function installStartPreflightFakes(repo: ReturnType<typeof createTestRepo>, config: ControllerConfig) {
+  const bin = join(repo.root, `start-preflight-bin-${Date.now()}`);
+  mkdirSync(bin, { mode: 0o700 });
+  const codex = join(bin, "codex");
+  writeFileSync(codex, `#!/usr/bin/env node
+const args=process.argv.slice(2);
+if(args[0]==="--version"){console.log("codex-start-test");process.exit(0)}
+if(args[0]==="exec"&&args[1]==="--help"){console.log("--ignore-user-config --ignore-rules --output-schema --output-last-message");process.exit(0)}
+if(args[0]==="login"&&args[1]==="status"){console.log("logged in");process.exit(0)}
+process.exit(2);
+`, "utf8");
+  chmodSync(codex, 0o700);
+  const gh = join(bin, "gh");
+  writeFileSync(gh, `#!/usr/bin/env node
+const args=process.argv.slice(2);
+if(args[0]==="auth"&&args[1]==="status")process.exit(0);
+if(args[0]==="repo"&&args[1]==="view"){console.log(JSON.stringify({nameWithOwner:"example/project"}));process.exit(0)}
+process.exit(2);
+`, "utf8");
+  chmodSync(gh, 0o700);
+  config.codex.bin = codex;
+  git(repo.source, ["remote", "set-url", "origin", config.remoteIdentity!.fetchUrl]);
+  return { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
 }

@@ -14,6 +14,7 @@ import { digestJson } from "../src/util.js";
 import {
   FakeCodex,
   FakeGitHub,
+  TestGitClient,
   createTestRepo,
   git,
   testConfig,
@@ -33,15 +34,28 @@ test("completion export CLI is public, restart-safe, and byte-idempotent", async
     const gh = join(fakeBin, "gh");
     writeFileSync(gh, `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify(fixture.githubResponse()))});\n`, "utf8");
     chmodSync(gh, 0o700);
+    git(fixture.repo.source, ["remote", "set-url", "origin", fixture.config.remoteIdentity!.fetchUrl]);
+    const realGit = String(spawnSync("which", ["git"], { encoding: "utf8" }).stdout).trim();
+    const fakeGit = join(fakeBin, "git");
+    writeFileSync(fakeGit, `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2).map((value) => value === ${JSON.stringify(fixture.config.remoteIdentity!.fetchUrl)}
+  ? ${JSON.stringify(fixture.repo.remote)}
+  : value === "protocol.file.allow=never" ? "protocol.file.allow=always" : value);
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`, "utf8");
+    chmodSync(fakeGit, 0o700);
     const cli = resolve("dist/src/cli.js");
     const first = spawnSync("node", [
       cli, "completion", "export", "--config", fixture.configPath,
       "--job", fixture.jobId, "--out", output, "--json",
     ], { cwd: resolve("."), env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}` }, encoding: "utf8" });
+    git(fixture.repo.source, ["remote", "set-url", "origin", fixture.repo.remote]);
     assert.equal(first.status, 0, first.stderr);
     const artifact = JSON.parse(first.stdout);
     const firstBytes = readFileSync(output);
-    assert.equal(artifact.schema, "herdr-codex-controller:release-completion:v1");
+    assert.equal(artifact.schema, "herdr-codex-controller:release-completion:v2");
     assert.equal(artifact.candidateSha, fixture.candidateSha);
     assert.equal(artifact.pullRequest.mergeSha, fixture.mergeSha);
     assert.equal(artifact.pullRequest.mergedAt, "2026-08-30T01:00:00.000Z");
@@ -50,7 +64,14 @@ test("completion export CLI is public, restart-safe, and byte-idempotent", async
     assert.deepEqual(artifact.requiredChecks, ["verify"]);
     assert.equal(statSync(output).mode & 0o777, 0o644);
     const rendered = firstBytes.toString("utf8");
-    for (const privateValue of [fixture.repo.root, fixture.config.stateDir, fixture.completed.worktreePath]) {
+    for (const privateValue of [
+      fixture.repo.root,
+      fixture.config.stateDir,
+      fixture.completed.worktreePath,
+      fixture.config.codex.bin,
+      fixture.config.validation.sandbox!.bin,
+      fixture.config.validation.sandbox!.root,
+    ]) {
       assert.equal(rendered.includes(privateValue), false);
     }
 
@@ -61,7 +82,7 @@ test("completion export CLI is public, restart-safe, and byte-idempotent", async
     const restarted = new JobStore(fixture.config);
     const second = await exportReleaseCompletion({
       store: restarted,
-      git: new GitClient(fixture.config),
+      git: new TestGitClient(fixture.config),
       github: fixture.github,
       jobId: fixture.jobId,
       outputPath: output,
@@ -84,7 +105,7 @@ test("locale-bound completion checkpoints fail closed after the canonical cutove
     const output = join(fixture.repo.root, "legacy-completion.json");
     await assert.rejects(exportReleaseCompletion({
       store: fixture.store,
-      git: new GitClient(fixture.config),
+      git: new TestGitClient(fixture.config),
       github: fixture.github,
       jobId: fixture.jobId,
       outputPath: output,
@@ -100,7 +121,7 @@ test("completion export rejects incomplete, drifted, private, and forged evidenc
     mkdirSync(publicRoot, { mode: 0o700 });
     const run = (outputPath: string, store = fixture.store) => exportReleaseCompletion({
       store,
-      git: new GitClient(fixture.config),
+      git: new TestGitClient(fixture.config),
       github: fixture.github,
       jobId: fixture.jobId,
       outputPath,
@@ -178,7 +199,7 @@ test("completion export rejects incomplete, drifted, private, and forged evidenc
     legacyStore.save(legacy);
     await rejectsCode(exportReleaseCompletion({
       store: legacyStore,
-      git: new GitClient(compatibility),
+      git: new TestGitClient(compatibility),
       github: new FakeGitHub(),
       jobId: legacy.id,
       outputPath: join(publicRoot, "local-only.json"),
@@ -218,7 +239,7 @@ async function completedFixture() {
   const plan = testPlanV2(repo, [1]);
   const { configPath, planPath } = writeInputs(repo, config, plan);
   const store = new JobStore(config);
-  const gitClient = new GitClient(config);
+  const gitClient = new TestGitClient(config);
   class CompletionGitHub extends FakeGitHub {
     pr: any = null;
     mergeSha: string | null = null;

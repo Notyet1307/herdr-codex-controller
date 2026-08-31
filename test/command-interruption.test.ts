@@ -1,10 +1,41 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import { requireCommandSuccess, runCommand } from "../src/command.js";
+
+test("stdout and stderr flooding is terminated at the configured byte limit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-command-output-limit-"));
+  try {
+    const stdoutPath = join(root, "stdout.log");
+    const stderrPath = join(root, "stderr.log");
+    const result = await runCommand({
+      command: "node",
+      args: ["-e", "process.on('SIGTERM',()=>process.exit(0));const chunk='x'.repeat(1024);setInterval(()=>{process.stdout.write(chunk);process.stderr.write(chunk)},0)"],
+      cwd: root,
+      timeoutMs: 30_000,
+      terminationGraceMs: 500,
+      stdoutPath,
+      stderrPath,
+      stdoutByteLimit: 4_096,
+      stderrByteLimit: 4_096,
+      aggregateByteLimit: 6_144,
+    });
+
+    assert.equal(result.outputLimitExceeded, true);
+    assert.equal(result.terminationReason, "output_limit");
+    assert.equal(result.exitCode, 0);
+    assert.throws(() => requireCommandSuccess(result, "flood"), /output limit/);
+    assert.ok(statSync(stdoutPath).size <= 4_096);
+    assert.ok(statSync(stderrPath).size <= 4_096);
+    assert.ok(statSync(stdoutPath).size + statSync(stderrPath).size <= 6_144);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("parent SIGTERM terminates the command group and preserves interruption as a fresh-recovery boundary", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-command-interrupt-"));

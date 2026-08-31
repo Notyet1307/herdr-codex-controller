@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Herdr Codex Controller Release Completion v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "releaseId", "repo", "baseRef", "planDigest", "sourceBaseSha", "candidateSha", "issueCommits", "releaseValidationDigest", "reviewResultDigest", "pullRequest", "requiredChecks", "mergedMainSha", "dependencyHandoffDigests", "controllerProvenance", "completedAt", "digest"],
+  "properties": {
+    "schema": { "const": "herdr-codex-controller:release-completion:v2" },
+    "releaseId": { "type": "string", "pattern": "^[a-z0-9._-]{1,80}$" },
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "baseRef": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "planDigest": { "$ref": "#/$defs/hex64" },
+    "sourceBaseSha": { "$ref": "#/$defs/gitSha" },
+    "candidateSha": { "$ref": "#/$defs/gitSha" },
+    "issueCommits": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueNumber", "sha"],
+        "properties": {
+          "issueNumber": { "type": "integer", "minimum": 1 },
+          "sha": { "$ref": "#/$defs/gitSha" }
+        }
+      }
+    },
+    "releaseValidationDigest": { "$ref": "#/$defs/hex64" },
+    "reviewResultDigest": { "$ref": "#/$defs/hex64" },
+    "pullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "headRef", "headSha", "baseRef", "mergeSha", "mergedAt"],
+      "properties": {
+        "number": { "type": "integer", "minimum": 1 },
+        "headRef": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "headSha": { "$ref": "#/$defs/gitSha" },
+        "baseRef": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "mergeSha": { "$ref": "#/$defs/gitSha" },
+        "mergedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "requiredChecks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+    },
+    "mergedMainSha": { "$ref": "#/$defs/gitSha" },
+    "dependencyHandoffDigests": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/prefixedSha256" }
+    },
+    "controllerProvenance": { "$ref": "#/$defs/controllerProvenance" },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "digest": { "$ref": "#/$defs/prefixedSha256" }
+  },
+  "$defs": {
+    "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "hex64": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "prefixedSha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "controllerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sourceRevision", "sourceManifestDigest", "buildDigest", "digest"],
+      "properties": {
+        "version": { "const": 1 },
+        "sourceRevision": { "$ref": "#/$defs/gitSha" },
+        "sourceManifestDigest": { "$ref": "#/$defs/hex64" },
+        "buildDigest": { "$ref": "#/$defs/hex64" },
+        "digest": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "executionRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "binary", "fixedPolicyDigest", "profilesDisabled", "digest"],
+      "properties": {
+        "version": { "const": 1 },
+        "binary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["configuredPathDigest", "realPathDigest", "byteCount", "sha256", "versionOutput"],
+          "properties": {
+            "configuredPathDigest": { "$ref": "#/$defs/prefixedSha256" },
+            "realPathDigest": { "$ref": "#/$defs/prefixedSha256" },
+            "byteCount": { "type": "integer", "minimum": 1 },
+            "sha256": { "$ref": "#/$defs/prefixedSha256" },
+            "versionOutput": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          }
+        },
+        "fixedPolicyDigest": { "$ref": "#/$defs/hex64" },
+        "profilesDisabled": { "const": true },
+        "digest": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "remoteIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "remote", "repo", "fetchUrl", "pushUrl", "fetchTransport", "pushTransport", "digest"],
+      "properties": {
+        "version": { "const": 1 },
+        "remote": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "repo": { "type": "string", "pattern": "^[a-z0-9_.-]+/[a-z0-9_.-]+$" },
+        "fetchUrl": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "pushUrl": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "fetchTransport": { "enum": ["https", "ssh"] },
+        "pushTransport": { "enum": ["https", "ssh"] },
+        "digest": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "validationSandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "provider", "binary", "policyDigest", "digest"],
+      "properties": {
+        "version": { "const": 1 },
+        "provider": { "const": "codex-permission-profile" },
+        "binary": { "$ref": "#/$defs/executableIdentity" },
+        "policyDigest": { "$ref": "#/$defs/hex64" },
+        "digest": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "executableIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configuredPathDigest", "realPathDigest", "byteCount", "sha256", "versionOutput"],
+      "properties": {
+        "configuredPathDigest": { "$ref": "#/$defs/prefixedSha256" },
+        "realPathDigest": { "$ref": "#/$defs/prefixedSha256" },
+        "byteCount": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/prefixedSha256" },
+        "versionOutput": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "controllerProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "controller", "executionRuntime", "remoteIdentity", "validationSandbox", "executionMode", "configDigest", "releasePlan", "digest"],
+      "properties": {
+        "version": { "const": 2 },
+        "controller": { "$ref": "#/$defs/controllerIdentity" },
+        "executionRuntime": { "$ref": "#/$defs/executionRuntime" },
+        "remoteIdentity": { "$ref": "#/$defs/remoteIdentity" },
+        "validationSandbox": { "$ref": "#/$defs/validationSandbox" },
+        "executionMode": { "const": "release-plan-v2-direct" },
+        "configDigest": { "$ref": "#/$defs/hex64" },
+        "releasePlan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "digest"],
+          "properties": {
+            "version": { "const": 2 },
+            "digest": { "$ref": "#/$defs/hex64" }
+          }
+        },
+        "digest": { "$ref": "#/$defs/hex64" }
+      }
+    }
+  }
+}

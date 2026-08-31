@@ -218,6 +218,9 @@ export class GitHubClient {
       cwd: this.config.localPath,
       timeoutMs,
       maxTailBytes: GH_OUTPUT_BYTES,
+      stdoutByteLimit: GH_OUTPUT_BYTES,
+      stderrByteLimit: GH_OUTPUT_BYTES,
+      aggregateByteLimit: GH_OUTPUT_BYTES * 2,
     });
   }
 

@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type {
   CodexRunRecord,
@@ -20,7 +20,10 @@ import type { CodexPort, GitHubPort } from "../src/ports.js";
 import { isReleasePlanV2 } from "../src/plan.js";
 import { digestJson, nowIso, sha256PrefixedUtf8 } from "../src/util.js";
 import { ensurePrivateDir, writeJsonAtomic, writeTextAtomic } from "../src/fs-atomic.js";
-import type { GitClient } from "../src/git.js";
+import { GitClient } from "../src/git.js";
+import { configuredRemoteIdentity } from "../src/remote-identity.js";
+
+export const testSandboxBin = process.env.HERDR_TEST_SANDBOX_BIN ?? resolve("node_modules/.bin/codex");
 
 export type TestRepo = {
   root: string;
@@ -28,6 +31,7 @@ export type TestRepo = {
   remote: string;
   state: string;
   worktrees: string;
+  sandbox: string;
   cleanup(): void;
 };
 
@@ -53,6 +57,7 @@ export function createTestRepo(): TestRepo {
   const remote = join(root, "remote.git");
   const state = join(root, "state");
   const worktrees = join(root, "worktrees");
+  const sandbox = realpathSync(mkdtempSync(join("/var/tmp", "herdr-codex-sandbox-test-")));
   mkdirSync(source, { mode: 0o700 });
   mkdirSync(state, { mode: 0o700 });
   mkdirSync(worktrees, { mode: 0o700 });
@@ -82,13 +87,17 @@ export function createTestRepo(): TestRepo {
     remote,
     state: realpathSync(state),
     worktrees: realpathSync(worktrees),
-    cleanup() { rmSync(root, { recursive: true, force: true }); },
+    sandbox,
+    cleanup() {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(sandbox, { recursive: true, force: true });
+    },
   };
 }
 
 export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> = {}): ControllerConfig {
   const base: ControllerConfig = {
-    version: 1,
+    version: 2,
     executionMode: "release-plan-v1-compatibility",
     repo: "example/project",
     localPath: repo.source,
@@ -96,15 +105,24 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
     worktreeRoot: repo.worktrees,
     baseRef: "main",
     remote: "origin",
+    remoteIdentity: {
+      version: 1,
+      fetchUrl: "https://github.com/example/project.git",
+      pushUrl: "https://github.com/example/project.git",
+    },
     branchPrefix: "agent/release",
     shell: "/bin/bash",
     codex: {
-      bin: "codex",
+      bin: resolve("node_modules/.bin/codex"),
       workerProfile: null,
       reviewerProfile: null,
       workerTimeoutMs: 300_000,
       reviewerTimeoutMs: 300_000,
       terminationGraceMs: 2_000,
+      maxEventBytes: 1024 * 1024,
+      maxStderrBytes: 1024 * 1024,
+      maxResultBytes: 256 * 1024,
+      maxAggregateBytes: 2 * 1024 * 1024,
       networkAccess: false,
     },
     validation: {
@@ -116,6 +134,16 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
         { command: "test -f issue-1.txt && test -f issue-2.txt" },
       ],
       maxOutputBytes: 64 * 1024,
+      maxStdoutBytes: 64 * 1024,
+      maxStderrBytes: 64 * 1024,
+      maxAggregateBytes: 96 * 1024,
+      sandbox: {
+        version: 1,
+        provider: "codex-permission-profile",
+        bin: testSandboxBin,
+        root: repo.sandbox,
+        environmentPath: [dirname(realpathSync(process.argv[0]!)), "/usr/bin", "/bin"],
+      },
     },
     policy: {
       maxIssueRepairRounds: 1,
@@ -148,6 +176,29 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
     }
   }
   return merged;
+}
+
+export class TestGitClient extends GitClient {
+  constructor(private readonly testControllerConfig: ControllerConfig) {
+    super(testControllerConfig);
+  }
+
+  override async preflight(): Promise<void> {}
+
+  override async fetchBase(): Promise<string> {
+    git(this.testControllerConfig.localPath, ["fetch", "--prune", this.testControllerConfig.remote, this.testControllerConfig.baseRef]);
+    return git(this.testControllerConfig.localPath, [
+      "rev-parse", `${this.testControllerConfig.remote}/${this.testControllerConfig.baseRef}^{commit}`,
+    ]);
+  }
+
+  override async push(job: JobState): Promise<void> {
+    git(job.worktreePath, ["push", "--no-verify", "--set-upstream", job.remote, job.branch]);
+  }
+
+  protected override async verifiedRemoteIdentity() {
+    return this.testControllerConfig.remoteIdentity ? configuredRemoteIdentity(this.testControllerConfig) : null;
+  }
 }
 
 export function testPlan(issueNumbers = [1, 2]): ReleasePlan {

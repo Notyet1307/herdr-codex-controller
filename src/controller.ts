@@ -184,6 +184,7 @@ export class ReleaseController {
     await this.deps.git.preflight();
     await this.deps.github.preflight();
     await this.deps.codex.preflight();
+    await this.deps.validator.preflight();
     const baseSha = job.baseSha ?? await this.deps.git.fetchBase();
     if (job.baseSha === null) {
       job = { ...job, baseSha };
@@ -240,6 +241,7 @@ export class ReleaseController {
     await this.deps.git.preflight();
     await this.deps.github.preflight();
     await this.deps.codex.preflight();
+    await this.deps.validator.preflight();
 
     const baseSha = await this.deps.git.fetchBase();
     if (baseSha !== plan.source.baseSha) {
@@ -651,7 +653,8 @@ export class ReleaseController {
     this.checkpointCodexRun(job, execution.record);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
     await this.assertIssueWorktreeContract(job, planIssue);
-    if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut) {
+    if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut
+      || execution.record.outputLimitExceeded) {
       this.deps.store.save(job);
       throw new ControllerError("codex_worker_failed", `Codex Worker failed for Issue #${issue.number}.`, execution.record.stderrPath);
     }
@@ -816,7 +819,8 @@ export class ReleaseController {
     this.checkpointCodexRun(job, execution.record, execution.reviewResult);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
     await this.assertValidationDidNotMutate(job, beforeDigest, "release review");
-    if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut || !execution.reviewResult) {
+    if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut
+      || execution.record.outputLimitExceeded || !execution.reviewResult) {
       throw new ControllerError("codex_review_failed", "Fresh release review did not produce a valid result.", execution.record.stderrPath);
     }
     const review = execution.reviewResult;
@@ -862,7 +866,8 @@ export class ReleaseController {
     this.checkpointCodexRun(job, execution.record);
     await this.deps.git.assertAgentDidNotCommit(job, baseHeadSha);
     await this.assertReleaseWorktreeContract(job);
-    if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut || !execution.workerResult) {
+    if (execution.record.exitCode !== 0 || execution.record.signal !== null || execution.record.timedOut
+      || execution.record.outputLimitExceeded || !execution.workerResult) {
       this.deps.store.save(job);
       throw new ControllerError("codex_hardening_failed", "Release hardening Worker did not complete successfully.", execution.record.stderrPath);
     }

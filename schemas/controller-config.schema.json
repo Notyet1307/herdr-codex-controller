@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Herdr Codex Controller Config v1",
+  "title": "Herdr Codex Controller Config v2 with explicit v1 compatibility",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "repo", "localPath", "stateDir", "worktreeRoot", "baseRef", "remote", "branchPrefix", "shell", "codex", "validation", "policy", "review", "delivery"],
   "properties": {
-    "version": { "const": 1 },
+    "version": { "enum": [1, 2] },
     "executionMode": {
       "enum": ["release-plan-v2-direct", "release-plan-v1-compatibility", "dispatcher-experimental"],
       "default": "release-plan-v2-direct",
@@ -17,6 +17,16 @@
     "worktreeRoot": { "type": "string", "minLength": 1 },
     "baseRef": { "type": "string", "minLength": 1 },
     "remote": { "type": "string", "minLength": 1 },
+    "remoteIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "fetchUrl", "pushUrl"],
+      "properties": {
+        "version": { "const": 1 },
+        "fetchUrl": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "pushUrl": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    },
     "branchPrefix": { "type": "string", "minLength": 1 },
     "shell": { "type": "string", "minLength": 1 },
     "codex": {
@@ -30,6 +40,10 @@
         "workerTimeoutMs": { "type": "integer", "minimum": 60000 },
         "reviewerTimeoutMs": { "type": "integer", "minimum": 60000 },
         "terminationGraceMs": { "type": "integer", "minimum": 1000 },
+        "maxEventBytes": { "type": "integer", "minimum": 4096, "maximum": 16777216 },
+        "maxStderrBytes": { "type": "integer", "minimum": 4096, "maximum": 16777216 },
+        "maxResultBytes": { "type": "integer", "minimum": 4096, "maximum": 4194304 },
+        "maxAggregateBytes": { "type": "integer", "minimum": 4096, "maximum": 33554432 },
         "networkAccess": { "const": false }
       }
     },
@@ -41,7 +55,28 @@
         "setup": { "$ref": "#/$defs/commands" },
         "issue": { "$ref": "#/$defs/commands" },
         "release": { "$ref": "#/$defs/commands" },
-        "maxOutputBytes": { "type": "integer", "minimum": 4096 }
+        "maxOutputBytes": { "type": "integer", "minimum": 4096, "maximum": 8388608 },
+        "maxStdoutBytes": { "type": "integer", "minimum": 4096, "maximum": 8388608 },
+        "maxStderrBytes": { "type": "integer", "minimum": 4096, "maximum": 8388608 },
+        "maxAggregateBytes": { "type": "integer", "minimum": 4096, "maximum": 16777216 },
+        "sandbox": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "provider", "bin", "root", "environmentPath"],
+          "properties": {
+            "version": { "const": 1 },
+            "provider": { "const": "codex-permission-profile" },
+            "bin": { "type": "string", "pattern": "^/" },
+            "root": { "type": "string", "pattern": "^/" },
+            "environmentPath": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 30,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^/" }
+            }
+          }
+        }
       }
     },
     "policy": {
@@ -93,6 +128,39 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "version": { "const": 1 } }, "required": ["version"] },
+      "then": {
+        "required": ["executionMode"],
+        "properties": {
+          "executionMode": { "enum": ["release-plan-v1-compatibility", "dispatcher-experimental"] },
+          "validation": {
+            "not": {
+              "anyOf": [
+                { "required": ["sandbox"] },
+                { "required": ["maxStdoutBytes"] },
+                { "required": ["maxStderrBytes"] },
+                { "required": ["maxAggregateBytes"] }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "version": { "const": 2 } }, "required": ["version"] },
+      "then": {
+        "required": ["remoteIdentity"],
+        "properties": {
+          "codex": {
+            "required": ["bin", "workerProfile", "reviewerProfile", "workerTimeoutMs", "reviewerTimeoutMs", "terminationGraceMs", "maxEventBytes", "maxStderrBytes", "maxResultBytes", "maxAggregateBytes", "networkAccess"]
+          },
+          "validation": {
+            "required": ["setup", "issue", "release", "maxOutputBytes", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes", "sandbox"]
+          }
+        }
+      }
+    },
+    {
       "if": {
         "anyOf": [
           { "required": ["executionMode"], "properties": { "executionMode": { "const": "release-plan-v2-direct" } } },
@@ -101,6 +169,13 @@
       },
       "then": {
         "properties": {
+          "codex": {
+            "properties": {
+              "bin": { "pattern": "^/" },
+              "workerProfile": { "const": null },
+              "reviewerProfile": { "const": null }
+            }
+          },
           "delivery": {
             "properties": {
               "createPullRequest": { "const": true },

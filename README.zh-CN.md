@@ -166,10 +166,13 @@ Dispatcher 则只能使用 `dispatcher-experimental`；两种 opt-in 都不会�
 - `localPath`
 - `stateDir`
 - `worktreeRoot`
+- `remoteIdentity.fetchUrl` / `remoteIdentity.pushUrl`（必须精确指向 `repo`）
+- `codex.bin` 与 `validation.sandbox.bin`（绝对路径）
+- `validation.sandbox.root`（必须位于 checkout/state/worktree、用户 HOME 和系统临时目录之外）
 - validation commands
 - Release Plan 中的 Issue 编号和验收标准
 
-`localPath`、`stateDir`、`worktreeRoot` 必须是互不重叠的绝对路径。
+`localPath`、`stateDir`、`worktreeRoot` 与 validation sandbox root 必须保持规定的隔离关系。旧 config v1 direct 不会被静默升级；它以 `production_config_migration_required` fail closed。v1 compatibility/Dispatcher 仍显式属于非生产路径。
 
 ## Release Plan v1 / v2
 
@@ -193,7 +196,7 @@ config/plan digest 的算法为：先验证并构造 Controller 返回的对象�
 
 `verifier.packageScript.definitionSha256` 对 `package.json` 中对应 npm script 的精确 UTF-8 字符串计算 SHA-256。verifier manifest digest 使用同一 canonical `digestJson`，preimage 不含自身 `digest` 字段，输出带 `sha256:` 前缀；`files` 必须按 path 字典序提供。
 
-Controller runtime identity 由三项组成：Controller checkout 的 40 位 `HEAD` commit；当前 checkout 每个 tracked regular file 的 path/mode/bytes/SHA-256 所形成的规范 manifest digest；实际 `dist/src/**/*.js`、`package.json`、`package-lock.json` 所形成的 build digest。Job provenance 再绑定 `executionMode`、config digest、Release Plan version/digest，并对完整对象 self-digest。`job.json` 以一次原子替换保存该 snapshot；每个 Controller step 都重新计算并比较，source/build/config/plan 任一漂移都会 fail closed。
+Controller runtime identity 绑定 checkout commit、tracked-source manifest 与实际 build digest。Job State v3 / provenance v2 还绑定 Codex executable bytes/version/路径摘要、固定的无 profile/MCP/hooks/额外 writable-root runtime policy、validation sandbox executable/policy，以及 exact GitHub fetch/push remote identity。公开 completion 只包含路径摘要，不泄露本机路径。每个 Controller step 都重新计算并比较；任一 source/build/runtime/sandbox/remote/config/plan 漂移都会 fail closed。
 
 v2 prepare 严格按以下顺序执行：
 
@@ -212,7 +215,7 @@ git preflight
 → implement
 ```
 
-每个 writing Worker 前后都会全局重新验证所有 Oracle data、verifier source/helper/schema 与 `package.json`；每张 Ticket 的 exact Oracle commands 必须在 commit 前执行，Validation Receipt v2 绑定 Issue/Oracle、timeout、candidate HEAD、worktree digest、process result 与 stdout/stderr digest/path。Release validation 再运行全部 Oracle。每个 Issue commit（包括 crash salvage）仍检查 exact write paths 与 file/changed-line budget；hardening 后也重验 verifier closure。任何偏离都进入不可 retry 的 `replan_required`。
+每个 writing Worker 前后都会全局重新验证所有 Oracle data、verifier source/helper/schema 与 `package.json`。权威验证不再在实现 Worktree 中执行：Controller 用临时 Git index 生成 exact tracked candidate + admitted uncommitted changes 的 disposable blob projection，排除 `.env`、`.npmrc`、node_modules、cache 和所有 ignored Worker state；隔离 HOME/TMP/cache、清空环境 allowlist、默认断网、禁止外部写入，并在命令后重验全部 candidate blob/mode。每条 validation command 使用独立 projection，不能把新建状态传给下一条；需要依赖的检查必须在同一 command 内先执行隔离安装，例如 `npm ci --ignore-scripts --no-audit --no-fund && npm test`。Validation Receipt v3 绑定 candidate tree/manifest、sandbox policy、命令身份、streaming byte limits/hash、termination reason 与 cleanup；cleanup 中断可在重启后幂等恢复。
 
 `plan_base_drift`、`plan_parent_not_open`、`plan_parent_drift`、`plan_issue_not_open`、`plan_issue_drift` 都发生在 Worktree、setup 和 Codex run 之前。Controller 不自动更新漂移的 Plan；应停止旧 Job，回到 Planner 生成并批准新的 v2 Plan。
 

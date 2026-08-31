@@ -12,6 +12,7 @@ import type {
   JobCompletionEvidence,
   JobState,
   ReleaseCompletionV1,
+  ReleaseCompletionV2,
   ReviewResult,
   ValidationReceipt,
 } from "./types.js";
@@ -65,7 +66,7 @@ export async function exportReleaseCompletion(input: {
   github: GitHubPort;
   jobId: string;
   outputPath: string;
-}): Promise<ReleaseCompletionV1> {
+}): Promise<ReleaseCompletionV2> {
   const job = input.store.load(input.jobId);
   if (job.status !== "completed" || job.phase !== "complete" || !job.completion) {
     throw new ControllerError("completion_export_not_completed", "The Job has no verified merged completion checkpoint.");
@@ -126,7 +127,7 @@ export async function exportReleaseCompletion(input: {
   }
 
   const body = {
-    schema: "herdr-codex-controller:release-completion:v1" as const,
+    schema: "herdr-codex-controller:release-completion:v2" as const,
     releaseId: job.id,
     repo: job.repo,
     baseRef: job.baseRef,
@@ -143,7 +144,7 @@ export async function exportReleaseCompletion(input: {
     controllerProvenance: job.provenance,
     completedAt: job.completion.completedAt,
   };
-  const artifact: ReleaseCompletionV1 = { ...body, digest: `sha256:${digestJson(body)}` };
+  const artifact: ReleaseCompletionV2 = { ...body, digest: `sha256:${digestJson(body)}` };
   assertReleaseCompletion(artifact);
   const output = resolve(input.outputPath);
   if (pathWithin(config.stateDir, output)) {
@@ -161,7 +162,7 @@ export async function exportReleaseCompletion(input: {
   return artifact;
 }
 
-export function assertReleaseCompletion(value: ReleaseCompletionV1): void {
+export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseCompletionV2): void {
   const object = recordOrNull(value);
   const pullRequest = recordOrNull(value?.pullRequest);
   const provenance = recordOrNull(value?.controllerProvenance);
@@ -177,7 +178,9 @@ export function assertReleaseCompletion(value: ReleaseCompletionV1): void {
     "issueCommits", "mergedMainSha", "planDigest", "pullRequest", "releaseId", "releaseValidationDigest",
     "repo", "requiredChecks", "reviewResultDigest", "schema", "sourceBaseSha",
   ];
-  if (!exactKeys(object, keys) || value.schema !== "herdr-codex-controller:release-completion:v1"
+  if (!exactKeys(object, keys)
+    || (value.schema !== "herdr-codex-controller:release-completion:v1"
+      && value.schema !== "herdr-codex-controller:release-completion:v2")
     || typeof value.releaseId !== "string" || !/^[a-z0-9._-]{1,80}$/.test(value.releaseId)
     || typeof value.repo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repo)
     || typeof value.baseRef !== "string" || value.baseRef.length < 1 || value.baseRef.length > 300
@@ -201,12 +204,18 @@ export function assertReleaseCompletion(value: ReleaseCompletionV1): void {
     || value.dependencyHandoffDigests.length > 100
     || new Set(value.dependencyHandoffDigests).size !== value.dependencyHandoffDigests.length
     || value.dependencyHandoffDigests.some((digest) => typeof digest !== "string" || !DIGEST.test(digest))
-    || !exactKeys(provenance, ["configDigest", "controller", "digest", "executionMode", "releasePlan", "version"])
+    || (value.controllerProvenance.version === 1
+      ? !exactKeys(provenance, ["configDigest", "controller", "digest", "executionMode", "releasePlan", "version"])
+      : !exactKeys(provenance, ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "remoteIdentity", "releasePlan", "validationSandbox", "version"]))
     || !exactKeys(controller, ["buildDigest", "digest", "sourceManifestDigest", "sourceRevision", "version"])
     || !exactKeys(releasePlan, ["digest", "version"])
     || value.controllerProvenance.executionMode !== "release-plan-v2-direct"
     || value.controllerProvenance.releasePlan.version !== 2) {
     throw new ControllerError("completion_export_artifact_invalid", "Release completion artifact is invalid.");
+  }
+  if ((value.schema === "herdr-codex-controller:release-completion:v1" && value.controllerProvenance.version !== 1)
+    || (value.schema === "herdr-codex-controller:release-completion:v2" && value.controllerProvenance.version !== 2)) {
+    throw new ControllerError("completion_export_artifact_invalid", "Release completion schema and provenance versions differ.");
   }
   if (!exactKeys(pullRequest, ["baseRef", "headRef", "headSha", "mergeSha", "mergedAt", "number"])
     || !Number.isSafeInteger(value.pullRequest.number) || value.pullRequest.number < 1
@@ -260,7 +269,7 @@ function privateCompletionProof(job: JobState, config: ControllerConfig, jobRoot
   ));
   if (!run || !job.lastReviewPath || !pathWithin(jobRoot, job.lastReviewPath)
     || run.baseHeadSha !== job.candidateSha || run.finalHeadSha !== job.candidateSha
-    || run.exitCode !== 0 || run.signal !== null || run.timedOut || !run.resultDigest) {
+    || run.exitCode !== 0 || run.signal !== null || run.timedOut || run.outputLimitExceeded || !run.resultDigest) {
     throw new ControllerError("completion_export_review_missing", "No exact successful aggregate review is bound to completion.");
   }
   let review: ReviewResult;
