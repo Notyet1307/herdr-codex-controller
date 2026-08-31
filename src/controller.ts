@@ -4,6 +4,7 @@ import type {
   CodexRunRecord,
   CommandConfig,
   GhCheckSummary,
+  GhCheckObservation,
   IssueSnapshot,
   IssueExecution,
   JobState,
@@ -17,7 +18,7 @@ import type {
 } from "./types.js";
 import type { CodexPort, GitHubPort, GitPort, ValidationPort } from "./ports.js";
 import { ControllerError, asControllerError } from "./errors.js";
-import { createCompletionEvidence } from "./completion-export.js";
+import { createCompletionEvidence, createPublicCompletionCheckpoint, readCanonicalCandidateProof } from "./completion-export.js";
 import { unknownRiskClasses } from "./risk-classes.js";
 import { CommandInterruptedError } from "./command.js";
 import { JobStore, blockJob, currentIssue, nextPendingIssue } from "./state.js";
@@ -30,6 +31,7 @@ import {
   validatePlan,
 } from "./plan.js";
 import { assertValidationReceipt } from "./validator.js";
+import { requiredCheckContract, requiredCheckNames } from "./config.js";
 import {
   renderIssueWorkerPrompt,
   renderReleaseHardeningPrompt,
@@ -85,10 +87,32 @@ export class ReleaseController {
       const classified = asControllerError(error, `phase_${job.phase}_failed`);
       // Reload the latest durable state so an error cannot overwrite a checkpoint saved earlier in this step.
       try { job = this.deps.store.load(jobId); } catch {}
+      if (job.deliveryAuthority && job.pullRequest && job.pullRequest.state === "OPEN") {
+        try {
+          job = await this.revokeDeliveryAuthority(job, `${classified.code}: ${classified.message}`);
+        } catch (revocationError) {
+          const revocation = asControllerError(revocationError, "delivery_authority_revocation_failed");
+          job = blockJob(this.deps.store.load(jobId), revocation.code, revocation.message, revocation.detailsPath);
+          this.deps.store.save(job);
+          return stepResult("blocked", true, true, null, `${job.blocked!.code}: ${job.blocked!.message}`);
+        }
+      }
       job = blockJob(job, classified.code, classified.message, classified.detailsPath);
       this.deps.store.save(job);
       return stepResult("blocked", true, true, null, `${job.blocked!.code}: ${job.blocked!.message}`);
     }
+  }
+
+  async abort(jobId: string, reason: string): Promise<JobState> {
+    let job = this.deps.store.load(jobId);
+    if (job.activeRun) throw new Error("cannot abort while an active Codex run is recorded; first reconcile it with step");
+    if (job.deliveryAuthority && job.pullRequest && job.pullRequest.state === "OPEN") {
+      job = await this.revokeDeliveryAuthority(job, `operator_abort: ${reason}`);
+    }
+    job.status = "failed";
+    job.blocked = null;
+    this.deps.store.save(job);
+    return job;
   }
 
   private assertCurrentInputs(job: JobState): void {
@@ -902,6 +926,9 @@ export class ReleaseController {
     if (!job.candidateSha || await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
       throw new ControllerError("delivery_candidate_drift", "Delivery requires the exact clean reviewed candidate.");
     }
+    const production = this.deps.store.config.executionMode === "release-plan-v2-direct";
+    const proof = production ? readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id)) : null;
+    await this.assertSourceStillCurrent(job, "delivery push");
     if (!this.deps.store.config.delivery.createPullRequest) {
       job.phase = "complete";
       job.status = "completed";
@@ -910,12 +937,29 @@ export class ReleaseController {
     }
     await this.deps.git.push(job);
     await this.assertSourceStillCurrent(job, "pull request creation");
+    if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
+      throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before pull request creation.");
+    }
+    if (production) readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
     const pullRequest = await this.deps.github.createPullRequest(job, this.deps.store.deliveryRoot(job.id));
     assertPullRequestIdentity(job, pullRequest);
     if (pullRequest.state !== "OPEN") {
       throw new ControllerError("pull_request_identity_mismatch", "Delivery requires an OPEN pull request for the exact candidate.");
     }
     job.pullRequest = pullRequest;
+    job.ciGate = null;
+    job.deliveryAuthority = proof ? {
+      version: 1,
+      pullRequest,
+      candidateSha: job.candidateSha,
+      proofDigest: digestJson(proof),
+      status: "pending",
+      autoMergeEnabled: false,
+      quarantined: false,
+      lastVerifiedAt: nowIso(),
+      revocationReason: null,
+      error: null,
+    } : null;
     job.phase = "ci";
     job.status = "running";
     this.deps.store.save(job);
@@ -937,14 +981,16 @@ export class ReleaseController {
     if (observed.pullRequest.state === "CLOSED") throw new ControllerError("pull_request_closed", "The release pull request was closed without merge.");
     if (observed.pullRequest.state !== "OPEN") throw new ControllerError("pull_request_identity_mismatch", "Observed pull request state is invalid.");
     await this.assertSourceStillCurrent(job, "CI observation");
-    const required = requiredCheckProblems(observed.checks, this.deps.store.config.delivery.requiredChecks);
+    if (requiredCheckContract(this.deps.store.config)) {
+      return this.observeContractCi(job, observed.checks);
+    }
+    const required = requiredCheckProblems(observed.checks, requiredCheckNames(this.deps.store.config));
     if (required.failures.length > 0) {
-      if (job.ciRepairRounds >= this.deps.store.config.policy.maxCiRepairRounds) {
+      if (job.ciRepairRounds >= (this.deps.store.config.policy.maxCiRepairRounds ?? 0)) {
         const path = this.writeReason(job, "required-check-failure", JSON.stringify(observed.checks, null, 2));
         this.deps.store.save(job);
         throw new ControllerError("required_check_failed", "A required pull request check failed.", path);
       }
-      job.ciRepairRounds += 1;
       return this.scheduleHardening(job, "required-check-failure", JSON.stringify(observed.checks, null, 2), null);
     }
     if (required.missing.length > 0) {
@@ -956,12 +1002,11 @@ export class ReleaseController {
       return stepResult("required_check_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${required.pending.map(({ name }) => name).join(", ")}.`);
     }
     if (observed.checks.state === "failure") {
-      if (job.ciRepairRounds >= this.deps.store.config.policy.maxCiRepairRounds) {
+      if (job.ciRepairRounds >= (this.deps.store.config.policy.maxCiRepairRounds ?? 0)) {
         const path = this.writeReason(job, "ci-failure", JSON.stringify(observed.checks, null, 2));
         this.deps.store.save(job);
         throw new ControllerError("ci_failed", "Pull request checks failed after the allowed CI repair rounds.", path);
       }
-      job.ciRepairRounds += 1;
       return this.scheduleHardening(job, "ci-failure", JSON.stringify(observed.checks, null, 2), null);
     }
     if (observed.checks.state === "pending" || (observed.checks.state === "none" && !this.deps.store.config.delivery.allowNoChecks)) {
@@ -976,6 +1021,9 @@ export class ReleaseController {
         );
       }
       await this.assertSourceStillCurrent(job, "auto-merge enablement");
+      if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
+        throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before auto-merge authorization.");
+      }
       await this.deps.github.enableAutoMerge(job.pullRequest.number, job.candidateSha);
       job.status = "running";
     } else {
@@ -993,6 +1041,111 @@ export class ReleaseController {
     );
   }
 
+  private async observeContractCi(job: JobState, checks: GhCheckSummary): Promise<StepResult> {
+    const contract = requiredCheckContract(this.deps.store.config);
+    if (!contract || !job.candidateSha || !job.pullRequest) throw new ControllerError("ci_contract_missing", "Production CI has no exact check contract or candidate identity.");
+    const now = nowIso();
+    const contractDigest = digestJson(contract);
+    if (!job.ciGate || job.ciGate.candidateSha !== job.candidateSha || job.ciGate.checkContractDigest !== contractDigest) {
+      job.ciGate = {
+        version: 1,
+        candidateSha: job.candidateSha,
+        checkContractDigest: contractDigest,
+        firstObservedAt: now,
+        firstAppearanceDeadlineAt: addMilliseconds(now, contract.firstAppearanceTimeoutMs),
+        pendingDeadlineAt: null,
+        postMergeDeadlineAt: null,
+        attempts: 0,
+        lastObservation: null,
+      };
+    }
+    job.ciGate.attempts += 1;
+    job.ciGate.lastObservation = checks;
+    this.deps.store.save(job);
+
+    if ((checks.ambiguous ?? []).length > 0) {
+      const path = this.writeCiObservation(job, "ambiguous", checks);
+      throw new ControllerError("required_check_identity_ambiguous", "Required check identity is ambiguous.", path);
+    }
+
+    const observations = checks.observations ?? [];
+    const failed = checks.failures.flatMap(({ name }) => observations.filter((entry) => entry.name === name));
+    const infrastructure = failed.filter((entry) => isInfrastructureConclusion(entry.conclusion));
+    const codeFailures = failed.filter((entry) => isCodeConclusion(entry.conclusion));
+    const configuration = failed.filter((entry) => !isInfrastructureConclusion(entry.conclusion) && !isCodeConclusion(entry.conclusion));
+    if (configuration.length > 0) {
+      const path = this.writeCiObservation(job, "configuration", checks);
+      throw new ControllerError("required_check_configuration_invalid", "A required check produced a non-accepted conclusion that is not code-repairable.", path);
+    }
+    if (infrastructure.length > 0) {
+      const maximum = this.deps.store.config.policy.maxCiInfrastructureReruns ?? 0;
+      if (job.ciInfrastructureReruns >= maximum) {
+        const path = this.writeCiObservation(job, "infrastructure-exhausted", checks);
+        throw new ControllerError("ci_infrastructure_exhausted", "Required check infrastructure retries are exhausted.", path);
+      }
+      job.ciInfrastructureReruns += 1;
+      this.deps.store.save(job);
+      try {
+        for (const check of infrastructure) await this.deps.github.rerunCheck(check, job.candidateSha);
+      } catch {
+        const path = this.writeCiObservation(job, "infrastructure-evidence-insufficient", checks);
+        throw new ControllerError("ci_infrastructure_evidence_insufficient", "The exact infrastructure run could not be safely rerun.", path);
+      }
+      return stepResult("ci_infrastructure_rerun", true, false, this.deps.store.config.delivery.pollIntervalMs, "Required check infrastructure rerun requested without changing code.");
+    }
+    if (codeFailures.length > 0) {
+      const maximum = this.deps.store.config.policy.maxCiCodeRepairRounds ?? 0;
+      if (job.ciCodeRepairRounds >= maximum) {
+        const path = this.writeCiObservation(job, "code-repair-exhausted", checks);
+        throw new ControllerError("ci_code_repair_exhausted", "Required check code repair rounds are exhausted.", path);
+      }
+      let evidence;
+      try {
+        evidence = await Promise.all(codeFailures.map((check) => this.deps.github.fetchCheckFailureEvidence(check, job.candidateSha!)));
+      } catch {
+        const path = this.writeCiObservation(job, "code-evidence-insufficient", checks);
+        throw new ControllerError("ci_code_evidence_insufficient", "Exact bounded failing check evidence is unavailable; code hardening is forbidden.", path);
+      }
+      const evidencePath = join(this.deps.store.root(job.id), `ci-code-evidence-${String(job.ciGate.attempts).padStart(3, "0")}.json`);
+      writeJsonAtomic(evidencePath, { version: 1, candidateSha: job.candidateSha, contractDigest, evidence });
+      job = await this.revokeDeliveryAuthority(job, "ci_code_repair");
+      job.pullRequest = null;
+      job.ciGate = null;
+      this.deps.store.save(job);
+      return this.scheduleHardening(job, "ci-code", JSON.stringify(evidence, null, 2), evidencePath);
+    }
+    if (checks.missing.length > 0) {
+      if (deadlineExpired(job.ciGate.firstAppearanceDeadlineAt, now)) {
+        const path = this.writeCiObservation(job, "missing-deadline", checks);
+        throw new ControllerError("required_check_missing_deadline", "Required checks did not appear before the durable deadline.", path);
+      }
+      return stepResult("required_check_missing", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${checks.missing.join(", ")}.`);
+    }
+    if (checks.pending.length > 0) {
+      job.ciGate.pendingDeadlineAt ??= addMilliseconds(now, contract.pendingTimeoutMs);
+      this.deps.store.save(job);
+      if (deadlineExpired(job.ciGate.pendingDeadlineAt, now)) {
+        const path = this.writeCiObservation(job, "pending-deadline", checks);
+        throw new ControllerError("required_check_pending_deadline", "Required checks did not finish before the durable deadline.", path);
+      }
+      return stepResult("required_check_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${checks.pending.map(({ name }) => name).join(", ")}.`);
+    }
+
+    const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    if (!(await this.deps.github.baseAllowsUpToDateAutoMerge())) {
+      throw new ControllerError("base_up_to_date_policy_unverified", "Controller auto-merge requires strict server-side latest-base and required-check policy.");
+    }
+    await this.assertSourceStillCurrent(job, "auto-merge authorization");
+    if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
+      throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before auto-merge authorization.");
+    }
+    job = await this.authorizeDelivery(job, digestJson(proof));
+    job.status = "running";
+    job.phase = "awaiting_merge";
+    this.deps.store.save(job);
+    return stepResult("auto_merge_enabled", true, false, this.deps.store.config.delivery.pollIntervalMs, "Required checks passed; exact-head Controller auto-merge is authorized.");
+  }
+
   private async observeMerge(job: JobState): Promise<StepResult> {
     if (!job.pullRequest || !job.candidateSha) throw new ControllerError("merge_identity_missing", "Merge observation has no bound PR or candidate SHA.");
     const observed = await this.deps.github.inspectPullRequest(job.pullRequest.number);
@@ -1008,6 +1161,9 @@ export class ReleaseController {
     if (observed.pullRequest.state === "CLOSED") throw new ControllerError("pull_request_closed", "The release pull request was closed without merge.");
     if (observed.pullRequest.state !== "OPEN") throw new ControllerError("pull_request_identity_mismatch", "Observed pull request state is invalid.");
     await this.assertSourceStillCurrent(job, "merge observation");
+    if (this.deps.store.config.executionMode === "release-plan-v2-direct") {
+      readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    }
     job.status = this.deps.store.config.delivery.autoMerge ? "running" : "ready_to_merge";
     this.deps.store.save(job);
     return stepResult("awaiting_merge", false, !this.deps.store.config.delivery.autoMerge, this.deps.store.config.delivery.autoMerge ? this.deps.store.config.delivery.pollIntervalMs : null, "Waiting for the exact candidate PR to merge.");
@@ -1017,7 +1173,50 @@ export class ReleaseController {
     if (!job.pullRequest || job.pullRequest.state !== "MERGED") {
       throw new ControllerError("merged_candidate_mismatch", "GitHub merge state is inconsistent with the observed pull request.");
     }
-    const required = requiredCheckProblems(checks, this.deps.store.config.delivery.requiredChecks);
+    const contract = requiredCheckContract(this.deps.store.config);
+    if (contract) {
+      if (!job.deliveryAuthority
+        || !["authorizing", "authorized"].includes(job.deliveryAuthority.status)
+        || job.deliveryAuthority.candidateSha !== job.candidateSha) {
+        throw new ControllerError("merged_without_controller_authority", "The candidate merged without a valid Controller-owned authority checkpoint.");
+      }
+      const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+      if (job.deliveryAuthority.proofDigest !== digestJson(proof)) {
+        throw new ControllerError("merged_without_controller_authority", "The candidate merged without a valid Controller-owned authority checkpoint.");
+      }
+      const now = nowIso();
+      const contractDigest = digestJson(contract);
+      job.ciGate ??= {
+        version: 1,
+        candidateSha: job.candidateSha!,
+        checkContractDigest: contractDigest,
+        firstObservedAt: now,
+        firstAppearanceDeadlineAt: addMilliseconds(now, contract.firstAppearanceTimeoutMs),
+        pendingDeadlineAt: null,
+        postMergeDeadlineAt: addMilliseconds(now, contract.postMergeTimeoutMs),
+        attempts: 0,
+        lastObservation: null,
+      };
+      if (job.ciGate.candidateSha !== job.candidateSha || job.ciGate.checkContractDigest !== contractDigest) {
+        throw new ControllerError("ci_contract_drift", "Merged check evidence does not match the candidate-bound contract.");
+      }
+      job.ciGate.attempts += 1;
+      job.ciGate.lastObservation = checks;
+      job.ciGate.postMergeDeadlineAt ??= addMilliseconds(now, contract.postMergeTimeoutMs);
+      this.deps.store.save(job);
+      if ((checks.ambiguous ?? []).length > 0 || checks.failures.length > 0) {
+        const path = this.writeCiObservation(job, "post-merge-invalid", checks);
+        throw new ControllerError("post_merge_required_check_invalid", "Merged required check evidence is ambiguous or failed.", path);
+      }
+      if (checks.missing.length > 0 || checks.pending.length > 0) {
+        if (deadlineExpired(job.ciGate.postMergeDeadlineAt, now)) {
+          const path = this.writeCiObservation(job, "post-merge-deadline", checks);
+          throw new ControllerError("post_merge_check_deadline", "Merged required check evidence did not complete before the durable deadline.", path);
+        }
+        return stepResult("post_merge_checks_pending", true, false, this.deps.store.config.delivery.pollIntervalMs, "Merged candidate is waiting for exact required check evidence.");
+      }
+    }
+    const required = requiredCheckProblems(checks, requiredCheckNames(this.deps.store.config));
     if (required.failures.length > 0) {
       throw new ControllerError("required_check_failed", "A merged pull request has a failed required check.");
     }
@@ -1069,6 +1268,15 @@ export class ReleaseController {
     if (isReleasePlanV2(job.plan)
       && this.deps.store.config.executionMode === "release-plan-v2-direct"
       && this.deps.store.config.review.enabled) {
+      if (job.deliveryAuthority) {
+        job.deliveryAuthority = {
+          ...job.deliveryAuthority,
+          pullRequest: job.pullRequest,
+          status: "consumed",
+          autoMergeEnabled: false,
+          lastVerifiedAt: nowIso(),
+        };
+      }
       job.completion = createCompletionEvidence({
         job,
         config: this.deps.store.config,
@@ -1076,6 +1284,13 @@ export class ReleaseController {
         mergedAt,
         mergedMainSha: job.pullRequest.mergeSha,
       });
+      if (job.provenance.version === 3) {
+        job.publicCompletion = createPublicCompletionCheckpoint({
+          job,
+          config: this.deps.store.config,
+          jobRoot: this.deps.store.root(job.id),
+        });
+      }
     }
     job.status = "completed";
     job.phase = "complete";
@@ -1098,19 +1313,125 @@ export class ReleaseController {
     this.deps.store.save(job);
   }
 
+  private async authorizeDelivery(job: JobState, proofDigest: string): Promise<JobState> {
+    if (!job.pullRequest || !job.candidateSha || !job.deliveryAuthority
+      || job.deliveryAuthority.candidateSha !== job.candidateSha
+      || job.deliveryAuthority.proofDigest !== proofDigest) {
+      throw new ControllerError("delivery_authority_identity_invalid", "Merge authority does not bind the exact candidate proof.");
+    }
+    job.deliveryAuthority.status = "authorizing";
+    job.deliveryAuthority.lastVerifiedAt = nowIso();
+    this.deps.store.save(job);
+    let observed = await this.deps.github.inspectPullRequest(job.pullRequest.number);
+    assertPullRequestIdentity(job, observed.pullRequest, job.pullRequest.number);
+    if (observed.pullRequest.state !== "OPEN") throw new ControllerError("delivery_authority_identity_invalid", "Only the exact OPEN candidate can receive merge authority.");
+    if (!observed.autoMergeEnabled) {
+      await this.deps.github.enableAutoMerge(job.pullRequest.number, job.candidateSha);
+      observed = await this.deps.github.inspectPullRequest(job.pullRequest.number);
+      assertPullRequestIdentity(job, observed.pullRequest, job.pullRequest.number);
+    }
+    if (!observed.autoMergeEnabled || observed.pullRequest.state !== "OPEN") {
+      throw new ControllerError("delivery_authority_enable_unverified", "GitHub did not read back exact-head auto-merge authority.");
+    }
+    job.pullRequest = observed.pullRequest;
+    job.deliveryAuthority = {
+      ...job.deliveryAuthority,
+      pullRequest: observed.pullRequest,
+      status: "authorized",
+      autoMergeEnabled: true,
+      quarantined: false,
+      lastVerifiedAt: nowIso(),
+      revocationReason: null,
+      error: null,
+    };
+    this.deps.store.save(job);
+    return job;
+  }
+
+  private async revokeDeliveryAuthority(job: JobState, reason: string): Promise<JobState> {
+    if (!job.pullRequest || !job.candidateSha || job.pullRequest.state !== "OPEN") return job;
+    const authority = job.deliveryAuthority ?? {
+      version: 1 as const,
+      pullRequest: job.pullRequest,
+      candidateSha: job.candidateSha,
+      proofDigest: digestJson({ candidateSha: job.candidateSha, pullRequest: job.pullRequest }),
+      status: "pending" as const,
+      autoMergeEnabled: false,
+      quarantined: false,
+      lastVerifiedAt: nowIso(),
+      revocationReason: null,
+      error: null,
+    };
+    job.deliveryAuthority = { ...authority, status: "revocation_required", revocationReason: reason, error: null };
+    this.deps.store.save(job);
+    try {
+      let observed = await this.deps.github.inspectPullRequest(job.pullRequest.number);
+      assertPullRequestIdentity(job, observed.pullRequest, job.pullRequest.number, "delivery_authority_identity_invalid");
+      if (observed.pullRequest.state === "MERGED") throw new Error("the candidate merged before authority revocation completed");
+      if (observed.autoMergeEnabled) {
+        await this.deps.github.disableAutoMerge(job.pullRequest.number, job.candidateSha);
+        observed = await this.deps.github.inspectPullRequest(job.pullRequest.number);
+        assertPullRequestIdentity(job, observed.pullRequest, job.pullRequest.number, "delivery_authority_identity_invalid");
+        if (observed.autoMergeEnabled) throw new Error("auto-merge remains enabled");
+      }
+      job.pullRequest = observed.pullRequest;
+      job.deliveryAuthority = { ...job.deliveryAuthority, pullRequest: observed.pullRequest, autoMergeEnabled: false, lastVerifiedAt: nowIso() };
+      this.deps.store.save(job);
+      await this.deps.git.quarantineRemoteBranch(job, job.candidateSha);
+      job.deliveryAuthority = {
+        ...job.deliveryAuthority,
+        status: "revoked",
+        autoMergeEnabled: false,
+        quarantined: true,
+        lastVerifiedAt: nowIso(),
+        error: null,
+      };
+      this.deps.store.save(job);
+      return job;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      job.deliveryAuthority = { ...job.deliveryAuthority, status: "revocation_failed", error: message.slice(0, 4_000), lastVerifiedAt: nowIso() };
+      this.deps.store.save(job);
+      throw new ControllerError("delivery_authority_revocation_failed", `Merge authority could not be safely revoked: ${message}`);
+    }
+  }
+
+  private writeCiObservation(job: JobState, kind: string, checks: GhCheckSummary): string {
+    const path = join(this.deps.store.root(job.id), `ci-${String(job.ciGate?.attempts ?? 0).padStart(3, "0")}-${kind}.json`);
+    writeJsonAtomic(path, { version: 1, candidateSha: job.candidateSha, ciGate: job.ciGate, checks });
+    return path;
+  }
+
   private scheduleHardening(
     job: JobState,
     kind: string,
     evidence: string,
     detailsPath: string | null,
   ): StepResult {
-    if (job.hardeningRounds >= this.deps.store.config.policy.maxReleaseHardeningRounds) {
-      const code = "release_hardening_exhausted";
+    const policy = this.deps.store.config.policy;
+    const category = kind === "release-validation" ? "validation"
+      : kind === "release-review" ? "review"
+        : kind === "ci-code" ? "ci"
+          : "legacy-ci";
+    const used = category === "validation" ? job.releaseValidationRepairRounds
+      : category === "review" ? job.reviewRepairRounds
+        : category === "ci" ? job.ciCodeRepairRounds
+          : job.ciRepairRounds;
+    const maximum = category === "validation" ? (policy.maxReleaseValidationRepairRounds ?? policy.maxReleaseHardeningRounds ?? 0)
+      : category === "review" ? (policy.maxReviewRepairRounds ?? policy.maxReleaseHardeningRounds ?? 0)
+        : category === "ci" ? (policy.maxCiCodeRepairRounds ?? policy.maxCiRepairRounds ?? 0)
+          : (policy.maxCiRepairRounds ?? 0);
+    if (used >= maximum) {
+      const code = category === "ci" || category === "legacy-ci" ? "ci_code_repair_exhausted" : "release_hardening_exhausted";
       const message = "Release requires another hardening round beyond the configured limit.";
       const blocked = blockJob(job, code, message, detailsPath);
       this.deps.store.save(blocked);
       return stepResult("blocked", true, true, null, `${blocked.blocked!.code}: ${blocked.blocked!.message}`);
     }
+    if (category === "validation") job.releaseValidationRepairRounds += 1;
+    else if (category === "review") job.reviewRepairRounds += 1;
+    else if (category === "ci") job.ciCodeRepairRounds += 1;
+    else if (category === "legacy-ci") job.ciRepairRounds += 1;
     job.hardeningRounds += 1;
     job.hardeningReasonPath = this.writeReason(job, kind, evidence);
     job.phase = "harden";
@@ -1271,6 +1592,22 @@ function expectedPathMatches(pattern: string, path: string): boolean {
   if (pattern.split("/", 1)[0]?.includes("*")) return false;
   const source = pattern.split("*").map((part) => part.replace(/[|\\{}()[\]^$+?.]/gu, "\\$&")).join("[^/]*");
   return new RegExp(`^${source}$`, "u").test(path);
+}
+
+function addMilliseconds(value: string, milliseconds: number): string {
+  return new Date(Date.parse(value) + milliseconds).toISOString();
+}
+
+function deadlineExpired(deadline: string, now: string): boolean {
+  return Date.parse(now) >= Date.parse(deadline);
+}
+
+function isInfrastructureConclusion(value: string): boolean {
+  return ["ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "STALE"].includes(value);
+}
+
+function isCodeConclusion(value: string): boolean {
+  return value === "FAILURE" || value === "ACTION_REQUIRED";
 }
 
 function renderValidationFailure(receipt: ValidationReceipt): string {

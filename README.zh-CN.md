@@ -187,6 +187,8 @@ Dispatcher 则只能使用 `dispatcher-experimental`；两种 opt-in 都不会�
 schemas/release-plan-v1.schema.json
 schemas/release-plan-v2.schema.json
 schemas/release-plan.schema.json       # oneOf(v1, v2)
+schemas/release-completion-v3.schema.json
+schemas/controller-identity-history-v1.schema.json
 schemas/dispatcher-config.schema.json  # experimental Dispatcher policy
 ```
 
@@ -196,7 +198,7 @@ config/plan digest 的算法为：先验证并构造 Controller 返回的对象�
 
 `verifier.packageScript.definitionSha256` 对 `package.json` 中对应 npm script 的精确 UTF-8 字符串计算 SHA-256。verifier manifest digest 使用同一 canonical `digestJson`，preimage 不含自身 `digest` 字段，输出带 `sha256:` 前缀；`files` 必须按 path 字典序提供。
 
-Controller runtime identity 绑定 checkout commit、tracked-source manifest 与实际 build digest。Job State v3 / provenance v2 还绑定 Codex executable bytes/version/路径摘要、固定的无 profile/MCP/hooks/额外 writable-root runtime policy、validation sandbox executable/policy，以及 exact GitHub fetch/push remote identity。公开 completion 只包含路径摘要，不泄露本机路径。每个 Controller step 都重新计算并比较；任一 source/build/runtime/sandbox/remote/config/plan 漂移都会 fail closed。
+Controller runtime identity 绑定 checkout commit、tracked-source manifest 与实际 build digest。生产 direct 使用 config v3、Job State v4 与 provenance v3：除 Codex/sandbox/remote 外，还绑定 app-bound required-check contract、merge-authority policy 与 identity-history digest。生产不存在 manual `ready_to_merge` 权限；source/config/provenance 漂移或 abort 会 disable auto-merge，并只用 expected-head force-with-lease 删除 Controller 自有远端分支，head 已变化时绝不 mutation。公开 completion v3 在 verified merge 时固化；历史 v2 只有在 append-only registry 中 exact qualified 且未撤销时才能重新发布。
 
 v2 prepare 严格按以下顺序执行：
 

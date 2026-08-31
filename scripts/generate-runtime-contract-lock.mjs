@@ -7,8 +7,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lockPath = resolve(root, "contracts/runtime-contract-lock.json");
 const previous = JSON.parse(readFileSync(lockPath, "utf8"));
 const artifactPaths = [
+  "contracts/controller-identity-history.json",
   "contracts/risk-class-registry.json",
-  "schemas/release-completion-v2.schema.json",
+  "schemas/controller-config.schema.json",
+  "schemas/controller-identity-history-v1.schema.json",
+  "schemas/release-completion-v3.schema.json",
   "schemas/release-plan-v2.schema.json",
 ];
 const artifacts = artifactPaths.map((path) => ({ path, sha256: sha256(readFileSync(resolve(root, path))) }));
@@ -19,7 +22,7 @@ const body = {
     repository: previous.plannerRiskRegistry.repository,
     commit: previous.plannerRiskRegistry.commit,
     path: "contracts/risk-class-registry.json",
-    byteSha256: artifacts[0].sha256,
+    byteSha256: artifacts.find(({ path }) => path === "contracts/risk-class-registry.json").sha256,
     artifactDigest: riskRegistry.digest,
   },
   artifacts,

@@ -13,6 +13,8 @@ import type {
   RepositoryFileSnapshot,
   ValidationCommandConfig,
   GitRemoteIdentity,
+  GhCheckObservation,
+  CiFailureEvidence,
   ValidationProjectionEntry,
 } from "./types.js";
 
@@ -65,6 +67,7 @@ export interface GitPort {
   diffStats(job: JobState): Promise<{ files: number; changedLines: number; summary: string; entries: Array<{ path: string; changedLines: number; binary: boolean }> }>;
   diffText(job: JobState, maximumBytes: number): Promise<string>;
   push(job: JobState): Promise<void>;
+  quarantineRemoteBranch(job: JobState, candidateSha: string): Promise<void>;
   removeWorktree(job: JobState): Promise<void>;
 }
 
@@ -77,9 +80,13 @@ export interface GitHubPort {
     pullRequest: PullRequestState;
     checks: GhCheckSummary;
     mergedAt: string | null;
+    autoMergeEnabled?: boolean;
   }>;
   baseAllowsUpToDateAutoMerge(): Promise<boolean>;
   enableAutoMerge(number: number, candidateSha: string): Promise<void>;
+  disableAutoMerge(number: number, candidateSha: string): Promise<void>;
+  fetchCheckFailureEvidence(check: GhCheckObservation, candidateSha: string): Promise<CiFailureEvidence>;
+  rerunCheck(check: GhCheckObservation, candidateSha: string): Promise<void>;
   currentLogin(): Promise<string>;
   listSubIssues(parentIssue: number): Promise<QueueIssue[]>;
   fetchQueueIssue(number: number): Promise<QueueIssue>;

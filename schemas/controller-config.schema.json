@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Herdr Codex Controller Config v2 with explicit v1 compatibility",
+  "title": "Herdr Codex Controller Config v3 with explicit v1/v2 compatibility",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "repo", "localPath", "stateDir", "worktreeRoot", "baseRef", "remote", "branchPrefix", "shell", "codex", "validation", "policy", "review", "delivery"],
   "properties": {
-    "version": { "enum": [1, 2] },
+    "version": { "enum": [1, 2, 3] },
     "executionMode": {
       "enum": ["release-plan-v2-direct", "release-plan-v1-compatibility", "dispatcher-experimental"],
       "default": "release-plan-v2-direct",
@@ -82,11 +82,16 @@
     "policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maxIssueRepairRounds", "maxReleaseHardeningRounds", "maxCiRepairRounds", "maxIssues", "maxChangedFiles", "maxChangedLines"],
+      "required": ["maxIssueRepairRounds", "maxIssues", "maxChangedFiles", "maxChangedLines"],
       "properties": {
         "maxIssueRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
         "maxReleaseHardeningRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
         "maxCiRepairRounds": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "maxReleaseValidationRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "maxReviewRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "maxCiCodeRepairRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "maxCiInfrastructureReruns": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "maxProviderRetries": { "type": "integer", "minimum": 0, "maximum": 3 },
         "maxIssues": { "type": "integer", "minimum": 1, "maximum": 50 },
         "maxChangedFiles": { "type": "integer", "minimum": 1 },
         "maxChangedLines": { "type": "integer", "minimum": 1 }
@@ -117,10 +122,25 @@
         "mergeMethod": { "enum": ["merge", "squash", "rebase"] },
         "allowNoChecks": { "type": "boolean" },
         "requiredChecks": {
-          "type": "array",
-          "maxItems": 100,
-          "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+          "oneOf": [
+            {
+              "type": "array",
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+            },
+            { "$ref": "#/$defs/requiredCheckContract" }
+          ]
+        },
+        "mergeAuthority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "mode", "quarantine"],
+          "properties": {
+            "version": { "const": 1 },
+            "mode": { "const": "controller-auto-merge" },
+            "quarantine": { "const": "delete-exact-head-branch" }
+          }
         },
         "pollIntervalMs": { "type": "integer", "minimum": 1000 }
       }
@@ -142,6 +162,11 @@
                 { "required": ["maxAggregateBytes"] }
               ]
             }
+          },
+          "policy": { "required": ["maxReleaseHardeningRounds", "maxCiRepairRounds"] },
+          "delivery": {
+            "properties": { "requiredChecks": { "type": "array" } },
+            "not": { "required": ["mergeAuthority"] }
           }
         }
       }
@@ -156,6 +181,49 @@
           },
           "validation": {
             "required": ["setup", "issue", "release", "maxOutputBytes", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes", "sandbox"]
+          },
+          "policy": { "required": ["maxReleaseHardeningRounds", "maxCiRepairRounds"] },
+          "delivery": {
+            "properties": { "requiredChecks": { "type": "array" } },
+            "not": { "required": ["mergeAuthority"] }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "version": { "const": 3 } }, "required": ["version"] },
+      "then": {
+        "required": ["remoteIdentity"],
+        "properties": {
+          "executionMode": { "const": "release-plan-v2-direct" },
+          "codex": {
+            "required": ["bin", "workerProfile", "reviewerProfile", "workerTimeoutMs", "reviewerTimeoutMs", "terminationGraceMs", "maxEventBytes", "maxStderrBytes", "maxResultBytes", "maxAggregateBytes", "networkAccess"]
+          },
+          "validation": {
+            "required": ["setup", "issue", "release", "maxOutputBytes", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes", "sandbox"]
+          },
+          "policy": {
+            "required": ["maxReleaseValidationRepairRounds", "maxReviewRepairRounds", "maxCiCodeRepairRounds", "maxCiInfrastructureReruns", "maxProviderRetries"],
+            "not": { "anyOf": [{ "required": ["maxReleaseHardeningRounds"] }, { "required": ["maxCiRepairRounds"] }] }
+          },
+          "review": {
+            "properties": {
+              "enabled": { "const": true },
+              "blockingSeverities": {
+                "minItems": 2,
+                "maxItems": 2,
+                "allOf": [{ "contains": { "const": "critical" } }, { "contains": { "const": "major" } }]
+              }
+            }
+          },
+          "delivery": {
+            "required": ["mergeAuthority"],
+            "properties": {
+              "createPullRequest": { "const": true },
+              "autoMerge": { "const": true },
+              "allowNoChecks": { "const": false },
+              "requiredChecks": { "$ref": "#/$defs/requiredCheckContract" }
+            }
           }
         }
       }
@@ -168,7 +236,7 @@
         ]
       },
       "then": {
-        "properties": {
+        "properties": { "version": { "const": 3 },
           "codex": {
             "properties": {
               "bin": { "pattern": "^/" },
@@ -179,8 +247,9 @@
           "delivery": {
             "properties": {
               "createPullRequest": { "const": true },
+              "autoMerge": { "const": true },
               "allowNoChecks": { "const": false },
-              "requiredChecks": { "minItems": 1 }
+              "requiredChecks": { "$ref": "#/$defs/requiredCheckContract" }
             }
           }
         }
@@ -203,6 +272,50 @@
             }
           }
         ]
+      }
+    },
+    "requiredCheckContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "firstAppearanceTimeoutMs", "pendingTimeoutMs", "postMergeTimeoutMs", "checks"],
+      "properties": {
+        "version": { "const": 1 },
+        "firstAppearanceTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
+        "pendingTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
+        "postMergeTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "appId", "workflowName", "acceptedConclusions", "required"],
+            "allOf": [
+              {
+                "if": { "properties": { "required": { "const": true } }, "required": ["required"] },
+                "then": {
+                  "anyOf": [
+                    { "properties": { "appId": { "type": "integer", "minimum": 1 } } },
+                    { "properties": { "workflowName": { "type": "string", "minLength": 1 } } }
+                  ]
+                }
+              }
+            ],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "appId": { "type": ["integer", "null"], "minimum": 1 },
+              "workflowName": { "type": ["string", "null"], "minLength": 1, "maxLength": 500 },
+              "acceptedConclusions": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "enum": ["SUCCESS", "NEUTRAL", "SKIPPED"] }
+              },
+              "required": { "type": "boolean" }
+            }
+          }
+        }
       }
     }
   }

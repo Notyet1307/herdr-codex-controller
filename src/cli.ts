@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadConfig } from "./config.js";
+import { loadConfig, requiredCheckContract } from "./config.js";
 import { assertPlanCompatibleWithConfig, isReleasePlanV2, loadPlan } from "./plan.js";
 import { JobStore, REPLAN_REQUIRED_CODE, retryBlockedJob } from "./state.js";
 import { GitClient } from "./git.js";
@@ -26,6 +26,7 @@ import { IssueDispatcher } from "./dispatcher.js";
 import type { DispatcherStepResult } from "./types.js";
 import { createControllerProvenance, readControllerIdentity } from "./provenance.js";
 import { exportReleaseCompletion } from "./completion-export.js";
+import { readControllerIdentityHistory } from "./identity-history.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -114,7 +115,19 @@ async function main(): Promise<void> {
     await github.preflight();
     await codex.preflight();
     const validationSandbox = await validator.preflight();
-    output(args, { ok: true, checkedAt: nowIso(), configDigest, controller: controllerIdentity, executionMode: config.executionMode, remoteIdentity, validationSandbox });
+    output(args, {
+      ok: true,
+      checkedAt: nowIso(),
+      configDigest,
+      controller: controllerIdentity,
+      executionMode: config.executionMode,
+      remoteIdentity,
+      validationSandbox,
+      requiredCheckContractDigest: config.version === 3 ? digestJson(requiredCheckContract(config)) : null,
+      mergeAuthorityDigest: config.version === 3 ? digestJson(config.delivery.mergeAuthority) : null,
+      identityHistoryDigest: config.version === 3 ? readControllerIdentityHistory().digest : null,
+      mergePolicyVerified: config.executionMode === "release-plan-v2-direct",
+    });
     return;
   }
 
@@ -247,13 +260,11 @@ async function main(): Promise<void> {
     }
     if (args.command === "abort") {
       const reason = requiredOption(args, "reason");
-      const job = store.load(jobId);
+      let job = store.load(jobId);
       if (job.activeRun) throw new Error("cannot abort while an active Codex run is recorded; first reconcile it with step");
       const notePath = join(store.root(job.id), `operator-abort-${Date.now()}.md`);
       writeTextAtomic(notePath, `# Operator abort\n\nTime: ${nowIso()}\n\n${reason.trim()}\n`);
-      job.status = "failed";
-      job.blocked = null;
-      store.save(job);
+      job = await controller.abort(jobId, reason);
       output(args, { action: "job_aborted", notePath, job: summarizeJob(job, store.currentProvenance(job.plan)) });
       return;
     }
@@ -450,7 +461,14 @@ function summarizeJob(job: JobState, currentProvenance: ControllerProvenance) {
     candidateSha: job.candidateSha,
     reviewRound: job.reviewRound,
     hardeningRounds: job.hardeningRounds,
+    releaseValidationRepairRounds: job.releaseValidationRepairRounds,
+    reviewRepairRounds: job.reviewRepairRounds,
+    ciCodeRepairRounds: job.ciCodeRepairRounds,
+    ciInfrastructureReruns: job.ciInfrastructureReruns,
+    providerRetryAttempts: job.providerRetryAttempts,
     pullRequest: job.pullRequest,
+    ciGate: job.ciGate,
+    deliveryAuthority: job.deliveryAuthority,
     blocked: job.blocked,
     provenance: job.provenance,
     currentProvenance,

@@ -102,7 +102,7 @@ export class JobStore {
     const worktreePath = resolve(this.config.worktreeRoot, id);
     const now = nowIso();
     const job: JobState = {
-      version: this.config.version === 2 ? 3 : 2,
+      version: this.config.version === 3 ? 4 : this.config.version === 2 ? 3 : 2,
       id,
       provenance,
       configPath: resolve(input.configPath),
@@ -138,10 +138,18 @@ export class JobStore {
       reviewRound: 0,
       hardeningRounds: 0,
       ciRepairRounds: 0,
+      releaseValidationRepairRounds: 0,
+      reviewRepairRounds: 0,
+      ciCodeRepairRounds: 0,
+      ciInfrastructureReruns: 0,
+      providerRetryAttempts: 0,
       lastReviewPath: null,
       hardeningReasonPath: null,
       pullRequest: null,
+      ciGate: null,
+      deliveryAuthority: null,
       completion: null,
+      publicCompletion: null,
       blocked: null,
       retryAuthorizations: [],
       createdAt: now,
@@ -162,6 +170,16 @@ export class JobStore {
     }
     if (job.retryAuthorizations === undefined) job.retryAuthorizations = [];
     if (job.completion === undefined) job.completion = null;
+    if (job.version < 4) {
+      job.releaseValidationRepairRounds ??= 0;
+      job.reviewRepairRounds ??= 0;
+      job.ciCodeRepairRounds ??= 0;
+      job.ciInfrastructureReruns ??= 0;
+      job.providerRetryAttempts ??= 0;
+      job.ciGate ??= null;
+      job.deliveryAuthority ??= null;
+      job.publicCompletion ??= null;
+    }
     assertJob(job);
     assertRetryEvidence(job, this.root(job.id));
     return job;
@@ -275,15 +293,38 @@ export function retryBlockedJob(job: JobState, authorization?: RetryAuthorizatio
 }
 
 export function assertJob(job: JobState): void {
-  if (!job || (job.version !== 2 && job.version !== 3) || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
+  if (!job || (job.version !== 2 && job.version !== 3 && job.version !== 4) || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
     throw new Error("job state is invalid or its plan digest drifted");
   }
   assertControllerProvenance(job.provenance);
-  if ((job.version === 3) !== (job.provenance.version === 2)) {
+  if ((job.version === 2 && job.provenance.version !== 1)
+    || (job.version === 3 && job.provenance.version !== 2)
+    || (job.version === 4 && job.provenance.version !== 3)) {
     throw new Error("job state and Controller provenance versions differ");
   }
-  if (job.version === 3 && job.remoteIdentityDigest !== job.provenance.remoteIdentity?.digest) {
+  if (job.version >= 3 && job.remoteIdentityDigest !== job.provenance.remoteIdentity?.digest) {
     throw new Error("job Git remote identity does not match Controller provenance");
+  }
+  if (job.version === 4) {
+    for (const value of [job.releaseValidationRepairRounds, job.reviewRepairRounds, job.ciCodeRepairRounds, job.ciInfrastructureReruns, job.providerRetryAttempts]) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error("job repair counters are invalid");
+    }
+    if (job.ciGate && (job.ciGate.version !== 1 || job.ciGate.candidateSha !== job.candidateSha
+      || job.ciGate.checkContractDigest !== job.provenance.requiredCheckContractDigest
+      || !isCanonicalIsoTime(job.ciGate.firstObservedAt)
+      || !isCanonicalIsoTime(job.ciGate.firstAppearanceDeadlineAt)
+      || (job.ciGate.pendingDeadlineAt !== null && !isCanonicalIsoTime(job.ciGate.pendingDeadlineAt))
+      || (job.ciGate.postMergeDeadlineAt !== null && !isCanonicalIsoTime(job.ciGate.postMergeDeadlineAt))
+      || !Number.isSafeInteger(job.ciGate.attempts) || job.ciGate.attempts < 0)) {
+      throw new Error("job CI gate state is invalid");
+    }
+    if (job.deliveryAuthority && (job.deliveryAuthority.version !== 1
+      || job.deliveryAuthority.candidateSha !== job.deliveryAuthority.pullRequest.headSha
+      || (job.deliveryAuthority.status !== "revoked" && job.deliveryAuthority.candidateSha !== job.candidateSha)
+      || !/^[a-f0-9]{64}$/u.test(job.deliveryAuthority.proofDigest)
+      || !isCanonicalIsoTime(job.deliveryAuthority.lastVerifiedAt))) {
+      throw new Error("job delivery authority state is invalid");
+    }
   }
   if (job.provenance.configDigest !== job.configDigest
     || job.provenance.releasePlan.version !== job.plan.version
@@ -303,6 +344,19 @@ export function assertJob(job: JobState): void {
   if (!Array.isArray(job.retryAuthorizations)) throw new Error("job retry authorizations are invalid");
   for (const authorization of job.retryAuthorizations) assertRetryAuthorization(authorization);
   if (job.status === "completed" && job.phase !== "complete") throw new Error("completed job must be in complete phase");
+  if (job.provenance.version === 3 && job.status === "completed" && (!job.completion || !job.publicCompletion)) {
+    throw new Error("completed production job must have private and public completion checkpoints");
+  }
+  if (job.publicCompletion !== null) {
+    const { digest, ...body } = job.publicCompletion;
+    if (job.provenance.version !== 3 || job.status !== "completed"
+      || digest !== `sha256:${digestJson(body)}`
+      || job.publicCompletion.controllerProvenance.digest !== job.provenance.digest
+      || job.publicCompletion.candidateSha !== job.candidateSha
+      || job.publicCompletion.pullRequest.mergeSha !== job.pullRequest?.mergeSha) {
+      throw new Error("job public completion checkpoint is invalid");
+    }
+  }
   if (job.completion !== null) {
     const { digest, ...identity } = job.completion;
     if (job.status !== "completed"

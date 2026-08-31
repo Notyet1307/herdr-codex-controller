@@ -90,7 +90,7 @@ export class CodexRunner {
     if (Buffer.byteLength(input.prompt, "utf8") > MAX_PROMPT_BYTES) {
       throw new ControllerError("codex_prompt_too_large", `Codex prompt exceeds ${MAX_PROMPT_BYTES} bytes.`);
     }
-    if (input.job.provenance.version === 2) {
+    if (input.job.provenance.version >= 2) {
       const current = readExecutionRuntimeIdentity(this.config);
       if (current.digest !== input.job.provenance.executionRuntime?.digest) {
         throw new ControllerError(
@@ -291,8 +291,15 @@ export function validateReviewResult(value: unknown): ReviewResult {
       }),
     };
   });
-  if (object.status === "pass" && findings.some((finding) => finding.severity !== "minor")) {
+  if (new Set(findings.map((finding) => digestJson(finding))).size !== findings.length) {
+    throw new Error("review findings contain duplicates");
+  }
+  const hasBlockingFinding = findings.some((finding) => finding.severity === "critical" || finding.severity === "major");
+  if (object.status === "pass" && hasBlockingFinding) {
     throw new Error("pass review cannot contain blocking findings");
+  }
+  if (object.status === "changes" && !hasBlockingFinding) {
+    throw new Error("changes review requires at least one blocking finding");
   }
   return { status: object.status, summary: text(object.summary, "review summary", 4000), findings };
 }

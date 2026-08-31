@@ -16,8 +16,8 @@ The Codex permission-profile sandbox uses an isolated HOME/TMP/cache and a close
 
 ## Git and GitHub
 
-Config v2 binds exact canonical GitHub fetch/push endpoints to `repo`. Doctor, fetch, Worktree preparation, push, and completion re-read raw remote config and reject local/file/helper endpoints, multiple URLs, unexpected pushurl, and URL rewrites. Controller Git commands disable hooks and fsmonitor; commits/pushes also use `--no-verify`, file/ext transports are denied in production, and SSH ignores ambient host/ProxyCommand configuration. GitHub mutations remain Controller-owned and exact-identity bound.
+Config v3 retains exact remote binding and adds an app-bound required-check contract plus Controller-owned exact-head auto-merge. Direct production has no manual `ready_to_merge` authority. On block, replan, abort, or drift, the Controller verifies the exact PR, disables auto-merge, and quarantines by deleting only the exact expected remote head with `--force-with-lease`; a changed head is untouched and the failure remains visibly unsafe.
 
 ## Evidence and residual trust
 
-Private logs and state use bounded, regular, non-symlink files. Public completion v2 contains executable path digests rather than local paths. This release does not claim containment against a malicious local operator with the Controller OS account, a compromised kernel, or compromised exact bytes of the bound Git/GitHub/Codex executables. Review/CI/merge-authority lifecycle and historical identity revocation are delivered by the dependent lifecycle hardening release, not inferred from this containment layer.
+Private logs and state use bounded, regular, non-symlink files. Public completion v3 contains path digests rather than local paths and is byte-checkpointed at verified merge. Historical v2 publication requires the tracked identity registry's exact identity, schema hashes, digest algorithm, qualification, and non-revocation. This release does not claim containment against a malicious local operator with the Controller OS account, a compromised kernel, or compromised exact bytes of bound executables.

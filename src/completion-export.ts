@@ -1,5 +1,6 @@
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { validateReviewResult } from "./codex.js";
 import { ControllerError } from "./errors.js";
 import { readJsonFile, writePublicJsonAtomic } from "./fs-atomic.js";
@@ -13,11 +14,15 @@ import type {
   JobState,
   ReleaseCompletionV1,
   ReleaseCompletionV2,
+  ReleaseCompletionV3,
   ReviewResult,
   ValidationReceipt,
 } from "./types.js";
-import { digestJson, nowIso, pathWithin } from "./util.js";
+import { digestJson, nowIso, pathWithin, sha256 } from "./util.js";
 import { assertValidationReceipt } from "./validator.js";
+import { requiredCheckNames, validateConfig } from "./config.js";
+import { readControllerIdentity } from "./provenance.js";
+import { readControllerIdentityHistory, requireHistoricallyTrustedController } from "./identity-history.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HEX = /^[a-f0-9]{64}$/;
@@ -30,7 +35,7 @@ export function createCompletionEvidence(input: {
   mergedAt: string;
   mergedMainSha: string;
 }): JobCompletionEvidence {
-  const proof = privateCompletionProof(input.job, input.config, input.jobRoot);
+  const proof = readCanonicalCandidateProof(input.job, input.config, input.jobRoot);
   const mergedAt = canonicalIso(input.mergedAt);
   if (!input.job.pullRequest?.mergeSha || !mergedAt || !SHA.test(input.mergedMainSha)) {
     throw new ControllerError("completion_evidence_invalid", "Merged completion evidence is incomplete.");
@@ -53,11 +58,47 @@ export function createCompletionEvidence(input: {
       mergedAt,
     },
     mergedMainSha: input.mergedMainSha,
-    requiredChecks: [...input.config.delivery.requiredChecks],
+    requiredChecks: requiredCheckNames(input.config),
     dependencyHandoffDigests: [...proof.dependencyHandoffDigests],
     completedAt: nowIso(),
   };
   return { ...body, digest: digestJson(body) };
+}
+
+export function createPublicCompletionCheckpoint(input: {
+  job: JobState;
+  config: ControllerConfig;
+  jobRoot: string;
+}): ReleaseCompletionV3 {
+  if (input.job.provenance.version !== 3 || !input.job.completion || !input.job.provenance.requiredCheckContractDigest) {
+    throw new ControllerError("completion_evidence_invalid", "Public completion v3 requires a completed provenance v3 checkpoint.");
+  }
+  const proof = readCanonicalCandidateProof(input.job, input.config, input.jobRoot);
+  assertCompletionEvidence(input.job.completion, input.job, proof, input.config);
+  const body = {
+    schema: "herdr-codex-controller:release-completion:v3" as const,
+    releaseId: input.job.id,
+    repo: input.job.repo,
+    baseRef: input.job.baseRef,
+    planDigest: input.job.planDigest,
+    sourceBaseSha: proof.sourceBaseSha,
+    candidateSha: input.job.completion.candidateSha,
+    issueCommits: proof.issueCommits,
+    releaseValidationDigest: proof.releaseValidationDigest,
+    reviewResultDigest: proof.reviewResultDigest,
+    pullRequest: { ...input.job.completion.pullRequest },
+    requiredChecks: [...input.job.completion.requiredChecks],
+    mergedMainSha: input.job.completion.mergedMainSha,
+    dependencyHandoffDigests: [...proof.dependencyHandoffDigests],
+    controllerProvenance: input.job.provenance,
+    completedAt: input.job.completion.completedAt,
+    digestAlgorithm: "utf16-code-unit-canonical-json-v1+sha256-hex" as const,
+    schemaSha256: completionSchemaSha256(3),
+    requiredCheckContractDigest: input.job.provenance.requiredCheckContractDigest,
+  };
+  const checkpoint: ReleaseCompletionV3 = { ...body, digest: `sha256:${digestJson(body)}` };
+  assertReleaseCompletion(checkpoint);
+  return checkpoint;
 }
 
 export async function exportReleaseCompletion(input: {
@@ -66,36 +107,78 @@ export async function exportReleaseCompletion(input: {
   github: GitHubPort;
   jobId: string;
   outputPath: string;
-}): Promise<ReleaseCompletionV2> {
+}): Promise<ReleaseCompletionV2 | ReleaseCompletionV3> {
   const job = input.store.load(input.jobId);
   if (job.status !== "completed" || job.phase !== "complete" || !job.completion) {
     throw new ControllerError("completion_export_not_completed", "The Job has no verified merged completion checkpoint.");
   }
-  const config = input.store.config;
-  const proof = privateCompletionProof(job, config, input.store.root(job.id));
+  const config = historicalJobConfig(input.store.root(job.id), job);
+  const proof = readCanonicalCandidateProof(job, config, input.store.root(job.id));
   assertCompletionEvidence(job.completion, job, proof, config);
-  if (input.store.currentProvenance(job.plan).digest !== job.provenance.digest) {
-    throw new ControllerError("completion_export_provenance_drift", "Controller provenance differs from the completed Job.");
+  const historical = readControllerIdentity().digest !== job.provenance.controller.digest;
+  if (historical) {
+    const entry = requireHistoricallyTrustedController(job.provenance.controller, readControllerIdentityHistory());
+    const schema = job.provenance.version === 2
+      ? "herdr-codex-controller:release-completion:v2"
+      : "herdr-codex-controller:release-completion:v3";
+    const owned = entry.ownedSchemas.find((candidate) => candidate.schema === schema);
+    const version = job.provenance.version === 2 ? 2 : 3;
+    if (!owned || owned.sha256 !== completionSchemaSha256(version)) {
+      throw new ControllerError("controller_identity_schema_untrusted", "The historical Controller schema hash is not qualified.");
+    }
+  } else {
+    await verifyCurrentCompletionExternally(input, job, proof, config);
   }
 
+  if (job.publicCompletion) assertPublicCompletionCheckpoint(job.publicCompletion, job, proof);
+  const artifact = job.publicCompletion ?? legacyCompletionV2(job, proof);
+  assertReleaseCompletion(artifact);
+  const output = resolve(input.outputPath);
+  if (pathWithin(input.store.config.stateDir, output)) {
+    throw new ControllerError("completion_export_output_private_path", "Completion export must be outside Controller private state.");
+  }
+  try { writePublicJsonAtomic(output, artifact); }
+  catch (error) {
+    throw new ControllerError(
+      error instanceof Error && error.message.includes("conflicts")
+        ? "completion_export_output_conflict"
+        : "completion_export_output_invalid",
+      "Completion export output is unsafe or conflicts with existing bytes.",
+    );
+  }
+  return artifact;
+}
+
+function historicalJobConfig(jobRoot: string, job: JobState): ControllerConfig {
+  const value = readPrivateJson<unknown>(jobRoot, resolve(jobRoot, "config.snapshot.json"));
+  const config = validateConfig(value, "historical config snapshot", { allowHistoricalDirectV2: true });
+  if (digestJson(config) !== job.configDigest) throw new ControllerError("completion_export_config_drift", "The historical config snapshot does not match the Job.");
+  return config;
+}
+
+async function verifyCurrentCompletionExternally(
+  input: { git: GitPort; github: GitHubPort },
+  job: JobState,
+  proof: ReturnType<typeof readCanonicalCandidateProof>,
+  config: ControllerConfig,
+): Promise<void> {
   let observed;
-  try { observed = await input.github.inspectPullRequest(job.completion.pullRequest.number); }
+  try { observed = await input.github.inspectPullRequest(job.completion!.pullRequest.number); }
   catch { throw new ControllerError("completion_export_pr_identity_invalid", "The completed pull request cannot be verified."); }
   const pullRequest = observed.pullRequest;
-  const expected = job.completion.pullRequest;
+  const expected = job.completion!.pullRequest;
   if (pullRequest.state !== "MERGED" || canonicalIso(observed.mergedAt) !== expected.mergedAt
     || pullRequest.number !== expected.number || pullRequest.headRef !== expected.headRef
     || pullRequest.baseRef !== expected.baseRef || pullRequest.headSha !== expected.headSha
     || pullRequest.mergeSha !== expected.mergeSha) {
     throw new ControllerError("completion_export_pr_identity_invalid", "GitHub no longer reports the exact completed pull request identity.");
   }
-  const required = new Set(job.completion.requiredChecks);
-  if (observed.checks.missing.length > 0
+  const required = new Set(job.completion!.requiredChecks);
+  if (observed.checks.missing.some((name) => required.has(name))
     || observed.checks.pending.some(({ name }) => required.has(name))
     || observed.checks.failures.some(({ name }) => required.has(name))) {
     throw new ControllerError("completion_export_required_checks_unverified", "Required pull request checks are not all present and successful.");
   }
-
   try {
     for (const commit of proof.issueCommits) {
       if (!(await input.git.verifyIssueCommit({
@@ -103,29 +186,31 @@ export async function exportReleaseCompletion(input: {
         planDigest: job.planDigest,
         issueNumber: commit.issueNumber,
         sha: commit.sha,
-        candidateSha: job.completion.candidateSha,
-      }))) {
-        throw new Error(`Issue #${commit.issueNumber} commit is not bound to the candidate`);
-      }
+        candidateSha: job.completion!.candidateSha,
+      }))) throw new Error("issue commit mismatch");
     }
   } catch {
     throw new ControllerError("completion_export_issue_commit_invalid", "Issue commits are not exact Controller-owned ancestors of the completed candidate.");
   }
-
   try {
     const currentBase = await input.git.fetchBase();
     if (!(await input.git.isAncestorOfRemoteBase(expected.mergeSha))) throw new Error("merge ancestry mismatch");
     const result = await input.git.verifyMergeResult({
       mergeSha: expected.mergeSha,
-      candidateSha: job.completion.candidateSha,
-      baseSha: job.completion.sourceBaseSha,
+      candidateSha: job.completion!.candidateSha,
+      baseSha: job.completion!.sourceBaseSha,
       mergeMethod: config.delivery.mergeMethod,
     });
     if (result !== "verified" || !SHA.test(currentBase)) throw new Error("merge result mismatch");
   } catch {
     throw new ControllerError("completion_export_merge_unverified", "The completed merge cannot be verified against the current remote base.");
   }
+}
 
+function legacyCompletionV2(job: JobState, proof: ReturnType<typeof readCanonicalCandidateProof>): ReleaseCompletionV2 {
+  if (job.provenance.version !== 2 || !job.completion) {
+    throw new ControllerError("completion_export_not_completed", "Production completion v3 is missing its immutable public checkpoint.");
+  }
   const body = {
     schema: "herdr-codex-controller:release-completion:v2" as const,
     releaseId: job.id,
@@ -144,25 +229,34 @@ export async function exportReleaseCompletion(input: {
     controllerProvenance: job.provenance,
     completedAt: job.completion.completedAt,
   };
-  const artifact: ReleaseCompletionV2 = { ...body, digest: `sha256:${digestJson(body)}` };
-  assertReleaseCompletion(artifact);
-  const output = resolve(input.outputPath);
-  if (pathWithin(config.stateDir, output)) {
-    throw new ControllerError("completion_export_output_private_path", "Completion export must be outside Controller private state.");
-  }
-  try { writePublicJsonAtomic(output, artifact); }
-  catch (error) {
-    throw new ControllerError(
-      error instanceof Error && error.message.includes("conflicts")
-        ? "completion_export_output_conflict"
-        : "completion_export_output_invalid",
-      "Completion export output is unsafe or conflicts with existing bytes.",
-    );
-  }
-  return artifact;
+  return { ...body, digest: `sha256:${digestJson(body)}` };
 }
 
-export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseCompletionV2): void {
+function assertPublicCompletionCheckpoint(
+  value: ReleaseCompletionV3,
+  job: JobState,
+  proof: ReturnType<typeof readCanonicalCandidateProof>,
+): void {
+  assertReleaseCompletion(value);
+  if (!job.completion || value.releaseId !== job.id || value.planDigest !== job.planDigest
+    || value.candidateSha !== job.candidateSha
+    || value.releaseValidationDigest !== proof.releaseValidationDigest
+    || value.reviewResultDigest !== proof.reviewResultDigest
+    || JSON.stringify(value.issueCommits) !== JSON.stringify(proof.issueCommits)
+    || JSON.stringify(value.pullRequest) !== JSON.stringify(job.completion.pullRequest)
+    || value.mergedMainSha !== job.completion.mergedMainSha
+    || value.controllerProvenance.digest !== job.provenance.digest
+    || value.completedAt !== job.completion.completedAt) {
+    throw new ControllerError("completion_export_not_completed", "The public completion checkpoint does not match immutable private evidence.");
+  }
+}
+
+function completionSchemaSha256(version: 2 | 3): string {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  return `sha256:${sha256(readFileSync(resolve(root, `schemas/release-completion-v${version}.schema.json`)))}`;
+}
+
+export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseCompletionV2 | ReleaseCompletionV3): void {
   const object = recordOrNull(value);
   const pullRequest = recordOrNull(value?.pullRequest);
   const provenance = recordOrNull(value?.controllerProvenance);
@@ -178,9 +272,13 @@ export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseComp
     "issueCommits", "mergedMainSha", "planDigest", "pullRequest", "releaseId", "releaseValidationDigest",
     "repo", "requiredChecks", "reviewResultDigest", "schema", "sourceBaseSha",
   ];
+  if (value.schema === "herdr-codex-controller:release-completion:v3") {
+    keys.push("digestAlgorithm", "requiredCheckContractDigest", "schemaSha256");
+  }
   if (!exactKeys(object, keys)
     || (value.schema !== "herdr-codex-controller:release-completion:v1"
-      && value.schema !== "herdr-codex-controller:release-completion:v2")
+      && value.schema !== "herdr-codex-controller:release-completion:v2"
+      && value.schema !== "herdr-codex-controller:release-completion:v3")
     || typeof value.releaseId !== "string" || !/^[a-z0-9._-]{1,80}$/.test(value.releaseId)
     || typeof value.repo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repo)
     || typeof value.baseRef !== "string" || value.baseRef.length < 1 || value.baseRef.length > 300
@@ -206,7 +304,9 @@ export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseComp
     || value.dependencyHandoffDigests.some((digest) => typeof digest !== "string" || !DIGEST.test(digest))
     || (value.controllerProvenance.version === 1
       ? !exactKeys(provenance, ["configDigest", "controller", "digest", "executionMode", "releasePlan", "version"])
-      : !exactKeys(provenance, ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "remoteIdentity", "releasePlan", "validationSandbox", "version"]))
+      : value.controllerProvenance.version === 2
+        ? !exactKeys(provenance, ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "remoteIdentity", "releasePlan", "validationSandbox", "version"])
+        : !exactKeys(provenance, ["configDigest", "controller", "digest", "executionMode", "executionRuntime", "identityHistoryDigest", "mergeAuthorityDigest", "remoteIdentity", "releasePlan", "requiredCheckContractDigest", "validationSandbox", "version"]))
     || !exactKeys(controller, ["buildDigest", "digest", "sourceManifestDigest", "sourceRevision", "version"])
     || !exactKeys(releasePlan, ["digest", "version"])
     || value.controllerProvenance.executionMode !== "release-plan-v2-direct"
@@ -214,8 +314,16 @@ export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseComp
     throw new ControllerError("completion_export_artifact_invalid", "Release completion artifact is invalid.");
   }
   if ((value.schema === "herdr-codex-controller:release-completion:v1" && value.controllerProvenance.version !== 1)
-    || (value.schema === "herdr-codex-controller:release-completion:v2" && value.controllerProvenance.version !== 2)) {
+    || (value.schema === "herdr-codex-controller:release-completion:v2" && value.controllerProvenance.version !== 2)
+    || (value.schema === "herdr-codex-controller:release-completion:v3" && value.controllerProvenance.version !== 3)) {
     throw new ControllerError("completion_export_artifact_invalid", "Release completion schema and provenance versions differ.");
+  }
+  if (value.schema === "herdr-codex-controller:release-completion:v3"
+    && (value.digestAlgorithm !== "utf16-code-unit-canonical-json-v1+sha256-hex"
+      || value.schemaSha256 !== completionSchemaSha256(3)
+      || !HEX.test(value.requiredCheckContractDigest)
+      || value.requiredCheckContractDigest !== value.controllerProvenance.requiredCheckContractDigest)) {
+    throw new ControllerError("completion_export_artifact_invalid", "Release completion v3 trust bindings are invalid.");
   }
   if (!exactKeys(pullRequest, ["baseRef", "headRef", "headSha", "mergeSha", "mergedAt", "number"])
     || !Number.isSafeInteger(value.pullRequest.number) || value.pullRequest.number < 1
@@ -240,10 +348,10 @@ export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseComp
   }
 }
 
-function privateCompletionProof(job: JobState, config: ControllerConfig, jobRoot: string) {
+export function readCanonicalCandidateProof(job: JobState, config: ControllerConfig, jobRoot: string) {
   if (config.executionMode !== "release-plan-v2-direct" || job.provenance.executionMode !== "release-plan-v2-direct"
     || !isReleasePlanV2(job.plan) || !config.delivery.createPullRequest || config.delivery.allowNoChecks
-    || config.delivery.requiredChecks.length === 0 || !job.candidateSha || !job.pullRequest) {
+    || !config.review.enabled || requiredCheckNames(config).length === 0 || !job.candidateSha) {
     throw new ControllerError("completion_export_production_mode_invalid", "Completion export requires production Release Plan v2 direct delivery.");
   }
   const issueCommits = job.plan.issues.map(({ number }) => {
@@ -290,7 +398,7 @@ function privateCompletionProof(job: JobState, config: ControllerConfig, jobRoot
 function assertCompletionEvidence(
   evidence: JobCompletionEvidence,
   job: JobState,
-  proof: ReturnType<typeof privateCompletionProof>,
+  proof: ReturnType<typeof readCanonicalCandidateProof>,
   config: ControllerConfig,
 ): void {
   const { digest, ...body } = evidence;
@@ -306,7 +414,7 @@ function assertCompletionEvidence(
     || evidence.pullRequest.headSha !== job.pullRequest?.headSha
     || evidence.pullRequest.mergeSha !== job.pullRequest?.mergeSha
     || !canonicalTime(evidence.pullRequest.mergedAt)
-    || JSON.stringify(evidence.requiredChecks) !== JSON.stringify(config.delivery.requiredChecks)
+    || JSON.stringify(evidence.requiredChecks) !== JSON.stringify(requiredCheckNames(config))
     || JSON.stringify(evidence.dependencyHandoffDigests) !== JSON.stringify(proof.dependencyHandoffDigests)
     || evidence.mergedMainSha !== evidence.pullRequest.mergeSha || !canonicalTime(evidence.completedAt)) {
     throw new ControllerError("completion_export_not_completed", "Completion checkpoint does not match the private Job evidence.");

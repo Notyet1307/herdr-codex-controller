@@ -2,19 +2,25 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
   ControllerConfig,
+  CiFailureEvidence,
   GhCheckSummary,
+  GhCheckObservation,
   IssueSnapshot,
   JobState,
   PullRequestState,
   QueueIssue,
   WorkflowGateSummary,
+  RequiredCheckContractV1,
 } from "./types.js";
 import { runCommand, requireCommandSuccess } from "./command.js";
-import { digestJson, nowIso } from "./util.js";
+import { digestJson, nowIso, sha256 } from "./util.js";
 import { writeTextAtomic } from "./fs-atomic.js";
+import { requiredCheckContract, requiredCheckNames } from "./config.js";
+import { ControllerError } from "./errors.js";
 
 const GH_TIMEOUT_MS = 120_000;
 const GH_OUTPUT_BYTES = 4 * 1024 * 1024;
+const CI_EVIDENCE_BYTES = 256 * 1024;
 
 export class GitHubClient {
   constructor(private readonly config: ControllerConfig) {}
@@ -26,6 +32,9 @@ export class GitHubClient {
     ]), "gh repo view");
     const value = parseJson(result.stdoutTail, "gh repo view") as { nameWithOwner?: unknown };
     if (value.nameWithOwner !== this.config.repo) throw new Error("GitHub repository identity differs from config.repo");
+    if (this.config.executionMode === "release-plan-v2-direct" && !(await this.baseAllowsUpToDateAutoMerge())) {
+      throw new ControllerError("merge_policy_unverified", "Production Controller auto-merge requires strict latest-base pull-request and required-check server policy.");
+    }
   }
 
   async fetchIssue(number: number, options: { allowClosed?: boolean } = {}): Promise<IssueSnapshot> {
@@ -64,7 +73,7 @@ export class GitHubClient {
 
   async createPullRequest(job: JobState, deliveryRoot: string): Promise<PullRequestState> {
     const existing = await this.findPullRequest(job);
-    if (existing) return existing;
+    if (existing && existing.state !== "CLOSED") return existing;
     const bodyPath = join(deliveryRoot, "pull-request-body.md");
     writeTextAtomic(bodyPath, renderPullRequestBody(job));
     const args = [
@@ -85,17 +94,20 @@ export class GitHubClient {
     pullRequest: PullRequestState;
     checks: GhCheckSummary;
     mergedAt: string | null;
+    autoMergeEnabled: boolean;
   }> {
     const result = requireCommandSuccess(await this.run([
       "pr", "view", String(number), "--repo", this.config.repo,
-      "--json", "number,url,state,headRefName,baseRefName,headRefOid,mergedAt,mergeCommit,statusCheckRollup",
+      "--json", "number,url,state,headRefName,baseRefName,headRefOid,mergedAt,mergeCommit,statusCheckRollup,autoMergeRequest",
     ]), "gh inspect pull request");
     const value = parseJson(result.stdoutTail, "pull request") as Record<string, unknown>;
     const pullRequest = parsePullRequestValue(value);
+    const checkValues = await this.checkRunsForCandidate(pullRequest.headSha, value.statusCheckRollup);
     return {
       pullRequest,
-      checks: summarizeChecks(value.statusCheckRollup, this.config.delivery.requiredChecks),
+      checks: summarizeChecks(checkValues, this.config.delivery.requiredChecks),
       mergedAt: value.mergedAt === null ? null : expectString(value.mergedAt, "pr.mergedAt"),
+      autoMergeEnabled: value.autoMergeRequest !== null && value.autoMergeRequest !== undefined,
     };
   }
 
@@ -104,7 +116,7 @@ export class GitHubClient {
     const rules = await this.readApi(`repos/${this.config.repo}/rules/branches/${branch}`);
     const protection = await this.readApi(`repos/${this.config.repo}/branches/${branch}/protection`);
     let pullRequestsRequired = false;
-    const strictChecks = new Set<string>();
+    const strictChecks = new Map<string, Set<number | null>>();
 
     if (Array.isArray(rules)) {
       for (const raw of rules) {
@@ -128,8 +140,13 @@ export class GitHubClient {
       }
     }
 
-    return pullRequestsRequired
-      && this.config.delivery.requiredChecks.every((name) => strictChecks.has(name));
+    const contract = requiredCheckContract(this.config);
+    const checksVerified = contract
+      ? contract.checks.filter((check) => check.required).every((check) => (
+        check.appId !== null && strictChecks.get(check.name)?.has(check.appId) === true
+      ))
+      : requiredCheckNames(this.config).every((name) => strictChecks.has(name));
+    return pullRequestsRequired && checksVerified;
   }
 
   async enableAutoMerge(number: number, candidateSha: string): Promise<void> {
@@ -137,6 +154,43 @@ export class GitHubClient {
       autoMergeArgs(number, this.config.repo, this.config.delivery.mergeMethod, candidateSha),
       5 * 60_000,
     ), "gh enable auto merge");
+  }
+
+  async disableAutoMerge(number: number, candidateSha: string): Promise<void> {
+    const before = await this.assertCandidatePullRequest(number, candidateSha);
+    if (!before.autoMergeEnabled) return;
+    requireCommandSuccess(await this.run([
+      "pr", "merge", String(number), "--repo", this.config.repo,
+      "--disable-auto", "--match-head-commit", candidateSha,
+    ], 5 * 60_000), "gh disable auto merge");
+    const after = await this.assertCandidatePullRequest(number, candidateSha);
+    if (after.autoMergeEnabled) throw new Error("GitHub auto-merge revocation was not observable");
+  }
+
+  async fetchCheckFailureEvidence(check: GhCheckObservation, candidateSha: string): Promise<CiFailureEvidence> {
+    const runId = await this.assertWorkflowRunIdentity(check, candidateSha);
+    const result = requireCommandSuccess(await this.run([
+      "run", "view", String(runId), "--repo", this.config.repo, "--log-failed",
+    ], GH_TIMEOUT_MS, CI_EVIDENCE_BYTES), "gh read failed check evidence");
+    const log = sanitizeCheckLog(result.stdoutTail || result.stderrTail);
+    if (!log.trim()) throw new Error("failed check evidence is empty");
+    const body = {
+      version: 1 as const,
+      candidateSha,
+      check,
+      log,
+      logBytes: Buffer.byteLength(log, "utf8"),
+      logSha256: `sha256:${sha256(log)}`,
+      observedAt: nowIso(),
+    };
+    return { ...body, digest: `sha256:${digestJson(body)}` };
+  }
+
+  async rerunCheck(check: GhCheckObservation, candidateSha: string): Promise<void> {
+    const runId = await this.assertWorkflowRunIdentity(check, candidateSha);
+    requireCommandSuccess(await this.run([
+      "run", "rerun", String(runId), "--repo", this.config.repo, "--failed",
+    ], 5 * 60_000), "gh rerun failed workflow");
   }
 
   async currentLogin(): Promise<string> {
@@ -211,16 +265,16 @@ export class GitHubClient {
     };
   }
 
-  private run(args: string[], timeoutMs = GH_TIMEOUT_MS) {
+  private run(args: string[], timeoutMs = GH_TIMEOUT_MS, outputBytes = GH_OUTPUT_BYTES) {
     return runCommand({
       command: "gh",
       args,
       cwd: this.config.localPath,
       timeoutMs,
-      maxTailBytes: GH_OUTPUT_BYTES,
-      stdoutByteLimit: GH_OUTPUT_BYTES,
-      stderrByteLimit: GH_OUTPUT_BYTES,
-      aggregateByteLimit: GH_OUTPUT_BYTES * 2,
+      maxTailBytes: outputBytes,
+      stdoutByteLimit: outputBytes,
+      stderrByteLimit: outputBytes,
+      aggregateByteLimit: outputBytes * 2,
     });
   }
 
@@ -228,6 +282,66 @@ export class GitHubClient {
     const result = await this.run(["api", endpoint]);
     return result.exitCode === 0 ? parseJson(result.stdoutTail, endpoint) : null;
   }
+
+  private async assertCandidatePullRequest(number: number, candidateSha: string, allowClosed = false) {
+    if (!/^[0-9a-f]{40}$/iu.test(candidateSha)) throw new Error("pull request candidate SHA is invalid");
+    const observed = await this.inspectPullRequest(number);
+    if (observed.pullRequest.number !== number || observed.pullRequest.headSha !== candidateSha
+      || observed.pullRequest.baseRef !== this.config.baseRef
+      || (!allowClosed && observed.pullRequest.state !== "OPEN")) {
+      throw new Error("pull request lifecycle identity mismatch");
+    }
+    return observed;
+  }
+
+  private async assertWorkflowRunIdentity(check: GhCheckObservation, candidateSha: string): Promise<number> {
+    if (!check.runId || !Number.isSafeInteger(check.runId) || check.runId < 1) throw new Error("check run identity is unavailable");
+    const result = requireCommandSuccess(await this.run([
+      "run", "view", String(check.runId), "--repo", this.config.repo,
+      "--json", "databaseId,headSha,name,workflowName,status,conclusion,url",
+    ]), "gh inspect workflow run");
+    const value = parseJson(result.stdoutTail, "workflow run") as Record<string, unknown>;
+    if (expectInteger(value.databaseId, "workflow run databaseId") !== check.runId
+      || expectString(value.headSha, "workflow run headSha") !== candidateSha
+      || (check.workflowName !== null && expectString(value.workflowName ?? value.name, "workflow run name") !== check.workflowName)) {
+      throw new Error("workflow run identity differs from the candidate-bound check");
+    }
+    return check.runId;
+  }
+
+  private async checkRunsForCandidate(candidateSha: string, rollupValue: unknown): Promise<unknown[]> {
+    const rollup = Array.isArray(rollupValue) ? rollupValue : [];
+    if (!requiredCheckContract(this.config)) return rollup;
+    const raw = objectOrNull(await this.readApi(`repos/${this.config.repo}/commits/${candidateSha}/check-runs?filter=latest&per_page=100`));
+    const checkRuns = Array.isArray(raw?.check_runs) ? raw.check_runs : null;
+    if (!checkRuns || (Number.isSafeInteger(raw?.total_count) && Number(raw?.total_count) > 100)) return rollup;
+    const normalized = checkRuns.flatMap((value) => {
+      const run = objectOrNull(value);
+      if (!run) return [];
+      const name = typeof run.name === "string" ? run.name : "";
+      const detailsUrl = typeof run.details_url === "string" ? run.details_url : null;
+      const matching = rollup.find((entry) => {
+        const check = objectOrNull(entry);
+        return check?.name === name && (detailsUrl === null || check.detailsUrl === detailsUrl);
+      });
+      const match = objectOrNull(matching);
+      return [{
+        name,
+        status: run.status,
+        conclusion: run.conclusion,
+        detailsUrl,
+        app: run.app,
+        workflowName: typeof match?.workflowName === "string" ? match.workflowName : null,
+      }];
+    });
+    const normalizedNames = new Set(normalized.map((entry) => entry.name));
+    const statuses = rollup.filter((entry) => {
+      const check = objectOrNull(entry);
+      return check?.__typename !== "CheckRun" && (typeof check?.name !== "string" || !normalizedNames.has(check.name));
+    });
+    return [...normalized, ...statuses];
+  }
+
 }
 
 export function autoMergeArgs(
@@ -330,7 +444,8 @@ function parseWorkflowRun(value: unknown, index: number): {
   };
 }
 
-export function summarizeChecks(value: unknown, requiredChecks: string[] = []): GhCheckSummary {
+export function summarizeChecks(value: unknown, requiredChecks: string[] | RequiredCheckContractV1 = []): GhCheckSummary {
+  if (!Array.isArray(requiredChecks)) return summarizeContractChecks(value, requiredChecks);
   if (!Array.isArray(value) || value.length === 0) {
     return { state: "none", missing: [...requiredChecks], failures: [], pending: [] };
   }
@@ -362,21 +477,113 @@ export function summarizeChecks(value: unknown, requiredChecks: string[] = []): 
       : { state: "success", missing, failures, pending };
 }
 
+function summarizeContractChecks(value: unknown, contract: RequiredCheckContractV1): GhCheckSummary {
+  const observations = Array.isArray(value)
+    ? value.flatMap((entry) => {
+      const parsed = parseCheckObservation(entry);
+      return parsed ? [parsed] : [];
+    })
+    : [];
+  const missing: string[] = [];
+  const failures: GhCheckSummary["failures"] = [];
+  const pending: GhCheckSummary["pending"] = [];
+  const successes: NonNullable<GhCheckSummary["successes"]> = [];
+  const ambiguous: string[] = [];
+  for (const expected of contract.checks) {
+    if (!expected.required) continue;
+    const sameName = observations.filter(({ name }) => name === expected.name);
+    if (sameName.length === 0) {
+      if (expected.required) missing.push(expected.name);
+      continue;
+    }
+    if (sameName.length !== 1) {
+      ambiguous.push(expected.name);
+      continue;
+    }
+    const observed = sameName[0]!;
+    if ((expected.appId !== null && observed.appId !== expected.appId)
+      || (expected.workflowName !== null && observed.workflowName !== expected.workflowName)) {
+      ambiguous.push(expected.name);
+      continue;
+    }
+    if (observed.status !== "COMPLETED" || !observed.conclusion) {
+      pending.push({ name: expected.name, state: observed.status || "PENDING", link: observed.link });
+    } else if (expected.acceptedConclusions.includes(observed.conclusion as "SUCCESS" | "NEUTRAL" | "SKIPPED")) {
+      successes.push({ name: expected.name, state: observed.conclusion, link: observed.link });
+    } else {
+      failures.push({ name: expected.name, state: observed.conclusion, link: observed.link });
+    }
+  }
+  return {
+    state: ambiguous.length > 0 || failures.length > 0
+      ? "failure"
+      : missing.length > 0 || pending.length > 0
+        ? "pending"
+        : "success",
+    missing,
+    failures,
+    pending,
+    successes,
+    ambiguous,
+    observations,
+    observedAt: nowIso(),
+  };
+}
+
+function parseCheckObservation(value: unknown): GhCheckObservation | null {
+  const check = objectOrNull(value);
+  if (!check) return null;
+  const name = stringOr(check.name, stringOr(check.context, ""));
+  if (!name) return null;
+  const app = objectOrNull(check.app);
+  const rawAppId = app?.id ?? app?.databaseId ?? check.appId;
+  const appId = Number.isSafeInteger(rawAppId) && Number(rawAppId) > 0 ? Number(rawAppId) : null;
+  const link = typeof check.detailsUrl === "string" ? check.detailsUrl
+    : typeof check.targetUrl === "string" ? check.targetUrl
+      : null;
+  const runMatch = link?.match(/\/actions\/runs\/(\d+)/u);
+  return {
+    name,
+    status: stringOr(check.status, stringOr(check.state, "UNKNOWN")).toUpperCase(),
+    conclusion: stringOr(check.conclusion, "").toUpperCase(),
+    link,
+    appId,
+    workflowName: typeof check.workflowName === "string" && check.workflowName.trim() ? check.workflowName : null,
+    runId: runMatch ? Number(runMatch[1]) : null,
+  };
+}
+
 function objectOrNull(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
 }
 
-function addRequiredCheckContexts(target: Set<string>, value: unknown): void {
+function sanitizeCheckLog(value: string): string {
+  return value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "");
+}
+
+function addRequiredCheckContexts(target: Map<string, Set<number | null>>, value: unknown): void {
   if (!Array.isArray(value)) return;
   for (const entry of value) {
-    if (typeof entry === "string") target.add(entry);
+    if (typeof entry === "string") addRequiredCheckContext(target, entry, null);
     else {
       const object = objectOrNull(entry);
-      if (typeof object?.context === "string") target.add(object.context);
+      if (typeof object?.context === "string") {
+        const rawAppId = object.app_id ?? object.integration_id ?? object.appId;
+        const appId = Number.isSafeInteger(rawAppId) && Number(rawAppId) > 0 ? Number(rawAppId) : null;
+        addRequiredCheckContext(target, object.context, appId);
+      }
     }
   }
+}
+
+function addRequiredCheckContext(target: Map<string, Set<number | null>>, name: string, appId: number | null): void {
+  const identities = target.get(name) ?? new Set<number | null>();
+  identities.add(appId);
+  target.set(name, identities);
 }
 
 export function renderPullRequestBody(job: JobState): string {

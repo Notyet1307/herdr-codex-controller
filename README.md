@@ -23,15 +23,19 @@ node dist/src/cli.js start \
   --json
 ```
 
-Config v2 declares exact GitHub fetch/push endpoints and a Codex permission-profile validation sandbox outside the checkout, private state, worktree, operator home, and system temp roots. Production disallows custom Codex profiles and PATH-resolved binaries. Job State v3 / provenance v2 bind Controller bytes, Codex and sandbox executable bytes/version/path digests, fixed runtime controls, Git remote identity, config, and Plan. Every execution step compares current identities with that snapshot and blocks on drift. Every configured validation command receives its own disposable blob projection with isolated HOME/TMP/cache, no inherited Controller secrets, no network or Unix sockets, and no writes outside the projection; commands cannot pass generated state to later commands. A check that needs dependencies must install them inside that same command (for example `npm ci --ignore-scripts --no-audit --no-fund && npm test`).
+Config v3 extends the containment contract with canonical aggregate-review semantics, app-bound required-check identities/conclusions/deadlines, separate repair budgets, and exact-head Controller auto-merge. Job State v4 / provenance v3 bind those policies alongside Controller, Codex, sandbox, remote, config, and Plan identities. Missing or pending checks reach durable deadlines; observational checks never control delivery; infrastructure failures never trigger code changes without exact bounded evidence. Any source/config/provenance loss after PR creation revokes auto-merge and deletes the Controller-owned remote branch with an expected-head force-with-lease; a changed head is never mutated.
 
-The pinned schemas are [`release-plan-v1.schema.json`](./schemas/release-plan-v1.schema.json), [`release-plan-v2.schema.json`](./schemas/release-plan-v2.schema.json), the [`oneOf` aggregate entry point](./schemas/release-plan.schema.json), and the public [`release-completion-v2.schema.json`](./schemas/release-completion-v2.schema.json). A verified merged Job exports deterministic completion proof without exposing private `job.json` or local executable paths:
+Every validation command still receives its own disposable blob projection with isolated HOME/TMP/cache, no inherited Controller secrets, no network or Unix sockets, and no writes outside the projection. A check that needs dependencies must install them inside that same command (for example `npm ci --ignore-scripts --no-audit --no-fund && npm test`). Config v1/v2 remain compatibility-readable but cannot start new production direct Jobs.
+
+The pinned schemas include [`release-plan-v2.schema.json`](./schemas/release-plan-v2.schema.json), public [`release-completion-v3.schema.json`](./schemas/release-completion-v3.schema.json), and the append-only [`controller-identity-history-v1.schema.json`](./schemas/controller-identity-history-v1.schema.json). Verified merge atomically checkpoints public-safe completion bytes. A later Controller can re-publish an older v2 completion only when its exact identity and owned schema hashes remain qualified and unrevoked in the tracked history.
+
+Before activating a future Controller C, its release branch must append the exact clean outgoing B identity with `npm run history:append -- --controller-root /clean/B --activated-at ISO --write`. The active Planner lock still selects C for new handoffs; the history registry is only for completion produced by outgoing qualified identities.
 
 ```bash
 node dist/src/cli.js completion export --config /private/controller.json --job RELEASE_ID --out /public/release-completion.json --json
 ```
 
-The v2 example contains format-valid placeholder hashes; replace every source/expected value with the approved Planner handoff rather than attempting to run it unchanged.
+The v3 config example contains placeholders; bind its exact check/app/workflow identities and time budgets to the approved repository policy before use.
 
 See [README.zh-CN.md](./README.zh-CN.md) for the complete guide, [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) for the design, and [docs/P0-HARDENING.md](./docs/P0-HARDENING.md) for migration and release notes.
 

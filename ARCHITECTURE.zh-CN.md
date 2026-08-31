@@ -13,7 +13,7 @@
 ```text
 Release Plan  → 决定做什么、顺序和验收标准
 Codex CLI     → 决定如何探索、实现、自测和自我 Review
-Controller    → Worktree、状态、验证、commit、PR、CI、人工 gate
+Controller    → Worktree、状态、验证、commit、PR、CI、exact-head merge authority
 Dispatcher    → 保留的 experimental compatibility；不属于 qualified production path
 ```
 
@@ -51,8 +51,9 @@ Controller checkout HEAD commit
 + Codex binary bytes/version/path digest + fixed runtime policy
 + validation sandbox binary/policy + exact GitHub fetch/push identity
 + executionMode + validated config digest + Release Plan version/digest
+→ required-check / merge-authority / identity-history digests
 → Job provenance self-digest
-→ atomic Job State v3 snapshot
+→ atomic Job State v4 snapshot
 → compare again before every Controller step
 ```
 
@@ -85,7 +86,7 @@ awaiting_merge
 complete
 ```
 
-`harden` 不是常规阶段。只有 full validation、aggregate review 或 CI 给出精确阻断证据时才进入，并受统一次数上限约束。
+`harden` 不是常规阶段。只有 full validation、aggregate review 或 exact bounded CI code evidence 才能进入；validation、review、CI code、CI infrastructure 与 provider counters 各自独立。
 
 每次 phase dispatch 前先比较当前 Controller provenance 与 Job snapshot。mismatch 由现有 blocked checkpoint 路径保存为 `controller_provenance_drift`，所以不会到达 Worktree、validator、Codex、push 或 GitHub mutation。
 
@@ -111,10 +112,14 @@ clean exact HEAD
 → full validation
 → candidate SHA
 → fresh read-only aggregate review
-→ delivery
+→ versioned required-check gate + durable deadlines
+→ Controller exact-head auto-merge
+→ verified merge + public completion v3 checkpoint
 ```
 
 Review 只对一个精确 candidate SHA 有效。任何 hardening commit 都会生成新 candidate，并要求重新执行 full validation 和 aggregate review。
+
+生产 direct 不存在人工 `ready_to_merge` authority。授权后发生 source/config/provenance drift 或 abort 时，Controller 先按 exact PR identity disable auto-merge，再以 expected-head force-with-lease 删除自有远端 branch；remote head 已变化时不会执行删除，并持久化 visible revocation failure。
 
 ## 7. 恢复
 
