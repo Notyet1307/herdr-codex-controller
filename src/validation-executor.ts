@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readdirSync, realpathSync, rmSync } from "node:f
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import type { GitPort } from "./ports.js";
-import type { JobState, ValidationCommandConfig } from "./types.js";
+import type { JobState, ValidationBootstrapConfig, ValidationCommandConfig } from "./types.js";
 import type { SandboxProvider } from "./validation-sandbox.js";
 import { ensurePrivateDir, readJsonFile, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
 import { digestJson, newId, nowIso, pathWithin, safeToken } from "./util.js";
@@ -26,6 +26,7 @@ export class ValidationExecutor {
     private readonly git: GitPort,
     private readonly provider: SandboxProvider,
     sandboxRoot: string,
+    private readonly bootstrap: { config: ValidationBootstrapConfig; provider: SandboxProvider } | null = null,
   ) {
     this.sandboxRoot = ensurePrivateDir(sandboxRoot);
   }
@@ -34,12 +35,37 @@ export class ValidationExecutor {
     return this.provider.policyDigest;
   }
 
-  async doctor(): Promise<{ verified: boolean; policyDigest: string }> {
-    if (!this.provider.contained) return { verified: false, policyDigest: this.provider.policyDigest };
-    const runRoot = ensurePrivateDir(join(this.sandboxRoot, newId("doctor")));
+  get bootstrapPolicyDigest(): string | null {
+    return this.bootstrap?.provider.policyDigest ?? null;
+  }
+
+  async doctor(): Promise<{
+    verified: boolean;
+    policyDigest: string;
+    validationPolicyDigest: string;
+    bootstrapPolicyDigest: string | null;
+  }> {
+    const validationVerified = await this.probeProvider(this.provider, false, "validation");
+    const bootstrapVerified = this.bootstrap
+      ? await this.probeProvider(this.bootstrap.provider, this.bootstrap.config.networkAccess, "bootstrap")
+      : true;
+    return {
+      verified: validationVerified && bootstrapVerified,
+      policyDigest: this.provider.policyDigest,
+      validationPolicyDigest: this.provider.policyDigest,
+      bootstrapPolicyDigest: this.bootstrapPolicyDigest,
+    };
+  }
+
+  private async probeProvider(provider: SandboxProvider, expectedNetwork: boolean, label: string): Promise<boolean> {
+    if (!provider.contained) return false;
+    const runRoot = ensurePrivateDir(join(this.sandboxRoot, newId(`${label}-doctor`)));
     const workspace = ensurePrivateDir(join(runRoot, "workspace"));
     const outside = ensurePrivateDir(join(runRoot, "outside"));
-    const server = createServer((socket: any) => socket.end("reachable"));
+    const server = createServer((socket: any) => {
+      socket.on("error", () => {});
+      socket.end("reachable");
+    });
     let listening = false;
     try {
       await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -61,22 +87,30 @@ report.network = await new Promise((resolve) => {
 });
 fs.writeSync(1, JSON.stringify(report) + "\\n");
 `);
-      const result = await this.provider.run({
-        runRoot,
-        workspace,
-        command: "node probe.mjs",
-        environment: { HERDR_RELEASE_ID: "sandbox-doctor" },
-        timeoutMs: 10_000,
-        stdoutPath: join(runRoot, "doctor.stdout.log"),
-        stderrPath: join(runRoot, "doctor.stderr.log"),
-        stdoutByteLimit: 64 * 1024,
-        stderrByteLimit: 64 * 1024,
-        aggregateByteLimit: 96 * 1024,
-      });
+      const previousSentinel = process.env.CONTROLLER_SANDBOX_SENTINEL;
+      process.env.CONTROLLER_SANDBOX_SENTINEL = "must-not-cross";
+      let result: Awaited<ReturnType<SandboxProvider["run"]>>;
+      try {
+        result = await provider.run({
+          runRoot,
+          workspace,
+          command: "node probe.mjs",
+          environment: { HERDR_RELEASE_ID: "sandbox-doctor" },
+          timeoutMs: 10_000,
+          stdoutPath: join(runRoot, "doctor.stdout.log"),
+          stderrPath: join(runRoot, "doctor.stderr.log"),
+          stdoutByteLimit: 64 * 1024,
+          stderrByteLimit: 64 * 1024,
+          aggregateByteLimit: 96 * 1024,
+        });
+      } finally {
+        if (previousSentinel === undefined) delete process.env.CONTROLLER_SANDBOX_SENTINEL;
+        else process.env.CONTROLLER_SANDBOX_SENTINEL = previousSentinel;
+      }
       const line = result.stdoutTail.trim().split("\n").at(-1);
       const report = line ? JSON.parse(line) as Record<string, unknown> : null;
       if (result.exitCode !== 0 || result.signal !== null || result.timedOut || result.outputLimitExceeded
-        || !report || report.env !== null || report.outsideWrite !== false || report.network !== false) {
+        || !report || report.env !== null || report.outsideWrite !== false || report.network !== expectedNetwork) {
         const diagnostic = JSON.stringify({
           exited: result.exitCode === 0 && result.signal === null,
           timedOut: result.timedOut,
@@ -84,15 +118,15 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
           reportPresent: report !== null,
           environmentCleared: report?.env === null,
           outsideWriteDenied: report?.outsideWrite === false,
-          networkDenied: report?.network === false,
+          networkMatchesPolicy: report?.network === expectedNetwork,
         });
         throw new Error(`${result.stderrTail || "sandbox capability probe did not enforce its policy"}; ${diagnostic}`);
       }
-      return { verified: true, policyDigest: this.provider.policyDigest };
+      return true;
     } catch (error) {
       throw new ControllerError(
-        "validation_sandbox_capability_unavailable",
-        `Validation sandbox capability verification failed: ${error instanceof Error ? error.message : String(error)}`,
+        `${label}_sandbox_capability_unavailable`,
+        `${label[0]!.toUpperCase()}${label.slice(1)} sandbox capability verification failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       if (listening) await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
@@ -138,6 +172,19 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
         stderrPath: string;
         result: Awaited<ReturnType<SandboxProvider["run"]>>;
       }> = [];
+      const bootstrapResults: Array<{
+        commandIndex: number;
+        command: ValidationBootstrapConfig;
+        stdoutPath: string;
+        stderrPath: string;
+        result: Awaited<ReturnType<SandboxProvider["run"]>>;
+        sourceIntegrityVerified: boolean;
+      }> = [];
+      const integrityChecks: Array<{
+        commandIndex: number;
+        afterBootstrap: boolean;
+        afterValidation: boolean | null;
+      }> = [];
       let aggregateOutputBytes = 0;
       for (let index = 0; index < input.commands.length; index += 1) {
         const command = input.commands[index]!;
@@ -148,6 +195,44 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
         else if (projection.treeSha !== commandProjection.treeSha
           || projection.manifestDigest !== commandProjection.manifestDigest) {
           throw new Error("validation candidate projection changed between commands");
+        }
+        let afterBootstrap = true;
+        if (this.bootstrap) {
+          const bootstrapStdoutPath = join(input.evidenceRoot, `${String(index + 1).padStart(2, "0")}.bootstrap.stdout.log`);
+          const bootstrapStderrPath = join(input.evidenceRoot, `${String(index + 1).padStart(2, "0")}.bootstrap.stderr.log`);
+          const bootstrapResult = await this.bootstrap.provider.run({
+            runRoot: sandboxRunRoot,
+            workspace: commandWorkspace,
+            command: this.bootstrap.config.command,
+            environment: {
+              HERDR_RELEASE_ID: input.job.id,
+              HERDR_ISSUE_NUMBER: input.issueNumber === null ? "" : String(input.issueNumber),
+              HERDR_CANDIDATE_SHA: input.sourceHeadSha,
+            },
+            timeoutMs: this.bootstrap.config.timeoutMs,
+            stdoutPath: bootstrapStdoutPath,
+            stderrPath: bootstrapStderrPath,
+            stdoutByteLimit: input.stdoutByteLimit,
+            stderrByteLimit: input.stderrByteLimit,
+            aggregateByteLimit: Math.max(0, input.aggregateByteLimit - aggregateOutputBytes),
+          });
+          aggregateOutputBytes += bootstrapResult.stdoutBytes + bootstrapResult.stderrBytes;
+          afterBootstrap = await this.projectionIsIntact(commandWorkspace, commandProjection.manifest);
+          bootstrapResults.push({
+            commandIndex: index,
+            command: this.bootstrap.config,
+            stdoutPath: bootstrapStdoutPath,
+            stderrPath: bootstrapStderrPath,
+            result: bootstrapResult,
+            sourceIntegrityVerified: afterBootstrap,
+          });
+          if (!commandPassed(bootstrapResult) || !afterBootstrap) {
+            integrityChecks.push({ commandIndex: index, afterBootstrap, afterValidation: null });
+            rmSync(commandWorkspace, { recursive: true, force: true });
+            break;
+          }
+        } else {
+          afterBootstrap = await this.projectionIsIntact(commandWorkspace, commandProjection.manifest);
         }
         const stdoutPath = join(input.evidenceRoot, `${String(index + 1).padStart(2, "0")}.stdout.log`);
         const stderrPath = join(input.evidenceRoot, `${String(index + 1).padStart(2, "0")}.stderr.log`);
@@ -169,9 +254,10 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
         });
         aggregateOutputBytes += result.stdoutBytes + result.stderrBytes;
         results.push({ command, timeoutMs, stdoutPath, stderrPath, result });
-        await this.git.verifyValidationProjection(commandWorkspace, commandProjection.manifest);
+        const afterValidation = await this.projectionIsIntact(commandWorkspace, commandProjection.manifest);
+        integrityChecks.push({ commandIndex: index, afterBootstrap, afterValidation });
         rmSync(commandWorkspace, { recursive: true, force: true });
-        if (result.exitCode !== 0 || result.signal !== null || result.timedOut || result.outputLimitExceeded) {
+        if (!commandPassed(result) || !afterValidation) {
           break;
         }
       }
@@ -181,7 +267,14 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
         await this.git.verifyValidationProjection(emptyWorkspace, projection.manifest);
         rmSync(emptyWorkspace, { recursive: true, force: true });
       }
-      return { projection, results, sandboxPolicyDigest: this.provider.policyDigest };
+      return {
+        projection,
+        results,
+        bootstrapResults,
+        integrityChecks,
+        sandboxPolicyDigest: this.provider.policyDigest,
+        bootstrapPolicyDigest: this.bootstrapPolicyDigest,
+      };
     } catch (error) {
       executionError = error;
       throw error;
@@ -199,6 +292,15 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
       } catch (cleanupError) {
         if (executionError === null) throw cleanupError;
       }
+    }
+  }
+
+  private async projectionIsIntact(destination: string, manifest: Parameters<GitPort["verifyValidationProjection"]>[1]): Promise<boolean> {
+    try {
+      await this.git.verifyValidationProjection(destination, manifest);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -230,6 +332,10 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
       }));
     }
   }
+}
+
+function commandPassed(result: Awaited<ReturnType<SandboxProvider["run"]>>): boolean {
+  return result.exitCode === 0 && result.signal === null && !result.timedOut && !result.outputLimitExceeded;
 }
 
 function cleanupMarker(body: Omit<CleanupMarker, "version" | "digest">): CleanupMarker {

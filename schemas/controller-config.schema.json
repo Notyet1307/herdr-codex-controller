@@ -44,6 +44,21 @@
       "additionalProperties": false,
       "required": ["setup", "issue", "release", "maxOutputBytes", "maxStdoutBytes", "maxStderrBytes", "maxAggregateBytes", "sandbox"],
       "properties": {
+        "bootstrap": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["command", "timeoutMs", "networkAccess"],
+              "properties": {
+                "command": { "type": "string", "minLength": 1, "maxLength": 8192 },
+                "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 28800000 },
+                "networkAccess": { "type": "boolean" }
+              }
+            }
+          ]
+        },
         "setup": { "$ref": "#/$defs/commands" },
         "issue": { "$ref": "#/$defs/commands" },
         "release": { "$ref": "#/$defs/commands" },

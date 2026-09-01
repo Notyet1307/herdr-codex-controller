@@ -47,6 +47,10 @@ cp examples/release-plan.example.json /PRIVATE/PATH/release-plan.json
 
 Config v4 只保留操作者真实选择：路径、timeout、输出限制、validation commands、变更/repair budget、required-check identity、merge method 与 poll interval。Review、critical/major 阻断、PR、required checks、exact-head auto-merge、禁用 custom profile、Worker/Reviewer 断网均为代码不变量。
 
+可选 `validation.bootstrap` 是 Controller 私有 HOW：它在每一条 setup、Issue 或 Release command 的全新 disposable projection 中先运行，立即重验 tracked candidate，再由断网 validation policy 执行原始 semantic command 并再次重验。不同 command 不共享 workspace；`validation.setup` 是 baseline validation，不是依赖缓存。推荐 Node 项目使用 `npm ci --ignore-scripts --no-audit --no-fund`，仅 bootstrap 可按配置联网；bootstrap 不进入 Plan、`oracleCommands` 或 `commandSetDigest`。
+
+新 validation 写入 Receipt v4，分别绑定 validation/bootstrap policy、每轮 bootstrap 有界结果、两次 source-integrity 检查和 cleanup。历史 v2/v3 receipt 只读兼容。
+
 可选 `reviewDemo` 在通过 Release validation 和 aggregate review 后，对 exact candidate 的 disposable projection 执行一个真实命令。默认断网、隔离 HOME/TMP/cache、不继承 Controller/GitHub/Codex 凭据，只复制 `.herdr-review-output/` 中有界的普通文件。
 
 ## 启动与输出

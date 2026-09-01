@@ -5,6 +5,12 @@ export type CommandConfig = {
   timeoutMs?: number;
 };
 
+export type ValidationBootstrapConfig = {
+  command: string;
+  timeoutMs: number;
+  networkAccess: boolean;
+};
+
 export type CheckConclusion = "SUCCESS" | "NEUTRAL" | "SKIPPED" | "FAILURE" | "ACTION_REQUIRED" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "STARTUP_FAILURE" | "STALE";
 
 export type RequiredCheckContractV1 = {
@@ -55,6 +61,7 @@ export type ControllerConfig = {
     maxAggregateBytes: number;
   };
   validation: {
+    bootstrap?: ValidationBootstrapConfig | null;
     setup: CommandConfig[];
     issue: CommandConfig[];
     release: CommandConfig[];
@@ -184,6 +191,17 @@ export type ValidationCommandResult = {
   verifiedAt: string;
 };
 
+export type ValidationBootstrapResult = ValidationCommandResult & {
+  commandIndex: number;
+  sourceIntegrityVerified: boolean;
+};
+
+export type ValidationIntegrityCheck = {
+  commandIndex: number;
+  afterBootstrap: boolean;
+  afterValidation: boolean | null;
+};
+
 export type ValidationCommandConfig = CommandConfig;
 
 export type ValidationProjectionEntry =
@@ -191,7 +209,7 @@ export type ValidationProjectionEntry =
   | { path: string; mode: "120000"; byteCount: number; sha256: string; linkTarget: string };
 
 export type ValidationReceipt = {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   id: string;
   scope: "setup" | "issue" | "release";
   issueNumber: number | null;
@@ -208,6 +226,15 @@ export type ValidationReceipt = {
   projectionFileCount?: number;
   projectionByteCount?: number;
   cleanupCompleted?: boolean;
+  bootstrap?: null | {
+    command: string;
+    timeoutMs: number;
+    networkAccess: boolean;
+    identityDigest: string;
+    policyDigest: string;
+    runs: ValidationBootstrapResult[];
+  };
+  integrityChecks?: ValidationIntegrityCheck[];
   commandCount: number;
   passed: boolean;
   commands: ValidationCommandResult[];

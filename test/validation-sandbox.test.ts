@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { CodexSandboxProvider } from "../src/validation-sandbox.js";
+import type { SandboxProvider } from "../src/validation-sandbox.js";
 import { GitClient } from "../src/git.js";
 import { createTestRepo, git, testConfig, testSandboxBin } from "./support.js";
 import { highRiskPlan, writeInputs } from "./support.js";
 import { JobStore } from "../src/state.js";
-import { Validator } from "../src/validator.js";
+import { assertValidationReceipt, Validator } from "../src/validator.js";
 import { digestJson } from "../src/util.js";
 import { nowIso } from "../src/util.js";
 import { ValidationExecutor } from "../src/validation-executor.js";
@@ -84,6 +85,49 @@ test("missing sandbox capability blocks before candidate validation", async () =
   }
 });
 
+test("doctor seeds a host sentinel so environment inheritance cannot pass unnoticed", async () => {
+  const repo = createTestRepo();
+  const originalSentinel = process.env.CONTROLLER_SANDBOX_SENTINEL;
+  try {
+    delete process.env.CONTROLLER_SANDBOX_SENTINEL;
+    const leakyProvider: SandboxProvider = {
+      contained: true,
+      policyDigest: "a".repeat(64),
+      async run(input) {
+        const stdoutTail = `${JSON.stringify({
+          env: process.env.CONTROLLER_SANDBOX_SENTINEL ?? null,
+          outsideWrite: false,
+          network: false,
+        })}\n`;
+        return {
+          command: input.command,
+          args: [],
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          durationMs: 1,
+          stdoutPath: input.stdoutPath,
+          stderrPath: input.stderrPath,
+          stdoutTail,
+          stderrTail: "",
+          stdoutBytes: Buffer.byteLength(stdoutTail),
+          stderrBytes: 0,
+          stdoutSha256: `sha256:${"1".repeat(64)}`,
+          stderrSha256: `sha256:${"2".repeat(64)}`,
+          outputLimitExceeded: false,
+          terminationReason: "exit",
+        };
+      },
+    };
+    const executor = new ValidationExecutor(new GitClient(testConfig(repo)), leakyProvider, repo.sandbox);
+    await assert.rejects(executor.doctor(), /environmentCleared|capability verification failed/u);
+  } finally {
+    if (originalSentinel === undefined) delete process.env.CONTROLLER_SANDBOX_SENTINEL;
+    else process.env.CONTROLLER_SANDBOX_SENTINEL = originalSentinel;
+    repo.cleanup();
+  }
+});
+
 test("validation output flooding is bounded and recorded as a failed termination", async () => {
   const repo = createTestRepo();
   try {
@@ -149,7 +193,7 @@ test("validation command cannot validate a modified disposable substitute for th
     job.worktreePath = repo.source;
     job.baseSha = plan.baseSha;
     const gitClient = new GitClient(config);
-    await assert.rejects(new Validator(config, gitClient).run({
+    const receipt = (await new Validator(config, gitClient).run({
       job,
       scope: "release",
       issueNumber: null,
@@ -157,7 +201,11 @@ test("validation command cannot validate a modified disposable substitute for th
       validationsRoot: store.validationsRoot(job.id),
       sourceHeadSha: await gitClient.head(repo.source),
       sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
-    }), /projection.*changed|candidate.*mutated/iu);
+    })).receipt;
+    assert.equal(receipt.passed, false);
+    assert.equal(receipt.commands[0]?.exitCode, 0);
+    assert.deepEqual(receipt.integrityChecks, [{ commandIndex: 0, afterBootstrap: true, afterValidation: false }]);
+    assert.doesNotThrow(() => assertValidationReceipt(receipt));
     assert.equal(readFileSync(join(repo.source, "README.md"), "utf8"), "# Fixture\n");
   } finally {
     repo.cleanup();
@@ -191,6 +239,374 @@ test("validation commands cannot pass state to later commands", async () => {
     assert.equal(receipt.commands[0]!.exitCode, 0);
     assert.notEqual(receipt.commands[1]!.exitCode, 0);
   } finally {
+    repo.cleanup();
+  }
+});
+
+test("a bare Oracle command uses dependencies bootstrapped inside its disposable projection", async () => {
+  const repo = createTestRepo();
+  try {
+    writeFileSync(join(repo.source, ".gitignore"), "node_modules/\n", "utf8");
+    const packageJson = JSON.parse(readFileSync(join(repo.source, "package.json"), "utf8"));
+    packageJson.scripts["verify:oracle:o01"] = "local-tool";
+    writeFileSync(join(repo.source, "package.json"), `${JSON.stringify(packageJson)}\n`, "utf8");
+    git(repo.source, ["add", ".gitignore", "package.json"]);
+    git(repo.source, ["commit", "-m", "require a project-local Oracle tool"]);
+    git(repo.source, ["push", "origin", "main"]);
+
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: {
+          command: "mkdir -p node_modules/.bin && printf '#!/bin/sh\\nprintf bootstrap-ok\\n' > node_modules/.bin/local-tool && chmod +x node_modules/.bin/local-tool",
+          timeoutMs: 10_000,
+          networkAccess: false,
+        },
+        release: [{ command: "npm run verify:oracle:o01" }],
+      } as any,
+    });
+    const plan = highRiskPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.worktreePath = repo.source;
+    job.baseSha = plan.baseSha;
+    const gitClient = new GitClient(config);
+
+    const receipt = (await new Validator(config, gitClient).run({
+      job,
+      scope: "release",
+      issueNumber: null,
+      commands: config.validation.release,
+      validationsRoot: store.validationsRoot(job.id),
+      sourceHeadSha: await gitClient.head(repo.source),
+      sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+    })).receipt;
+
+    assert.equal(receipt.passed, true, receipt.commands[0]?.stderrTail);
+    assert.match(receipt.commands[0]!.stdoutTail, /bootstrap-ok/u);
+    assert.equal(receipt.version, 4);
+    assert.equal(receipt.bootstrap?.command, config.validation.bootstrap?.command);
+    assert.equal(receipt.bootstrap?.runs[0]?.sourceIntegrityVerified, true);
+    assert.deepEqual(receipt.integrityChecks, [{ commandIndex: 0, afterBootstrap: true, afterValidation: true }]);
+    assert.doesNotThrow(() => assertValidationReceipt(receipt));
+
+    const tampered = structuredClone(receipt);
+    tampered.bootstrap!.runs[0]!.command = "tampered-bootstrap";
+    const { digest: _digest, ...identity } = tampered;
+    tampered.digest = digestJson(identity);
+    assert.throws(() => assertValidationReceipt(tampered), /bootstrap evidence is invalid/u);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("bootstrap reruns for every isolated validation command projection", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: {
+          command: "mkdir -p node_modules/.bin && printf '#!/bin/sh\\nprintf local-tool-ok\\n' > node_modules/.bin/local-tool && chmod +x node_modules/.bin/local-tool && printf bootstrap-run",
+          timeoutMs: 10_000,
+          networkAccess: false,
+        },
+      } as any,
+    });
+    const plan = highRiskPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.worktreePath = repo.source;
+    job.baseSha = plan.baseSha;
+    const gitClient = new GitClient(config);
+    const receipt = (await new Validator(config, gitClient).run({
+      job,
+      scope: "release",
+      issueNumber: null,
+      commands: [
+        { command: "PATH=node_modules/.bin:$PATH local-tool && touch command-one-state" },
+        { command: "PATH=node_modules/.bin:$PATH local-tool && test ! -e command-one-state" },
+      ],
+      validationsRoot: store.validationsRoot(job.id),
+      sourceHeadSha: await gitClient.head(repo.source),
+      sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+    })).receipt;
+
+    assert.equal(receipt.passed, true);
+    assert.equal(receipt.bootstrap?.runs.length, 2);
+    assert.equal(receipt.bootstrap?.runs.every((run) => run.stdoutTail === "bootstrap-run"), true);
+    assert.equal(receipt.commands.every((command) => /local-tool-ok/u.test(command.stdoutTail)), true);
+    assert.equal(receipt.integrityChecks?.every((entry) => entry.afterBootstrap && entry.afterValidation), true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("bootstrap source mutation fails closed before the semantic command", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: {
+          command: "printf 'mutated\\n' > README.md",
+          timeoutMs: 10_000,
+          networkAccess: false,
+        },
+      } as any,
+    });
+    const plan = highRiskPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.worktreePath = repo.source;
+    job.baseSha = plan.baseSha;
+    const gitClient = new GitClient(config);
+    const receipt = (await new Validator(config, gitClient).run({
+      job,
+      scope: "release",
+      issueNumber: null,
+      commands: [{ command: "node -e 'process.exit(99)'" }],
+      validationsRoot: store.validationsRoot(job.id),
+      sourceHeadSha: await gitClient.head(repo.source),
+      sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+    })).receipt;
+
+    assert.equal(receipt.passed, false);
+    assert.equal(receipt.bootstrap?.runs[0]?.exitCode, 0);
+    assert.equal(receipt.bootstrap?.runs[0]?.sourceIntegrityVerified, false);
+    assert.equal(receipt.commands.length, 0);
+    assert.deepEqual(receipt.integrityChecks, [{ commandIndex: 0, afterBootstrap: false, afterValidation: null }]);
+    assert.doesNotThrow(() => assertValidationReceipt(receipt));
+    assert.equal(readFileSync(join(repo.source, "README.md"), "utf8"), "# Fixture\n");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("bootstrap exit, output-limit, and timeout failures are bounded and skip semantic validation", async (context: any) => {
+  const scenarios = [
+    { name: "exit", command: "printf bootstrap-failed >&2; exit 7", timeoutMs: 10_000, reason: "exit" },
+    {
+      name: "output-limit",
+      command: "node -e \"process.on('SIGTERM',()=>process.exit(0));const c='x'.repeat(1024);setInterval(()=>{process.stdout.write(c);process.stderr.write(c)},0)\"",
+      timeoutMs: 10_000,
+      reason: "output_limit",
+    },
+    { name: "timeout", command: "node -e \"setInterval(()=>{},1000)\"", timeoutMs: 1_000, reason: "timeout" },
+  ];
+  for (const scenario of scenarios) {
+    await context.test(scenario.name, async () => {
+      const repo = createTestRepo();
+      try {
+        const config = testConfig(repo, {
+          validation: {
+            bootstrap: {
+              command: scenario.command,
+              timeoutMs: scenario.timeoutMs,
+              networkAccess: false,
+            },
+            maxStdoutBytes: 4_096,
+            maxStderrBytes: 4_096,
+            maxAggregateBytes: 6_144,
+          } as any,
+        });
+        const plan = highRiskPlan(repo, [1]);
+        const { configPath, planPath } = writeInputs(repo, config, plan);
+        const store = new JobStore(config);
+        const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+        job.worktreePath = repo.source;
+        job.baseSha = plan.baseSha;
+        const gitClient = new GitClient(config);
+        const receipt = (await new Validator(config, gitClient).run({
+          job,
+          scope: "release",
+          issueNumber: null,
+          commands: [{ command: "node -e 'process.exit(99)'" }],
+          validationsRoot: store.validationsRoot(job.id),
+          sourceHeadSha: await gitClient.head(repo.source),
+          sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+        })).receipt;
+
+        const bootstrap = receipt.bootstrap!.runs[0]!;
+        assert.equal(receipt.passed, false);
+        assert.equal(receipt.commands.length, 0);
+        assert.equal(bootstrap.terminationReason, scenario.reason);
+        assert.ok(statSync(bootstrap.stdoutPath).size <= 4_096);
+        assert.ok(statSync(bootstrap.stderrPath).size <= 4_096);
+        assert.doesNotThrow(() => assertValidationReceipt(receipt));
+      } finally {
+        repo.cleanup();
+      }
+    });
+  }
+});
+
+test("bootstrap signal termination is bound into receipt evidence", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: { command: "signal-bootstrap", timeoutMs: 10_000, networkAccess: false },
+      } as any,
+    });
+    const result = (input: any, signal: string | null, stdoutTail: string) => ({
+      command: input.command,
+      args: [],
+      exitCode: signal ? null : 0,
+      signal,
+      timedOut: false,
+      durationMs: 1,
+      stdoutPath: input.stdoutPath,
+      stderrPath: input.stderrPath,
+      stdoutTail,
+      stderrTail: "",
+      stdoutBytes: Buffer.byteLength(stdoutTail),
+      stderrBytes: 0,
+      stdoutSha256: `sha256:${"3".repeat(64)}`,
+      stderrSha256: `sha256:${"4".repeat(64)}`,
+      outputLimitExceeded: false,
+      terminationReason: signal ? "signal" as const : "exit" as const,
+    });
+    const validationProvider: SandboxProvider = {
+      contained: true,
+      policyDigest: "a".repeat(64),
+      async run(input) {
+        return result(input, null, `${JSON.stringify({ env: null, outsideWrite: false, network: false })}\n`);
+      },
+    };
+    const bootstrapProvider: SandboxProvider = {
+      contained: true,
+      policyDigest: "b".repeat(64),
+      async run(input) {
+        return input.command === "node probe.mjs"
+          ? result(input, null, `${JSON.stringify({ env: null, outsideWrite: false, network: false })}\n`)
+          : result(input, "SIGTERM", "");
+      },
+    };
+    const plan = highRiskPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.worktreePath = repo.source;
+    job.baseSha = plan.baseSha;
+    const gitClient = new GitClient(config);
+    const executor = new ValidationExecutor(gitClient, validationProvider, repo.sandbox, {
+      config: config.validation.bootstrap!,
+      provider: bootstrapProvider,
+    });
+    const receipt = (await new Validator(config, gitClient, executor).run({
+      job,
+      scope: "release",
+      issueNumber: null,
+      commands: [{ command: "semantic-command-must-not-run" }],
+      validationsRoot: store.validationsRoot(job.id),
+      sourceHeadSha: await gitClient.head(repo.source),
+      sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+    })).receipt;
+
+    assert.equal(receipt.commands.length, 0);
+    assert.equal(receipt.bootstrap?.runs[0]?.signal, "SIGTERM");
+    assert.equal(receipt.bootstrap?.runs[0]?.terminationReason, "signal");
+    assert.doesNotThrow(() => assertValidationReceipt(receipt));
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("bootstrap may use configured network while semantic validation remains credential-free and offline", async () => {
+  const repo = createTestRepo();
+  const server = createServer((socket: any) => {
+    socket.on("error", () => {});
+    socket.end("reachable");
+  });
+  const originalSentinel = process.env.CONTROLLER_SENTINEL;
+  const originalToken = process.env.NPM_TOKEN;
+  try {
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      server.once("error", rejectPromise);
+      server.listen(0, "127.0.0.1", resolvePromise);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test listener address is unavailable");
+    const stateSecret = join(repo.state, "controller-secret");
+    writeFileSync(stateSecret, "private", "utf8");
+    writeFileSync(join(repo.source, "sandbox-policy-probe.mjs"), `
+import fs from "node:fs";
+import net from "node:net";
+const expectedNetwork = process.argv[3] === "true";
+const network = await new Promise((resolve) => {
+  const socket = net.connect(Number(process.argv[2]), "127.0.0.1");
+  socket.once("connect", () => { socket.destroy(); resolve(true); });
+  socket.once("error", () => resolve(false));
+  setTimeout(() => { socket.destroy(); resolve(false); }, 1000);
+});
+let stateReadable = false;
+try { fs.readFileSync(${JSON.stringify(stateSecret)}); stateReadable = true; } catch {}
+const report = {
+  network,
+  hostSentinel: process.env.CONTROLLER_SENTINEL ?? null,
+  npmToken: process.env.NPM_TOKEN ?? null,
+  npmUserConfig: process.env.NPM_CONFIG_USERCONFIG ?? null,
+  userNpmrc: fs.existsSync(process.env.HOME + "/.npmrc"),
+  stateReadable,
+};
+console.log(JSON.stringify(report));
+if (network !== expectedNetwork || report.hostSentinel !== null || report.npmToken !== null
+  || report.npmUserConfig !== "/dev/null" || report.userNpmrc || stateReadable) process.exit(1);
+if (expectedNetwork) {
+  fs.mkdirSync("node_modules/.bin", { recursive: true });
+  fs.writeFileSync("node_modules/.bin/local-tool", "#!/bin/sh\\nprintf policy-ok\\n", { mode: 0o700 });
+}
+`, "utf8");
+    git(repo.source, ["add", "sandbox-policy-probe.mjs"]);
+    git(repo.source, ["commit", "-m", "add sandbox policy probe"]);
+    git(repo.source, ["push", "origin", "main"]);
+    process.env.CONTROLLER_SENTINEL = "must-not-cross";
+    process.env.NPM_TOKEN = "must-not-cross";
+
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: {
+          command: `node sandbox-policy-probe.mjs ${address.port} true`,
+          timeoutMs: 10_000,
+          networkAccess: true,
+        },
+      } as any,
+    });
+    const plan = highRiskPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.worktreePath = repo.source;
+    job.baseSha = plan.baseSha;
+    const gitClient = new GitClient(config);
+    const validator = new Validator(config, gitClient);
+    const doctor = await validator.preflight();
+    assert.equal(doctor.verified, true);
+    assert.match(doctor.validationPolicyDigest, /^[a-f0-9]{64}$/u);
+    assert.match(doctor.bootstrapPolicyDigest ?? "", /^[a-f0-9]{64}$/u);
+    assert.notEqual(doctor.validationPolicyDigest, doctor.bootstrapPolicyDigest);
+
+    const receipt = (await validator.run({
+      job,
+      scope: "release",
+      issueNumber: null,
+      commands: [{ command: `node sandbox-policy-probe.mjs ${address.port} false && PATH=node_modules/.bin:$PATH local-tool` }],
+      validationsRoot: store.validationsRoot(job.id),
+      sourceHeadSha: await gitClient.head(repo.source),
+      sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+    })).receipt;
+
+    assert.equal(receipt.passed, true, receipt.commands[0]?.stderrTail);
+    assert.equal(JSON.parse(receipt.bootstrap!.runs[0]!.stdoutTail).network, true);
+    assert.equal(JSON.parse(receipt.commands[0]!.stdoutTail.split("\n")[0]!).network, false);
+    assert.match(receipt.commands[0]!.stdoutTail, /policy-ok/u);
+  } finally {
+    if (originalSentinel === undefined) delete process.env.CONTROLLER_SENTINEL;
+    else process.env.CONTROLLER_SENTINEL = originalSentinel;
+    if (originalToken === undefined) delete process.env.NPM_TOKEN;
+    else process.env.NPM_TOKEN = originalToken;
+    await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
     repo.cleanup();
   }
 });
@@ -259,7 +675,8 @@ console.log(JSON.stringify(report));
     const report = JSON.parse(receipt.commands[0]!.stdoutTail.trim().split("\n").at(-1)!);
     assert.deepEqual(report, { env: null, ignoredStatePresent: false, outsideWrite: false, network: false });
     assert.equal(existsSync(outsidePath), false);
-    assert.equal(receipt.version, 3);
+    assert.equal(receipt.version, 4);
+    assert.equal(receipt.bootstrap, null);
     assert.equal(receipt.passed, true);
     assert.equal(receipt.cleanupCompleted, true);
     assert.match(receipt.candidateTreeSha ?? "", /^[a-f0-9]{40}$/u);

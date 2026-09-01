@@ -12,6 +12,10 @@ node dist/src/cli.js plan validate --config /PRIVATE/PATH/controller.json --plan
 
 Config 必须是 v4；required-check identity、timeout、merge method、paths 与 validation commands 必须符合目标仓库真实策略。
 
+依赖准备必须放在可选 `validation.bootstrap`，不能拼入 Planner 绑定的 Oracle command。Bootstrap 对每一条 semantic command 的独立 projection 重跑；`validation.setup` 只验证 baseline，不提供后续缓存。通常使用 `npm ci --ignore-scripts --no-audit --no-fund`。只有 bootstrap 可按配置联网，随后 semantic validation 总是重新进入断网 policy；doctor 分别返回 validation 与 bootstrap policy digest。
+
+`validation.sandbox.environmentPath` 必须指向 sandbox 可读的稳定系统 runtime。不要使用被 HOME 拒绝规则覆盖的版本管理器路径，不要全局安装项目工具，也不要复制 checkout 的 `node_modules`。
+
 ## 启动与观察
 
 ```bash

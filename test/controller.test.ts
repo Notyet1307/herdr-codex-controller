@@ -74,6 +74,36 @@ test("two ordered Issues use fresh Workers, one aggregate review, and Controller
   } finally { repo.cleanup(); }
 });
 
+test("bootstrap config drift is rejected before release side effects", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: { command: "prepare-dependencies", timeoutMs: 10_000, networkAccess: false },
+      } as any,
+    });
+    const plan = highRiskPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github: new FakeGitHub(),
+      codex: new FakeCodex(gitClient),
+      validator: new Validator(config),
+    });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    config.validation.bootstrap!.command = "changed-after-job-creation";
+
+    const result = await controller.step(created.id);
+    const blocked = store.load(created.id);
+    assert.equal(result.action, "blocked");
+    assert.equal(blocked.blocked?.code, "config_drift");
+    assert.equal(existsSync(created.worktreePath), false);
+  } finally { repo.cleanup(); }
+});
+
 test("failed Issue validation schedules one fresh repair over the preserved worktree", async () => {
   const repo = createTestRepo();
   try {

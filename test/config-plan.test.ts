@@ -83,6 +83,48 @@ test("plan dependency, repo, baseRef, and Oracle command bindings fail closed", 
   } finally { repo.cleanup(); }
 });
 
+test("optional bootstrap changes config authority without changing bare Oracle identity", () => {
+  const repo = createTestRepo();
+  try {
+    const legacyInput = configInput(testConfig(repo));
+    const legacy = validateConfig(legacyInput);
+    assert.equal(legacy.validation.bootstrap, undefined);
+
+    const explicitNull = structuredClone(legacyInput) as any;
+    explicitNull.validation.bootstrap = null;
+    assert.equal(validateConfig(explicitNull).validation.bootstrap, null);
+
+    const withBootstrap = structuredClone(legacyInput) as any;
+    withBootstrap.validation.bootstrap = {
+      command: "npm ci --ignore-scripts --no-audit --no-fund",
+      timeoutMs: 1_800_000,
+      networkAccess: true,
+    };
+    const configured = validateConfig(withBootstrap);
+    assert.notEqual(digestJson(configured), digestJson(legacy));
+
+    const changedBootstrap = structuredClone(configured);
+    changedBootstrap.validation.bootstrap!.networkAccess = false;
+    assert.notEqual(digestJson(changedBootstrap), digestJson(configured));
+
+    const plan = highRiskPlan(repo, [1]);
+    assert.doesNotThrow(() => assertPlanCompatibleWithConfig(plan, configured));
+    const prefixed = structuredClone(configured);
+    prefixed.validation.release[0]!.command = `npm ci && ${plan.issues[0]!.oracleCommands[0]}`;
+    assert.throws(() => assertPlanCompatibleWithConfig(plan, prefixed), (error: any) => error?.code === "oracle_validation_command_missing");
+
+    for (const bootstrap of [
+      { command: "npm ci", timeoutMs: 999, networkAccess: true },
+      { command: "npm ci", timeoutMs: 1_000, networkAccess: "yes" },
+      { command: "npm ci", timeoutMs: 1_000, networkAccess: true, extra: true },
+    ]) {
+      const invalid = structuredClone(legacyInput) as any;
+      invalid.validation.bootstrap = bootstrap;
+      assert.throws(() => validateConfig(invalid));
+    }
+  } finally { repo.cleanup(); }
+});
+
 test("canonical JSON remains code-unit deterministic", () => {
   const value = { pullRequest: { mergedAt: "a", mergeSha: "b" }, plan: { baseSha: "c", id: "d" } };
   assert.equal(stableStringify(value), '{"plan":{"baseSha":"c","id":"d"},"pullRequest":{"mergeSha":"b","mergedAt":"a"}}');
