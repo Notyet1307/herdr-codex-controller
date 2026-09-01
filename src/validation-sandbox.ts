@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type { CommandResult, ControllerConfig } from "./types.js";
 import { runCommand } from "./command.js";
 import { ensurePrivateDir, writeTextAtomic } from "./fs-atomic.js";
@@ -67,6 +67,12 @@ export class CodexSandboxProvider implements SandboxProvider {
       version: 1,
       provider: "codex-permission-profile",
       profile: profileTemplate(this.deniedRoots, config.networkAccess ?? false),
+      isolatedTemporaryDirectory: {
+        location: "validation-run-sibling",
+        scope: "command-projection",
+        access: "write",
+        cleanup: "validation-run",
+      },
       nodeStdioShimSha256: sha256PrefixedUtf8(NODE_STDIO_SHIM),
       environmentPath: config.environmentPath,
       shell: config.shell,
@@ -78,12 +84,19 @@ export class CodexSandboxProvider implements SandboxProvider {
     const runRoot = realpathSync(input.runRoot);
     const workspace = realpathSync(input.workspace);
     if (!pathWithin(runRoot, workspace)) throw new Error("validation workspace escapes its private run root");
-    const profileRoot = ensurePrivateDir(join(runRoot, "sandbox-profile"));
+    const runtimeRoot = resolve(runRoot, "runtime", basename(workspace));
+    if (!pathWithin(runRoot, runtimeRoot) || pathWithin(workspace, runtimeRoot)) {
+      throw new Error("validation runtime root is outside its private command scope");
+    }
+    const profileRoot = ensurePrivateDir(join(runtimeRoot, "sandbox-profile"));
     const isolatedHome = ensurePrivateDir(join(workspace, ".herdr-home"));
-    const isolatedTmp = ensurePrivateDir(join(workspace, ".herdr-tmp"));
+    const isolatedTmp = ensurePrivateDir(join(runtimeRoot, "tmp"));
     const cacheRoot = ensurePrivateDir(join(workspace, ".herdr-cache"));
     const nodeStdioShim = join(profileRoot, "node-stdio.cjs");
-    writeTextAtomic(join(profileRoot, "config.toml"), profileTemplate(this.deniedRoots, this.config.networkAccess ?? false));
+    writeTextAtomic(
+      join(profileRoot, "config.toml"),
+      profileTemplate(this.deniedRoots, this.config.networkAccess ?? false, isolatedTmp),
+    );
     writeTextAtomic(nodeStdioShim, NODE_STDIO_SHIM);
     const environment = sandboxEnvironment({
       configured: input.environment,
@@ -194,8 +207,9 @@ function sensitiveRoots(additional: string[]): string[] {
   return canonical.filter((entry, index) => !canonical.slice(0, index).some((parent) => pathWithin(parent, entry)));
 }
 
-function profileTemplate(deniedRoots: string[], networkAccess: boolean): string {
+function profileTemplate(deniedRoots: string[], networkAccess: boolean, isolatedTmp?: string): string {
   const denied = deniedRoots.map((entry) => `${tomlString(entry)} = "deny"`).join("\n");
+  const temporary = isolatedTmp ? `${tomlString(isolatedTmp)} = "write"\n` : "";
   return `default_permissions = "validation"
 
 [permissions.validation]
@@ -203,7 +217,7 @@ extends = ":read-only"
 
 [permissions.validation.filesystem]
 ${denied}
-
+${temporary}
 [permissions.validation.filesystem.":workspace_roots"]
 "." = "write"
 

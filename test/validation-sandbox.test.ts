@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:net";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -128,6 +128,47 @@ test("doctor seeds a host sentinel so environment inheritance cannot pass unnoti
   }
 });
 
+test("doctor rejects a sandbox whose writable temp root is inside the candidate projection", async () => {
+  const repo = createTestRepo();
+  try {
+    const unsafeTempProvider: SandboxProvider = {
+      contained: true,
+      policyDigest: "b".repeat(64),
+      async run(input) {
+        const stdoutTail = `${JSON.stringify({
+          env: null,
+          outsideWrite: false,
+          network: false,
+          temporary: input.workspace,
+          temporaryWrite: true,
+        })}\n`;
+        return {
+          command: input.command,
+          args: [],
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          durationMs: 1,
+          stdoutPath: input.stdoutPath,
+          stderrPath: input.stderrPath,
+          stdoutTail,
+          stderrTail: "",
+          stdoutBytes: Buffer.byteLength(stdoutTail),
+          stderrBytes: 0,
+          stdoutSha256: `sha256:${"1".repeat(64)}`,
+          stderrSha256: `sha256:${"2".repeat(64)}`,
+          outputLimitExceeded: false,
+          terminationReason: "exit",
+        };
+      },
+    };
+    const executor = new ValidationExecutor(new GitClient(testConfig(repo)), unsafeTempProvider, repo.sandbox);
+    await assert.rejects(executor.doctor(), /temporaryOutsideCandidate|capability verification failed/u);
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("validation output flooding is bounded and recorded as a failed termination", async () => {
   const repo = createTestRepo();
   try {
@@ -240,6 +281,130 @@ test("validation commands cannot pass state to later commands", async () => {
     assert.notEqual(receipt.commands[1]!.exitCode, 0);
   } finally {
     repo.cleanup();
+  }
+});
+
+test("each validation command receives a private writable temp root outside its candidate projection", async () => {
+  const repo = createTestRepo();
+  try {
+    writeFileSync(join(repo.source, "temp-boundary-probe.mjs"), `
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join, relative, sep } from "node:path";
+const workspace = realpathSync(".");
+const temporary = realpathSync(process.env.TMPDIR ?? "");
+const relation = relative(workspace, temporary);
+if (relation === "" || (!relation.startsWith(\`..\${sep}\`) && relation !== "..")) {
+  throw new Error("validation temp root is inside the candidate projection");
+}
+const marker = join(temporary, "projection-marker");
+if (process.argv[2] === "write") {
+  writeFileSync(marker, "first-command", "utf8");
+  const nested = spawnSync(process.execPath, [
+    "--permission",
+    \`--allow-fs-read=\${workspace}\`,
+    "-e",
+    "const fs=require('node:fs');const p=process.argv[1];if(process.permission.has('fs.read',p))process.exit(3);try{fs.readFileSync(p);process.exit(4)}catch(error){if(error?.code!=='ERR_ACCESS_DENIED')throw error}",
+    marker,
+  ], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH ?? "", TMPDIR: temporary, LANG: "C.UTF-8" },
+  });
+  if (nested.status !== 0) throw new Error(\`nested candidate-root capability probe failed: \${nested.stderr}\`);
+} else if (existsSync(marker)) throw new Error("validation temp state crossed command projections");
+console.log(JSON.stringify({ workspace, temporary }));
+`, "utf8");
+    git(repo.source, ["add", "temp-boundary-probe.mjs"]);
+    git(repo.source, ["commit", "-m", "add temp boundary probe"]);
+    git(repo.source, ["push", "origin", "main"]);
+
+    const config = testConfig(repo);
+    const plan = highRiskPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    job.worktreePath = repo.source;
+    job.baseSha = plan.baseSha;
+    const gitClient = new GitClient(config);
+    const receipt = (await new Validator(config, gitClient).run({
+      job,
+      scope: "release",
+      issueNumber: null,
+      commands: [
+        { command: "node temp-boundary-probe.mjs write" },
+        { command: "node temp-boundary-probe.mjs assert-clean" },
+      ],
+      validationsRoot: store.validationsRoot(job.id),
+      sourceHeadSha: await gitClient.head(repo.source),
+      sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+    })).receipt;
+
+    assert.equal(receipt.passed, true, receipt.commands[0]?.stderrTail);
+    assert.equal(receipt.commands.length, 2);
+    const reports = receipt.commands.map((command) => JSON.parse(command.stdoutTail.trim().split("\n").at(-1)!));
+    assert.notEqual(reports[0].workspace, reports[0].temporary);
+    assert.notEqual(reports[1].workspace, reports[1].temporary);
+    assert.notEqual(reports[0].temporary, reports[1].temporary);
+    assert.deepEqual(readdirSync(join(repo.sandbox, job.id)), []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("separate repository jobs sharing one sandbox root receive disjoint temporary state", async () => {
+  const first = createTestRepo();
+  const second = createTestRepo();
+  try {
+    for (const [repo, owner] of [[first, "first"], [second, "second"]] as const) {
+      writeFileSync(join(repo.source, "project-temp-probe.mjs"), `
+import { realpathSync, writeFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
+const workspace = realpathSync(".");
+const temporary = realpathSync(process.env.TMPDIR ?? "");
+const relation = relative(workspace, temporary);
+if (relation === "" || (!relation.startsWith(\`..\${sep}\`) && relation !== "..")) process.exit(2);
+writeFileSync(join(temporary, "owner"), ${JSON.stringify(owner)}, "utf8");
+console.log(JSON.stringify({ owner: ${JSON.stringify(owner)}, workspace, temporary }));
+`, "utf8");
+      git(repo.source, ["add", "project-temp-probe.mjs"]);
+      git(repo.source, ["commit", "-m", `add ${owner} project temp probe`]);
+      git(repo.source, ["push", "origin", "main"]);
+    }
+
+    const run = async (repo: typeof first) => {
+      const config = testConfig(repo);
+      config.validation.sandbox!.root = first.sandbox;
+      const plan = highRiskPlan(repo, [1]);
+      const { configPath, planPath } = writeInputs(repo, config, plan);
+      const store = new JobStore(config);
+      const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+      job.worktreePath = repo.source;
+      job.baseSha = plan.baseSha;
+      const gitClient = new GitClient(config);
+      return (await new Validator(config, gitClient).run({
+        job,
+        scope: "release",
+        issueNumber: null,
+        commands: [{ command: "node project-temp-probe.mjs" }],
+        validationsRoot: store.validationsRoot(job.id),
+        sourceHeadSha: await gitClient.head(repo.source),
+        sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
+      })).receipt;
+    };
+
+    const [firstReceipt, secondReceipt] = await Promise.all([run(first), run(second)]);
+    assert.equal(firstReceipt.passed, true, firstReceipt.commands[0]?.stderrTail);
+    assert.equal(secondReceipt.passed, true, secondReceipt.commands[0]?.stderrTail);
+    const firstReport = JSON.parse(firstReceipt.commands[0]!.stdoutTail.trim().split("\n").at(-1)!);
+    const secondReport = JSON.parse(secondReceipt.commands[0]!.stdoutTail.trim().split("\n").at(-1)!);
+    assert.equal(firstReport.owner, "first");
+    assert.equal(secondReport.owner, "second");
+    assert.notEqual(firstReport.workspace, secondReport.workspace);
+    assert.notEqual(firstReport.temporary, secondReport.temporary);
+    assert.deepEqual(readdirSync(join(first.sandbox, highRiskPlan(first, [1]).id)), []);
+  } finally {
+    second.cleanup();
+    first.cleanup();
   }
 });
 
@@ -467,11 +632,22 @@ test("bootstrap signal termination is bound into receipt evidence", async () => 
       outputLimitExceeded: false,
       terminationReason: signal ? "signal" as const : "exit" as const,
     });
+    const doctorResult = (input: any) => {
+      const temporary = join(input.runRoot, "fake-doctor-temp");
+      mkdirSync(temporary, { recursive: true, mode: 0o700 });
+      return result(input, null, `${JSON.stringify({
+        env: null,
+        outsideWrite: false,
+        network: false,
+        temporary,
+        temporaryWrite: true,
+      })}\n`);
+    };
     const validationProvider: SandboxProvider = {
       contained: true,
       policyDigest: "a".repeat(64),
       async run(input) {
-        return result(input, null, `${JSON.stringify({ env: null, outsideWrite: false, network: false })}\n`);
+        return doctorResult(input);
       },
     };
     const bootstrapProvider: SandboxProvider = {
@@ -479,7 +655,7 @@ test("bootstrap signal termination is bound into receipt evidence", async () => 
       policyDigest: "b".repeat(64),
       async run(input) {
         return input.command === "node probe.mjs"
-          ? result(input, null, `${JSON.stringify({ env: null, outsideWrite: false, network: false })}\n`)
+          ? doctorResult(input)
           : result(input, "SIGTERM", "");
       },
     };
