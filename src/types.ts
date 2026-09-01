@@ -1,9 +1,6 @@
 export type SandboxMode = "read-only" | "workspace-write";
 export type ApprovalPolicy = "never";
-export type ExecutionMode =
-  | "release-plan-v2-direct"
-  | "release-plan-v1-compatibility"
-  | "dispatcher-experimental";
+export type ExecutionMode = "release-plan-v2-direct";
 
 export type CommandConfig = {
   command: string;
@@ -16,7 +13,7 @@ export type RequiredCheckContractV1 = {
   version: 1;
   firstAppearanceTimeoutMs: number;
   pendingTimeoutMs: number;
-  postMergeTimeoutMs: number;
+  postMergeTimeoutMs?: number;
   checks: Array<{
     name: string;
     appId: number | null;
@@ -33,7 +30,7 @@ export type MergeAuthorityContractV1 = {
 };
 
 export type ControllerConfig = {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   executionMode: ExecutionMode;
   repo: string;
   localPath: string;
@@ -86,6 +83,8 @@ export type ControllerConfig = {
     maxCiCodeRepairRounds?: number;
     maxCiInfrastructureReruns?: number;
     maxProviderRetries?: number;
+    maxCodeRepairRounds?: number;
+    maxInfrastructureReruns?: number;
     maxIssues: number;
     maxChangedFiles: number;
     maxChangedLines: number;
@@ -179,27 +178,6 @@ export type ControllerProvenance = {
     digest: string;
   };
   digest: string;
-};
-
-export type ReleasePlanIssueV1 = {
-  number: number;
-  order: number;
-  dependsOn: number[];
-  objective: string | null;
-  acceptanceCriteria: string[];
-  suggestedValidation: CommandConfig[];
-  allowNoop: boolean;
-};
-
-export type ReleasePlanV1 = {
-  version: 1;
-  id: string;
-  title: string;
-  objective: string;
-  parentIssue: number | null;
-  issues: ReleasePlanIssueV1[];
-  releaseAcceptanceCriteria: string[];
-  reviewFocus: string[];
 };
 
 export type ReleasePlanSourceV2 = {
@@ -300,8 +278,8 @@ export type ReleasePlanV2 = {
   reviewFocus: string[];
 };
 
-export type ReleasePlanIssue = ReleasePlanIssueV1 | ReleasePlanIssueV2;
-export type ReleasePlan = ReleasePlanV1 | ReleasePlanV2;
+export type ReleasePlanIssue = ReleasePlanIssueV2;
+export type ReleasePlan = ReleasePlanV2;
 
 export type IssueSnapshot = {
   number: number;
@@ -416,7 +394,7 @@ export type ValidationReceipt = {
   digest: string;
 };
 
-export type RunKind = "worker" | "issue-repair" | "release-harden" | "review";
+export type RunKind = "worker" | "issue-repair" | "release-repair" | "review";
 
 export type CodexRunRecord = {
   id: string;
@@ -455,17 +433,14 @@ export type IssueExecution = {
   nextRunKind: "worker" | "issue-repair" | "recovery";
 };
 
-export type JobStatus = "running" | "blocked" | "ready_to_merge" | "completed" | "failed";
+export type JobStatus = "running" | "blocked" | "completed" | "failed";
 export type JobPhase =
   | "prepare"
   | "implement"
-  | "issue_validate"
-  | "release_validate"
+  | "verify"
   | "review"
-  | "harden"
+  | "repair"
   | "deliver"
-  | "ci"
-  | "awaiting_merge"
   | "complete";
 
 export type BlockedState = {
@@ -494,93 +469,6 @@ export type PullRequestState = {
   baseRef: string;
   headSha: string;
   mergeSha: string | null;
-};
-
-export type QueueIssue = {
-  number: number;
-  title: string;
-  body: string;
-  state: "OPEN" | "CLOSED";
-  labels: string[];
-  assignees: string[];
-  url: string;
-  openBlockers: number;
-};
-
-export type WorkflowGateSummary = {
-  state: "pending" | "success" | "failure";
-  sha: string;
-  missing: string[];
-  pending: Array<{ name: string; status: string; url: string | null }>;
-  failures: Array<{ name: string; conclusion: string; url: string | null }>;
-  successes: Array<{ name: string; url: string | null }>;
-  observedAt: string;
-};
-
-export type DispatcherConfig = {
-  version: 1;
-  parentIssue: number;
-  readyLabel: string;
-  releaseAcceptanceCriteria: string[];
-  reviewFocus: string[];
-  postMerge: {
-    requiredWorkflows: string[];
-    pollIntervalMs: number;
-    timeoutMs: number;
-  };
-};
-
-export type DispatcherCurrent = {
-  issueNumber: number;
-  issueTitle: string;
-  issueBodyHash: string;
-  issueUrl: string;
-  login: string;
-  selectedAt: string;
-  phase: "selected" | "claimed" | "plan_ready" | "job_running" | "post_merge";
-  planId: string | null;
-  planPath: string | null;
-  jobId: string | null;
-  sourceVerifiedAt: string | null;
-  postMergeStartedAt: string | null;
-};
-
-export type DispatcherState = {
-  version: 1;
-  repo: string;
-  parentIssue: number;
-  controllerConfigPath: string;
-  controllerConfigDigest: string;
-  dispatcherConfigPath: string;
-  dispatcherConfigDigest: string;
-  current: DispatcherCurrent | null;
-  blocked: {
-    code: string;
-    message: string;
-    createdAt: string;
-    detailsPath: string | null;
-  } | null;
-  history: Array<{
-    issueNumber: number;
-    jobId: string;
-    pullRequestNumber: number;
-    candidateSha: string;
-    mergeSha: string;
-    workflowGate: WorkflowGateSummary;
-    verifiedAt: string;
-  }>;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type DispatcherStepResult = {
-  action: string;
-  progressed: boolean;
-  terminal: boolean;
-  retryAfterMs: number | null;
-  message: string;
-  issueNumber: number | null;
-  jobId: string | null;
 };
 
 export type JobCompletionEvidence = {
@@ -652,7 +540,6 @@ export type CiGateState = {
   firstObservedAt: string;
   firstAppearanceDeadlineAt: string;
   pendingDeadlineAt: string | null;
-  postMergeDeadlineAt: string | null;
   attempts: number;
   lastObservation: GhCheckSummary | null;
 };
@@ -708,15 +595,10 @@ export type JobState = {
   }>;
   candidateSha: string | null;
   reviewRound: number;
-  hardeningRounds: number;
-  ciRepairRounds: number;
-  releaseValidationRepairRounds: number;
-  reviewRepairRounds: number;
-  ciCodeRepairRounds: number;
-  ciInfrastructureReruns: number;
-  providerRetryAttempts: number;
+  codeRepairRounds: number;
+  infrastructureReruns: number;
   lastReviewPath: string | null;
-  hardeningReasonPath: string | null;
+  repairReasonPath: string | null;
   pullRequest: PullRequestState | null;
   ciGate: CiGateState | null;
   deliveryAuthority: DeliveryAuthorityState | null;

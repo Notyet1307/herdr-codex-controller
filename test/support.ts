@@ -8,16 +8,13 @@ import type {
   IssueSnapshot,
   JobState,
   PullRequestState,
-  QueueIssue,
   ReleasePlan,
   ReleasePlanV2,
   ReviewResult,
   RunKind,
   WorkerResult,
-  WorkflowGateSummary,
 } from "../src/types.js";
 import type { CodexPort, GitHubPort } from "../src/ports.js";
-import { isReleasePlanV2 } from "../src/plan.js";
 import { digestJson, nowIso, sha256PrefixedUtf8 } from "../src/util.js";
 import { ensurePrivateDir, writeJsonAtomic, writeTextAtomic } from "../src/fs-atomic.js";
 import { GitClient } from "../src/git.js";
@@ -97,8 +94,8 @@ export function createTestRepo(): TestRepo {
 
 export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> = {}): ControllerConfig {
   const base: ControllerConfig = {
-    version: 2,
-    executionMode: "release-plan-v1-compatibility",
+    version: 4,
+    executionMode: "release-plan-v2-direct",
     repo: "example/project",
     localPath: repo.source,
     stateDir: repo.state,
@@ -131,7 +128,7 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
       release: [
         { command: ORACLE_FIXTURES[0]!.command, timeoutMs: 45_000 },
         { command: ORACLE_FIXTURES[1]!.command, timeoutMs: 60_000 },
-        { command: "test -f issue-1.txt && test -f issue-2.txt" },
+        { command: "test -f README.md" },
       ],
       maxOutputBytes: 64 * 1024,
       maxStdoutBytes: 64 * 1024,
@@ -147,56 +144,36 @@ export function testConfig(repo: TestRepo, overrides: Partial<ControllerConfig> 
     },
     policy: {
       maxIssueRepairRounds: 1,
-      maxReleaseHardeningRounds: 1,
-      maxCiRepairRounds: 0,
+      maxCodeRepairRounds: 1,
+      maxInfrastructureReruns: 1,
       maxIssues: 8,
       maxChangedFiles: 50,
       maxChangedLines: 4_000,
     },
     review: { enabled: true, blockingSeverities: ["critical", "major"] },
     delivery: {
-      createPullRequest: false,
+      createPullRequest: true,
       draft: false,
-      autoMerge: false,
+      autoMerge: true,
       mergeMethod: "squash",
       allowNoChecks: false,
-      requiredChecks: [],
+      requiredChecks: {
+        version: 1,
+        firstAppearanceTimeoutMs: 60_000,
+        pendingTimeoutMs: 60_000,
+        checks: [{
+          name: "verify",
+          appId: 15368,
+          workflowName: null,
+          acceptedConclusions: ["SUCCESS", "NEUTRAL", "SKIPPED"],
+          required: true,
+        }],
+      },
+      mergeAuthority: { version: 1, mode: "controller-auto-merge", quarantine: "delete-exact-head-branch" },
       pollIntervalMs: 1_000,
     },
   };
   const merged = deepMerge(base, overrides);
-  if (merged.executionMode === "release-plan-v2-direct") {
-    merged.version = 3;
-    const releaseRepairs = merged.policy.maxReleaseHardeningRounds ?? 1;
-    const ciRepairs = merged.policy.maxCiRepairRounds ?? 0;
-    delete merged.policy.maxReleaseHardeningRounds;
-    delete merged.policy.maxCiRepairRounds;
-    merged.policy.maxReleaseValidationRepairRounds = releaseRepairs;
-    merged.policy.maxReviewRepairRounds = releaseRepairs;
-    merged.policy.maxCiCodeRepairRounds = ciRepairs;
-    merged.policy.maxCiInfrastructureReruns = 1;
-    merged.policy.maxProviderRetries = 0;
-    merged.delivery.createPullRequest = true;
-    merged.delivery.autoMerge = true;
-    merged.delivery.allowNoChecks = false;
-    const names = Array.isArray(merged.delivery.requiredChecks) && merged.delivery.requiredChecks.length > 0
-      ? merged.delivery.requiredChecks
-      : ["verify"];
-    merged.delivery.requiredChecks = {
-      version: 1,
-      firstAppearanceTimeoutMs: 60_000,
-      pendingTimeoutMs: 60_000,
-      postMergeTimeoutMs: 60_000,
-      checks: names.map((name) => ({
-        name,
-        appId: 15368,
-        workflowName: null,
-        acceptedConclusions: ["SUCCESS", "NEUTRAL", "SKIPPED"],
-        required: true,
-      })),
-    };
-    merged.delivery.mergeAuthority = { version: 1, mode: "controller-auto-merge", quarantine: "delete-exact-head-branch" };
-  }
   for (const [index, fixture] of [...ORACLE_FIXTURES.entries()].reverse()) {
     if (!merged.validation.release.some(({ command }) => command === fixture.command)) {
       merged.validation.release.unshift({ command: fixture.command, timeoutMs: index === 0 ? 45_000 : 60_000 });
@@ -241,21 +218,54 @@ export class TestGitClient extends GitClient {
   }
 }
 
-export function testPlan(issueNumbers = [1, 2]): ReleasePlan {
+export function testPlan(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlan {
+  const parentIssue = 100;
+  const baseSha = git(repo.source, ["rev-parse", "origin/main"]);
   return {
-    version: 1,
+    version: 2,
+    source: {
+      planner: "pi-ticket-planning",
+      repo: "example/project",
+      baseRef: "main",
+      baseSha,
+      parentBinding: {
+        number: parentIssue,
+        expectedTitle: `Issue ${parentIssue}`,
+        expectedBodyHash: sha256PrefixedUtf8(`Create issue-${parentIssue}.txt.`),
+      },
+      specContentHash: sha256PrefixedUtf8("fixture specification"),
+      deliveryGraphDigest: sha256PrefixedUtf8("fixture delivery graph"),
+      decisionManifestDigest: sha256PrefixedUtf8("fixture decision manifest"),
+      predecessorReceiptDigest: null,
+      dependencyHandoffDigests: [],
+    },
     id: "release-fixture",
     title: "Fixture release",
     objective: "Implement all fixture issues as one coherent release.",
-    parentIssue: null,
+    parentIssue,
     issues: issueNumbers.map((number, index) => ({
       number,
       order: index + 1,
       dependsOn: index === 0 ? [] : [issueNumbers[index - 1]!],
       objective: `Implement fixture issue ${number}.`,
-      acceptanceCriteria: [`issue-${number}.txt exists`],
+      acceptanceCriteria: [`issue-${number}.txt exists`, `Issue ${number} behavior is covered`, `Issue ${number} remains compatible`],
       suggestedValidation: [],
       allowNoop: false,
+      expectedTitle: `Issue ${number}`,
+      expectedBodyHash: sha256PrefixedUtf8(`Create issue-${number}.txt.`),
+      oracleBindings: [],
+      riskClasses: ["BOUNDED_BEHAVIOR_CHANGE"],
+      scopeBudget: { maxFiles: 8, maxChangedLines: 1_500 },
+      expectedPaths: index === 0 ? [`issue-${number}.txt`, "hardening.txt"] : [`issue-${number}.txt`],
+      protectedPaths: [],
+      replanTriggers: [
+        "ACCEPTED_DECISION_CHANGE_REQUIRED",
+        "THIRD_RISK_CLASS_DISCOVERED",
+        "SCOPE_BUDGET_EXCEEDED",
+        "DOWNSTREAM_RELEASE_BEHAVIOR_DISCOVERED",
+      ],
+      integrationOnly: null,
+      waiverDigests: [],
     })),
     releaseAcceptanceCriteria: ["All issue files exist."],
     reviewFocus: ["Cross-issue correctness."],
@@ -355,9 +365,25 @@ function oracleVerifierManifest(index: number): ReleasePlanV2["issues"][number][
 export function writeInputs(repo: TestRepo, config: ControllerConfig, plan: ReleasePlan): { configPath: string; planPath: string } {
   const configPath = join(repo.root, "config.json");
   const planPath = join(repo.root, "plan.json");
-  writeJsonAtomic(configPath, config);
+  writeJsonAtomic(configPath, configInput(config));
   writeJsonAtomic(planPath, plan);
   return { configPath, planPath };
+}
+
+export function configInput(config: ControllerConfig): Record<string, unknown> {
+  const value = structuredClone(config) as any;
+  if (value.version === 4) {
+    delete value.executionMode;
+    delete value.review;
+    delete value.codex.workerProfile;
+    delete value.codex.reviewerProfile;
+    delete value.codex.networkAccess;
+    delete value.delivery.createPullRequest;
+    delete value.delivery.autoMerge;
+    delete value.delivery.allowNoChecks;
+    delete value.delivery.mergeAuthority;
+  }
+  return value;
 }
 
 export class FakeGitHub implements GitHubPort {
@@ -384,13 +410,6 @@ export class FakeGitHub implements GitHubPort {
   async closePullRequest(_pullRequest: PullRequestState): Promise<void> { throw new Error("not used"); }
   async fetchCheckFailureEvidence(_check: any, _candidateSha: string): Promise<any> { throw new Error("not used"); }
   async rerunCheck(_check: any, _candidateSha: string): Promise<void> { throw new Error("not used"); }
-  async currentLogin(): Promise<string> { return "test-user"; }
-  async listSubIssues(_parentIssue: number): Promise<QueueIssue[]> { return []; }
-  async fetchQueueIssue(_number: number): Promise<QueueIssue> { throw new Error("not used"); }
-  async claimIssue(_number: number, _login: string): Promise<void> { throw new Error("not used"); }
-  async inspectWorkflowGate(_sha: string, _requiredWorkflows: string[]): Promise<WorkflowGateSummary> {
-    throw new Error("not used");
-  }
 }
 
 export type FakeCodexBehavior = (input: {
@@ -430,16 +449,12 @@ export class FakeCodex implements CodexPort {
     let reviewResult: ReviewResult | null = custom.review ?? null;
     if ((input.kind === "worker" || input.kind === "issue-repair") && !workerResult) {
       writeFileSync(join(input.job.worktreePath, `issue-${input.issueNumber}.txt`), `issue ${input.issueNumber}\n`, "utf8");
-      const risks = isReleasePlanV2(input.job.plan)
-        ? input.job.plan.issues.find((issue) => issue.number === input.issueNumber)?.riskClasses ?? []
-        : [];
+      const risks = input.job.plan.issues.find((issue) => issue.number === input.issueNumber)?.riskClasses ?? [];
       workerResult = completedWorker(`Implemented Issue #${input.issueNumber}.`, risks);
     }
-    if (input.kind === "release-harden" && !workerResult) {
+    if (input.kind === "release-repair" && !workerResult) {
       writeFileSync(join(input.job.worktreePath, "hardening.txt"), `hardening ${invocation}\n`, "utf8");
-      const risks = isReleasePlanV2(input.job.plan)
-        ? [...new Set(input.job.plan.issues.flatMap((issue) => issue.riskClasses))]
-        : [];
+      const risks = [...new Set(input.job.plan.issues.flatMap((issue) => issue.riskClasses))];
       workerResult = completedWorker("Applied release hardening.", risks);
     }
     if (input.kind === "review" && !reviewResult) {

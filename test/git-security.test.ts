@@ -90,7 +90,7 @@ test("Controller commits and pushes cannot execute repository-configured hooks",
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });

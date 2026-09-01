@@ -8,7 +8,7 @@ import { blockJob, JobStore } from "../src/state.js";
 import { ReleaseController } from "../src/controller.js";
 import { GitClient } from "../src/git.js";
 import { Validator } from "../src/validator.js";
-import { createTestRepo, FakeCodex, FakeGitHub, TestGitClient, git, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
+import { configInput, createTestRepo, FakeCodex, FakeGitHub, TestGitClient, git, testConfig, testPlan, testPlanV2, writeInputs } from "./support.js";
 import { createControllerProvenance, readControllerIdentity } from "../src/provenance.js";
 import type { ControllerConfig, ReleasePlan } from "../src/types.js";
 
@@ -67,7 +67,7 @@ process.exit(result.status ?? 1);
     assert.equal(status.status, 0, status.stderr);
     const job = JSON.parse(String(status.stdout));
     assert.equal(job.status, "running", JSON.stringify(job));
-    assert.equal(job.phase, "awaiting_merge", JSON.stringify(job));
+    assert.equal(job.phase, "deliver", JSON.stringify(job));
     assert.equal(job.deliveryAuthority?.status, "authorized", JSON.stringify(job));
     assert.deepEqual(job.issues.map((issue: any) => issue.status), ["committed", "committed"]);
     assert.equal(job.provenanceMatches, true);
@@ -82,18 +82,21 @@ test("CLI enforces one active release per repository state root", () => {
     const configPath = join(repo.root, "config-single-writer.json");
     const firstPlanPath = join(repo.root, "plan-first.json");
     const secondPlanPath = join(repo.root, "plan-second.json");
-    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    writeFileSync(firstPlanPath, `${JSON.stringify({ ...testPlan([1]), id: "release-first" }, null, 2)}\n`, "utf8");
-    writeFileSync(secondPlanPath, `${JSON.stringify({ ...testPlan([2]), id: "release-second" }, null, 2)}\n`, "utf8");
+    const env = installStartPreflightFakes(repo, config);
+    const firstPlan = { ...testPlan(repo, [1]), id: "release-first" };
+    const secondPlan = { ...testPlan(repo, [2]), id: "release-second" };
+    writeFileSync(configPath, `${JSON.stringify(configInput(config), null, 2)}\n`, "utf8");
+    writeFileSync(firstPlanPath, `${JSON.stringify(firstPlan, null, 2)}\n`, "utf8");
+    writeFileSync(secondPlanPath, `${JSON.stringify(secondPlan, null, 2)}\n`, "utf8");
     const cli = resolve("dist/src/cli.js");
 
-    const first = spawnSync("node", [cli, "start", "--config", configPath, "--plan", firstPlanPath, "--json"], {
-      cwd: resolve("."), encoding: "utf8",
+    const first = spawnSync("node", [cli, "start", "--config", configPath, "--plan", firstPlanPath, ...expectedProvenanceArgs(config, firstPlan), "--json"], {
+      cwd: resolve("."), env, encoding: "utf8",
     });
     assert.equal(first.status, 0, first.stderr);
 
-    const second = spawnSync("node", [cli, "start", "--config", configPath, "--plan", secondPlanPath, "--json"], {
-      cwd: resolve("."), encoding: "utf8",
+    const second = spawnSync("node", [cli, "start", "--config", configPath, "--plan", secondPlanPath, ...expectedProvenanceArgs(config, secondPlan), "--json"], {
+      cwd: resolve("."), env, encoding: "utf8",
     });
     assert.notEqual(second.status, 0);
     assert.match(String(second.stderr), /active release job/);
@@ -267,25 +270,26 @@ test("CLI v2 start requires the exact approved config digest before Job creation
   } finally { repo.cleanup(); }
 });
 
-test("production direct mode rejects Release Plan v1 and Dispatcher before Job or queue access", () => {
+test("Release Plan v1 and Dispatcher commands are removed", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
+    writeFileSync(planPath, `${JSON.stringify({ version: 1, id: "legacy", title: "legacy", objective: "legacy", parentIssue: null, issues: [], releaseAcceptanceCriteria: [], reviewFocus: [] })}\n`, "utf8");
     const cli = resolve("dist/src/cli.js");
     const start = spawnSync("node", [cli, "start", "--config", configPath, "--plan", planPath, "--json"], {
       cwd: resolve("."), encoding: "utf8",
     });
     assert.notEqual(start.status, 0);
-    assert.match(String(start.stderr), /production_plan_v1_rejected/);
+    assert.match(String(start.stderr), /plan\.version must be 2/);
     assert.equal(existsSync(join(config.stateDir, "jobs", plan.id, "job.json")), false);
 
     const dispatch = spawnSync("node", [
       cli, "dispatch", "--config", configPath, "--dispatcher", join(repo.root, "must-not-be-read.json"), "--json",
     ], { cwd: resolve("."), encoding: "utf8" });
     assert.notEqual(dispatch.status, 0);
-    assert.match(String(dispatch.stderr), /dispatcher_not_enabled/);
+    assert.match(String(dispatch.stderr), /unknown command: dispatch/);
     assert.equal(existsSync(join(config.stateDir, "dispatcher")), false);
   } finally { repo.cleanup(); }
 });
@@ -299,7 +303,7 @@ test("CLI snapshots recovery evidence and the next failure stays fail closed", a
         setup: [{ command: "test -f dependency-ready.txt" }],
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     let job = store.create({

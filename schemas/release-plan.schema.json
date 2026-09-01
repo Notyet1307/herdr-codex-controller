@@ -1,8 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Herdr Codex Release Plan",
-  "oneOf": [
-    { "$ref": "release-plan-v1.schema.json" },
-    { "$ref": "release-plan-v2.schema.json" }
-  ]
+  "$ref": "release-plan-v2.schema.json"
 }

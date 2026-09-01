@@ -427,7 +427,7 @@ export class GitClient {
       "Hardening evidence is retained in the private Controller state directory.",
       "",
       `Herdr-Release-Id: ${job.id}`,
-      `Herdr-Hardening-Round: ${job.hardeningRounds}`,
+      `Herdr-Hardening-Round: ${job.codeRepairRounds}`,
       `Herdr-Hardening-Evidence-Digest: ${sha256(reason)}`,
       `Herdr-Plan-Digest: ${job.planDigest}`,
     ].join("\n");

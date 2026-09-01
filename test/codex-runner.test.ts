@@ -69,7 +69,7 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
     writeFileSync(fake, `#!/usr/bin/env node\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);\nif(args[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(args[0]==='exec'&&args[1]==='--help'){console.log('--ignore-user-config --ignore-rules --output-schema --output-last-message');process.exit(0)}\nif(args[0]==='login'&&args[1]==='status'){console.log('logged in');process.exit(0)}\nfs.writeFileSync(process.env.FAKE_CODEX_ARGS_PATH, JSON.stringify(args));\nlet input='';for await (const chunk of process.stdin) input+=chunk;\nconst output=args[args.indexOf('--output-last-message')+1];\nconst review=args.includes('read-only');\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],observedRiskClasses:[],blockedReason:null,blockedKind:null};\nfs.writeFileSync(output, JSON.stringify(result));\nconsole.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
     chmodSync(fake, 0o700);
     const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fake } } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -106,7 +106,7 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
 
     for (const [kind, issueNumber] of [
       ["issue-repair", 1],
-      ["release-harden", null],
+      ["release-repair", null],
     ] as const) {
       await runner.run({
         job,
@@ -175,7 +175,7 @@ fs.writeFileSync(${JSON.stringify(marker)}, "executed");
     writeFileSync(fake, source, "utf8");
     chmodSync(fake, 0o700);
     const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fake } } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
@@ -213,7 +213,7 @@ fs.writeFileSync(args[args.indexOf("--output-last-message")+1], "x".repeat(8192)
     chmodSync(fake, 0o700);
     const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fake } } as any);
     config.codex.maxResultBytes = 4_096;
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });

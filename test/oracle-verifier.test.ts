@@ -242,7 +242,7 @@ test("every Worker globally protects other Tickets' verifier files and package s
 });
 
 test("verifier manifest byte drift and hardening drift are REPLAN_REQUIRED", async () => {
-  for (const phase of ["prepare", "harden"] as const) {
+  for (const phase of ["prepare", "repair"] as const) {
     const repo = createTestRepo();
     try {
       const base = testConfig(repo, { executionMode: "release-plan-v2-direct" });
@@ -260,9 +260,9 @@ test("verifier manifest byte drift and hardening drift are REPLAN_REQUIRED", asy
       const gitClient = new TestGitClient(config);
       const codex = new FakeCodex(gitClient, async ({ job, kind }) => {
         if (kind === "review") {
-          return { review: { status: "changes", summary: "harden", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fix", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
+          return { review: { status: "changes", summary: "repair", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fix", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
         }
-        if (kind === "release-harden") {
+        if (kind === "release-repair") {
           writeFileSync(join(job.worktreePath, "scripts/lib/o01-helper.mjs"), "export const oracleId = \"changed\";\n", "utf8");
           return { worker: completedWorker("changed verifier", ["BOUNDED_BEHAVIOR_CHANGE"]) };
         }
@@ -290,7 +290,7 @@ test("crash salvage requires a passed Oracle receipt bound to the commit parent"
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       assert.equal((await controller.step(created.id)).action, "release_prepared");
       const job = store.load(created.id);
-      job.phase = "issue_validate";
+      job.phase = "verify";
       job.currentIssueNumber = 1;
       job.issues[0]!.status = "running";
       writeFileSync(join(job.worktreePath, "issue-1.txt"), "candidate\n", "utf8");

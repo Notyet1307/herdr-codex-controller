@@ -20,6 +20,7 @@ import {
   writeInputs,
 } from "./support.js";
 import { readControllerIdentity } from "../src/provenance.js";
+import { summarizeChecks } from "../src/github.js";
 
 class CountingGit extends TestGitClient {
   ensureCalls = 0;
@@ -223,77 +224,112 @@ test("every Release Plan v2 source drift fails with zero Worktree, setup, or Cod
   }
 });
 
-test("runtime base drift blocks Worker, Delivery, CI, and merge observation", async () => {
-  for (const phase of ["implement", "deliver", "ci", "awaiting_merge"] as const) {
-    const repo = createTestRepo();
-    try {
-      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-      const plan = testPlanV2(repo, [1]);
-      const { configPath, planPath } = writeInputs(repo, config, plan);
-      const store = new JobStore(config);
-      const gitClient = new CountingGit(config);
-      const codex = new FakeCodex(gitClient);
-      const github = new ObservingSourceGitHub();
-      const controller = new ReleaseController({
-        store,
-        git: gitClient,
-        github,
-        codex,
-        validator: new CountingValidator(config),
-      });
-      const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-      assert.equal((await controller.step(created.id)).action, "release_prepared");
-      const job = store.load(created.id);
-      job.phase = phase;
-      if (phase !== "implement") job.candidateSha = await gitClient.head(job.worktreePath);
-      if (phase === "ci" || phase === "awaiting_merge") {
-        job.pullRequest = {
-          number: 31,
-          url: "https://github.com/example/project/pull/31",
+test("runtime base drift is rechecked before delivery", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new CountingGit(config);
+    const github = new ObservingSourceGitHub();
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github,
+      codex: new FakeCodex(gitClient),
+      validator: new CountingValidator(config),
+    });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    let job = store.load(created.id);
+    for (let index = 0; index < 20 && (job.phase !== "deliver" || job.pullRequest !== null); index += 1) {
+      await controller.step(job.id);
+      job = store.load(job.id);
+      if (job.status === "blocked") throw new Error(job.blocked?.message);
+    }
+
+    writeFileSync(join(repo.source, "README.md"), "# Base moved\n", "utf8");
+    git(repo.source, ["add", "README.md"]);
+    git(repo.source, ["commit", "-m", "advance base"]);
+    git(repo.source, ["push", "origin", "main"]);
+
+    const result = await controller.step(created.id);
+    const blocked = store.load(created.id);
+    assert.equal(result.action, "blocked");
+    assert.equal(blocked.blocked?.code, "replan_required");
+    assert.match(blocked.blocked?.message ?? "", /runtime_source_base_drift/);
+    assert.equal(gitClient.pushCalls, 0);
+    assert.equal(github.createPullRequestCalls, 0);
+  } finally { repo.cleanup(); }
+});
+
+test("runtime base drift is rechecked again before auto-merge authorization", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlanV2(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new CountingGit(config);
+    class DeliveryGitHub extends SourceGitHub {
+      pr: NonNullable<JobState["pullRequest"]> | null = null;
+      enabled = false;
+      override async createPullRequest(job: JobState) {
+        this.pr = {
+          number: 32,
+          url: "https://github.com/example/project/pull/32",
           state: "OPEN",
           headRef: job.branch,
           baseRef: job.baseRef,
           headSha: job.candidateSha!,
           mergeSha: null,
         };
-        github.observedPullRequest = job.pullRequest;
-        job.deliveryAuthority = {
-          version: 1,
-          pullRequest: job.pullRequest,
-          candidateSha: job.candidateSha!,
-          proofDigest: "a".repeat(64),
-          status: phase === "awaiting_merge" ? "authorized" : "pending",
-          autoMergeEnabled: true,
-          quarantined: false,
-          lastVerifiedAt: new Date().toISOString(),
-          revocationReason: null,
-          error: null,
+        return this.pr;
+      }
+      override async inspectPullRequest() {
+        if (!this.pr) throw new Error("test pull request is missing");
+        return {
+          pullRequest: this.pr,
+          checks: summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }], config.delivery.requiredChecks),
+          mergedAt: null,
+          autoMergeEnabled: false,
         };
       }
-      store.save(job);
+      override async enableAutoMerge() { this.enabled = true; }
+    }
+    const github = new DeliveryGitHub();
+    const controller = new ReleaseController({
+      store,
+      git: gitClient,
+      github,
+      codex: new FakeCodex(gitClient),
+      validator: new CountingValidator(config),
+    });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    let job = store.load(created.id);
+    for (let index = 0; index < 30 && job.pullRequest === null; index += 1) {
+      await controller.step(job.id);
+      job = store.load(job.id);
+      if (job.status === "blocked") throw new Error(job.blocked?.message);
+    }
+    assert.equal(job.pullRequest?.number, 32);
 
-      writeFileSync(join(repo.source, "README.md"), "# Base moved\n", "utf8");
-      git(repo.source, ["add", "README.md"]);
-      git(repo.source, ["commit", "-m", "advance base"]);
-      git(repo.source, ["push", "origin", "main"]);
+    writeFileSync(join(repo.source, "README.md"), "# Base moved before authorization\n", "utf8");
+    git(repo.source, ["add", "README.md"]);
+    git(repo.source, ["commit", "-m", "advance base before authorization"]);
+    git(repo.source, ["push", "origin", "main"]);
 
-      const result = await controller.step(created.id);
-      const blocked = store.load(created.id);
-      assert.equal(result.action, "blocked", phase);
-      assert.equal(blocked.blocked?.code, "replan_required", phase);
-      assert.match(blocked.blocked?.message ?? "", /runtime_source_base_drift/, phase);
-      assert.equal(codex.calls.length, 0, phase);
-      assert.equal(gitClient.pushCalls, 0, phase);
-      if (phase === "ci" || phase === "awaiting_merge") {
-        assert.equal(blocked.deliveryAuthority?.status, "revoked", phase);
-        assert.equal(blocked.pullRequest?.state, "OPEN", phase);
-        assert.equal(blocked.deliveryAuthority?.quarantined, true, phase);
-      }
-    } finally { repo.cleanup(); }
-  }
+    const result = await controller.step(job.id);
+    job = store.load(job.id);
+    assert.equal(result.action, "blocked");
+    assert.equal(job.blocked?.code, "replan_required");
+    assert.match(job.blocked?.message ?? "", /runtime_source_base_drift/);
+    assert.equal(github.enabled, false);
+    assert.equal(job.deliveryAuthority?.status, "revoked");
+  } finally { repo.cleanup(); }
 });
 
-test("runtime Parent or Child body drift blocks before a fresh Worker", async () => {
+test("Parent or Child wording changes after admission do not invalidate the running Job", async () => {
   for (const issueNumber of [100, 1]) {
     const repo = createTestRepo();
     try {
@@ -311,14 +347,11 @@ test("runtime Parent or Child body drift blocks before a fresh Worker", async ()
       changes.set(issueNumber, { body: "changed after prepare" });
 
       const result = await controller.step(created.id);
-      const blocked = store.load(created.id);
-      assert.equal(result.action, "blocked", String(issueNumber));
-      assert.equal(blocked.blocked?.code, "replan_required", String(issueNumber));
-      assert.match(
-        blocked.blocked?.message ?? "",
-        issueNumber === 100 ? /runtime_parent_binding_drift/ : /runtime_child_binding_drift/,
-      );
-      assert.equal(codex.calls.length, 0);
+      const running = store.load(created.id);
+      assert.equal(result.action, "worker_completed", String(issueNumber));
+      assert.equal(running.blocked, null, String(issueNumber));
+      assert.equal(codex.calls.length, 1);
+      assert.deepEqual(github.fetchOrder, [100, 1]);
     } finally { repo.cleanup(); }
   }
 });
@@ -401,7 +434,7 @@ test("persisted v2 Jobs revalidate canonical risks and expected paths before lat
       mutate(job.plan);
       job.planDigest = digestJson(job.plan);
       job.provenance = store.currentProvenance(job.plan);
-      job.phase = "release_validate";
+      job.phase = "verify";
       job.status = "running";
       store.save(job);
       const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator });
@@ -511,7 +544,7 @@ test("every v2 Issue commit enforces its scope budget, including crash salvage",
       assert.equal((await controller.step(created.id)).action, "release_prepared");
       if (salvage) {
         const job = store.load(created.id);
-        job.phase = "issue_validate";
+        job.phase = "verify";
         job.currentIssueNumber = 1;
         job.issues[0]!.status = "running";
         writeFileSync(join(job.worktreePath, "issue-1.txt"), "one\ntwo\n", "utf8");
@@ -563,7 +596,7 @@ test("v2 release hardening cannot modify a protected Oracle or bypass replan", a
     const git = new CountingGit(config);
     const codex = new FakeCodex(git, async ({ job, kind }) => {
       if (kind === "review") return { review: { status: "changes", summary: "hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fixture", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
-      if (kind === "release-harden") {
+      if (kind === "release-repair") {
         writeFileSync(join(job.worktreePath, "fixtures/oracle.json"), "{\"changed\":true}\n", "utf8");
         return { worker: completedWorker("hardening", ["BOUNDED_BEHAVIOR_CHANGE"]) };
       }
@@ -623,7 +656,7 @@ test("v2 hardening aggregate budget applies to normal and every salvage path", a
       const git = new CountingGit(config);
       const codex = new FakeCodex(git, async ({ job, kind }) => {
         if (kind === "review") return { review: { status: "changes", summary: "hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "fixture", rationale: "fixture", recommendation: "fix", relatedIssues: [1] }] } };
-        if (kind === "release-harden") {
+        if (kind === "release-repair") {
           writeFileSync(join(job.worktreePath, "issue-1.txt"), "issue 1\nhardened\n", "utf8");
           return { worker: completedWorker("hardening", ["BOUNDED_BEHAVIOR_CHANGE"]) };
         }
@@ -631,14 +664,14 @@ test("v2 hardening aggregate budget applies to normal and every salvage path", a
       });
       const controller = new ReleaseController({ store, git, github: new SourceGitHub(), codex, validator: new Validator(config) });
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-      for (let index = 0; index < 10 && store.load(created.id).phase !== "harden"; index += 1) await controller.step(created.id);
+      for (let index = 0; index < 10 && store.load(created.id).phase !== "repair"; index += 1) await controller.step(created.id);
       if (mode !== "normal") {
         const job = store.load(created.id);
         writeFileSync(join(job.worktreePath, "issue-1.txt"), "issue 1\nhardened\n", "utf8");
         if (mode === "interrupted-salvage") {
           job.activeRun = {
             id: "interrupted-hardening",
-            kind: "release-harden",
+            kind: "release-repair",
             issueNumber: null,
             startedAt: new Date().toISOString(),
             baseHeadSha: await git.head(job.worktreePath),

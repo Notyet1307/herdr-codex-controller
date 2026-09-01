@@ -26,12 +26,11 @@ import { readJsonFile, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
 import { digestJson, newId, nowIso, sha256PrefixedUtf8 } from "./util.js";
 import {
   assertPlanCompatibleWithConfig,
-  isReleasePlanV2,
   oracleVerifierProtectedPaths,
   validatePlan,
 } from "./plan.js";
 import { assertValidationReceipt } from "./validator.js";
-import { requiredCheckContract, requiredCheckNames } from "./config.js";
+import { requiredCheckContract } from "./config.js";
 import {
   renderIssueWorkerPrompt,
   renderReleaseHardeningPrompt,
@@ -60,27 +59,16 @@ export class ReleaseController {
     if (job.status === "blocked") {
       return stepResult("blocked", false, true, null, job.blocked?.message ?? "Job is blocked.");
     }
-    if (job.status === "ready_to_merge" && job.phase === "awaiting_merge") {
-      // A manual merge may have happened since the last observation, so allow one read-only observation step.
-    }
-
     try {
       this.assertCurrentInputs(job);
-      if (isReleasePlanV2(job.plan)
-        && !["prepare", "ci", "awaiting_merge", "complete"].includes(job.phase)) {
-        await this.assertSourceStillCurrent(job, job.phase);
-      }
       if (job.activeRun) return await this.reconcileInterruptedRun(job);
       switch (job.phase) {
         case "prepare": return await this.prepare(job);
         case "implement": return await this.implement(job);
-        case "issue_validate": return await this.validateIssue(job);
-        case "release_validate": return await this.validateRelease(job);
+        case "verify": return await this.verify(job);
         case "review": return await this.review(job);
-        case "harden": return await this.harden(job);
+        case "repair": return await this.repair(job);
         case "deliver": return await this.deliver(job);
-        case "ci": return await this.observeCi(job);
-        case "awaiting_merge": return await this.observeMerge(job);
         case "complete": return stepResult("complete", false, true, null, "Release is complete.");
       }
     } catch (error) {
@@ -151,8 +139,8 @@ export class ReleaseController {
     await this.deps.git.verifyWorktree(job);
     const head = await this.deps.git.head(job.worktreePath);
     if (head !== active.baseHeadSha) {
-      if (active.kind === "release-harden") {
-        const salvaged = await this.deps.git.salvageHardeningCommitAtHead(job, job.hardeningRounds);
+      if (active.kind === "release-repair") {
+        const salvaged = await this.deps.git.salvageHardeningCommitAtHead(job, job.codeRepairRounds);
         if (salvaged === head) {
           await this.assertReleaseCommitProtected(job, salvaged);
           const recovered: JobState = {
@@ -161,7 +149,7 @@ export class ReleaseController {
             status: "running",
             blocked: null,
             candidateSha: null,
-            phase: "release_validate",
+            phase: "verify",
           };
           this.deps.store.save(recovered);
           return stepResult("hardening_commit_salvaged", true, false, null, `Recovered Controller-owned hardening commit ${salvaged}.`);
@@ -180,9 +168,9 @@ export class ReleaseController {
       }
       issue.nextRunKind = "recovery";
       issue.status = "running";
-      next.phase = "implement";
-    } else if (active.kind === "release-harden") {
-      next.phase = "harden";
+      next.phase = "repair";
+    } else if (active.kind === "release-repair") {
+      next.phase = "repair";
     } else {
       next.phase = "review";
     }
@@ -201,32 +189,15 @@ export class ReleaseController {
     if (job.plan.issues.length > this.deps.store.config.policy.maxIssues) {
       throw new ControllerError("release_too_many_issues", `Plan has ${job.plan.issues.length} issues; configured maximum is ${this.deps.store.config.policy.maxIssues}.`);
     }
-    if (isReleasePlanV2(job.plan)) return this.prepareSourceBoundV2(job);
-    return this.prepareV1(job);
+    return this.prepareSourceBoundV2(job);
   }
 
-  private async prepareV1(job: JobState): Promise<StepResult> {
-    await this.deps.git.preflight();
-    await this.deps.github.preflight();
-    await this.deps.codex.preflight();
-    await this.deps.validator.preflight();
-    const baseSha = job.baseSha ?? await this.deps.git.fetchBase();
-    if (job.baseSha === null) {
-      job = { ...job, baseSha };
-      this.deps.store.save(job);
-    }
-    await this.deps.git.ensureWorktree(job);
-    if (!(await this.deps.git.isClean(job.worktreePath))) {
-      throw new ControllerError("initial_worktree_dirty", "The release worktree is dirty before the first Worker run.");
-    }
+  private async verify(job: JobState): Promise<StepResult> {
+    return job.currentIssueNumber === null ? this.validateRelease(job) : this.validateIssue(job);
+  }
 
-    const issueRoot = this.deps.store.issuesRoot(job.id);
-    for (const issue of job.issues) {
-      const snapshot = await this.deps.github.fetchIssue(issue.number);
-      writeJsonAtomic(join(issueRoot, `issue-${issue.number}.json`), snapshot);
-      issue.snapshot = snapshot;
-    }
-    return this.runSetupValidation(job, baseSha);
+  private async repair(job: JobState): Promise<StepResult> {
+    return job.currentIssueNumber === null ? this.repairRelease(job) : this.implement(job);
   }
 
   private async prepareSourceBoundV2(job: JobState): Promise<StepResult> {
@@ -259,9 +230,6 @@ export class ReleaseController {
     parent: IssueSnapshot;
     issues: Map<number, IssueSnapshot>;
   }> {
-    if (!isReleasePlanV2(job.plan)) {
-      throw new ControllerError("plan_version_mismatch", "Exact source verification requires Release Plan v2.");
-    }
     const plan = job.plan;
     await this.deps.git.preflight();
     await this.deps.github.preflight();
@@ -279,13 +247,12 @@ export class ReleaseController {
       this.deps.store.save({ ...job, baseSha });
     }
 
-    const { parent, issues } = await this.fetchCurrentSourceIssues(job, null);
+    const { parent, issues } = await this.fetchCurrentSourceIssues(job);
     await this.assertOracleBindingsAtBase(plan);
     return { baseSha, parent, issues };
   }
 
-  private async assertSourceStillCurrent(job: JobState, phase: string): Promise<void> {
-    if (!isReleasePlanV2(job.plan)) return;
+  private async assertBaseStillCurrent(job: JobState, phase: string): Promise<void> {
     this.assertCurrentInputs(job);
     const baseSha = await this.deps.git.fetchBase();
     if (baseSha !== job.plan.source.baseSha) {
@@ -294,28 +261,22 @@ export class ReleaseController {
         `The remote base changed during ${phase}; abort this Job and create a fresh Release Plan v2.`,
       );
     }
-    await this.fetchCurrentSourceIssues(job, phase);
-    await this.assertOracleBindingsAtBase(job.plan);
   }
 
-  private async fetchCurrentSourceIssues(
-    job: JobState,
-    phase: string | null,
-  ): Promise<{ parent: IssueSnapshot; issues: Map<number, IssueSnapshot> }> {
-    if (!isReleasePlanV2(job.plan)) throw new ControllerError("plan_version_mismatch", "Exact source verification requires Release Plan v2.");
+  private async fetchCurrentSourceIssues(job: JobState): Promise<{ parent: IssueSnapshot; issues: Map<number, IssueSnapshot> }> {
     const plan = job.plan;
     const parent = await this.deps.github.fetchIssue(plan.source.parentBinding.number, { allowClosed: true });
     if (parent.state !== "OPEN") {
       throw new ControllerError(
-        phase === null ? "plan_parent_not_open" : "runtime_parent_binding_drift",
-        `Parent Issue #${plan.parentIssue} is not OPEN${phase === null ? "" : ` during ${phase}`}.`,
+        "plan_parent_not_open",
+        `Parent Issue #${plan.parentIssue} is not OPEN.`,
       );
     }
     if (parent.number !== plan.source.parentBinding.number
       || parent.title !== plan.source.parentBinding.expectedTitle
       || sha256PrefixedUtf8(parent.body) !== plan.source.parentBinding.expectedBodyHash) {
       throw new ControllerError(
-        phase === null ? "plan_parent_drift" : "runtime_parent_binding_drift",
+        "plan_parent_drift",
         `Parent Issue #${plan.parentIssue} no longer matches its exact title/body source binding.`,
       );
     }
@@ -325,15 +286,15 @@ export class ReleaseController {
       const snapshot = await this.deps.github.fetchIssue(planIssue.number, { allowClosed: true });
       if (snapshot.state !== "OPEN") {
         throw new ControllerError(
-          phase === null ? "plan_issue_not_open" : "runtime_child_binding_drift",
-          `Child Issue #${planIssue.number} is not OPEN${phase === null ? "" : ` during ${phase}`}.`,
+          "plan_issue_not_open",
+          `Child Issue #${planIssue.number} is not OPEN.`,
         );
       }
       if (snapshot.number !== planIssue.number
         || snapshot.title !== planIssue.expectedTitle
         || sha256PrefixedUtf8(snapshot.body) !== planIssue.expectedBodyHash) {
         throw new ControllerError(
-          phase === null ? "plan_issue_drift" : "runtime_child_binding_drift",
+          "plan_issue_drift",
           `Child Issue #${planIssue.number} no longer matches its exact title/body source binding.`,
         );
       }
@@ -343,7 +304,6 @@ export class ReleaseController {
   }
 
   private async assertOracleBindingsAtBase(plan: JobState["plan"]): Promise<void> {
-    if (!isReleasePlanV2(plan)) return;
     for (const issue of plan.issues) {
       for (const binding of issue.oracleBindings) {
         let observed;
@@ -362,7 +322,6 @@ export class ReleaseController {
   }
 
   private async assertIssueWorktreeContract(job: JobState, issue: JobState["plan"]["issues"][number]): Promise<void> {
-    if (!isReleasePlanV2(job.plan) || !("oracleBindings" in issue)) return;
     await this.assertOracleBindingsInWorktree(job, job.plan.issues);
     const changed = await this.deps.git.changedPaths(job.worktreePath);
     this.assertNoOracleVerifierChanges(changed, job.plan);
@@ -373,7 +332,6 @@ export class ReleaseController {
   }
 
   private async assertReleaseWorktreeContract(job: JobState): Promise<void> {
-    if (!isReleasePlanV2(job.plan)) return;
     const issues = job.plan.issues;
     await this.assertOracleBindingsInWorktree(job, issues);
     const changed = await this.deps.git.changedPaths(job.worktreePath);
@@ -407,7 +365,7 @@ export class ReleaseController {
     read: (path: string) => Promise<RepositoryFileSnapshot>,
     location: string,
   ): Promise<void> {
-    if (!isReleasePlanV2(plan)) return;
+    if (plan.issues.every((issue) => issue.oracleBindings.length === 0)) return;
     try {
       const cache = new Map<string, RepositoryFileSnapshot>();
       const snapshot = async (path: string) => {
@@ -463,7 +421,6 @@ export class ReleaseController {
     issue: JobState["plan"]["issues"][number],
     sha: string,
   ): Promise<void> {
-    if (!isReleasePlanV2(job.plan) || !("scopeBudget" in issue)) return;
     const stats = await this.deps.git.commitStats(job, sha);
     const maxFiles = Math.min(issue.scopeBudget.maxFiles, this.deps.store.config.policy.maxChangedFiles);
     const maxChangedLines = Math.min(issue.scopeBudget.maxChangedLines, this.deps.store.config.policy.maxChangedLines);
@@ -485,7 +442,6 @@ export class ReleaseController {
   }
 
   private async assertReleaseCommitProtected(job: JobState, sha: string): Promise<void> {
-    if (!isReleasePlanV2(job.plan)) return;
     const stats = await this.deps.git.commitStats(job, sha);
     this.assertNoOracleVerifierChanges(stats.paths, job.plan);
     const protectedPaths = new Set(job.plan.issues.flatMap((issue) => issue.protectedPaths));
@@ -497,7 +453,6 @@ export class ReleaseController {
   }
 
   private async assertReleaseAggregateScope(job: JobState): Promise<void> {
-    if (!isReleasePlanV2(job.plan)) return;
     const stats = await this.deps.git.diffStats(job);
     const groups = new Map<number, typeof stats.entries>();
     for (const entry of stats.entries) {
@@ -524,7 +479,6 @@ export class ReleaseController {
     issueNumber: number | null,
     detailsPath: string,
   ): void {
-    if (!isReleasePlanV2(job.plan)) return;
     const expected = issueNumber === null
       ? [...new Set(job.plan.issues.flatMap((issue) => issue.riskClasses))]
       : job.plan.issues.find((issue) => issue.number === issueNumber)?.riskClasses;
@@ -549,12 +503,6 @@ export class ReleaseController {
     job: JobState,
     issue: JobState["plan"]["issues"][number],
   ): ValidationCommandConfig[] {
-    if (!isReleasePlanV2(job.plan) || !("oracleBindings" in issue)) {
-      return dedupeCommands([
-        ...this.deps.store.config.validation.issue,
-        ...issue.suggestedValidation,
-      ]);
-    }
     return bindOracleValidationCommands(
       this.deps.store.config.validation.issue,
       this.deps.store.config.validation.release,
@@ -563,7 +511,6 @@ export class ReleaseController {
   }
 
   private releaseValidationCommands(job: JobState): ValidationCommandConfig[] {
-    if (!isReleasePlanV2(job.plan)) return this.deps.store.config.validation.release;
     return bindOracleValidationCommands(
       this.deps.store.config.validation.release,
       this.deps.store.config.validation.release,
@@ -576,7 +523,6 @@ export class ReleaseController {
     issue: IssueExecution,
     planIssue: JobState["plan"]["issues"][number],
   ): ValidationReceipt | null {
-    if (!isReleasePlanV2(job.plan) || !("oracleBindings" in planIssue)) return null;
     const receipt = issue.lastValidationId ? this.readValidation(job, issue.lastValidationId) : null;
     if (!receipt || receipt.scope !== "issue" || receipt.issueNumber !== issue.number || !receipt.passed) {
       throw new ControllerError("issue_oracle_validation_missing", `Issue #${issue.number} has no passed durable Oracle validation receipt.`);
@@ -640,7 +586,7 @@ export class ReleaseController {
     if (!issue) {
       issue = nextPendingIssue(job);
       if (!issue) {
-        job.phase = "release_validate";
+        job.phase = "verify";
         job.currentIssueNumber = null;
         this.deps.store.save(job);
         return stepResult("all_issues_implemented", true, false, null, "All planned Issues are committed; starting release validation.");
@@ -700,7 +646,7 @@ export class ReleaseController {
       throw new ControllerError("worker_self_review_missing", `Issue #${issue.number} Worker did not perform its required self-review.`, execution.record.resultPath);
     }
     issue.nextRunKind = "worker";
-    job.phase = "issue_validate";
+    job.phase = "verify";
     this.deps.store.save(job);
     return stepResult("worker_completed", true, false, null, `Issue #${issue.number} implementation completed; authoritative validation is next.`);
   }
@@ -722,7 +668,7 @@ export class ReleaseController {
       issue.status = "committed";
       issue.commitSha = salvaged;
       job.currentIssueNumber = null;
-      job.phase = nextPendingIssue(job) ? "implement" : "release_validate";
+      job.phase = nextPendingIssue(job) ? "implement" : "verify";
       this.deps.store.save(job);
       return stepResult("issue_commit_salvaged", true, false, null, `Recovered Controller-owned commit ${salvaged} for Issue #${issue.number}.`);
     }
@@ -748,7 +694,7 @@ export class ReleaseController {
       if (issue.repairRounds < this.deps.store.config.policy.maxIssueRepairRounds) {
         issue.repairRounds += 1;
         issue.nextRunKind = "issue-repair";
-        job.phase = "implement";
+        job.phase = "repair";
         this.deps.store.save(job);
         return stepResult("issue_repair_scheduled", true, false, null, `Issue #${issue.number} validation failed; scheduling bounded fresh repair ${issue.repairRounds}.`);
       }
@@ -757,10 +703,9 @@ export class ReleaseController {
       throw new ControllerError("issue_validation_failed", `Issue #${issue.number} validation failed after the allowed repair rounds.`, validation.path);
     }
 
-    await this.assertSourceStillCurrent(job, `Issue #${issue.number} commit`);
     this.requirePassedIssueOracleValidation(job, issue, planIssue);
-    const commit = await this.deps.git.commitIssue(job, issue.number, issue.snapshot.title, planIssue.allowNoop);
-    if (isReleasePlanV2(job.plan) && await this.deps.git.commitParent(job, commit.sha) !== validation.receipt.candidateSha) {
+    const commit = await this.deps.git.commitIssue(job, issue.number, issue.snapshot.title, false);
+    if (await this.deps.git.commitParent(job, commit.sha) !== validation.receipt.candidateSha) {
       throw new ControllerError("issue_oracle_validation_missing", `Issue #${issue.number} commit is not bound to its Oracle validation candidate.`);
     }
     await this.assertIssueCommitContract(job, planIssue, commit.sha);
@@ -768,7 +713,7 @@ export class ReleaseController {
     issue.commitSha = commit.sha;
     issue.nextRunKind = "worker";
     job.currentIssueNumber = null;
-    job.phase = nextPendingIssue(job) ? "implement" : "release_validate";
+    job.phase = nextPendingIssue(job) ? "implement" : "verify";
     this.deps.store.save(job);
     return stepResult("issue_committed", true, false, null, `Issue #${issue.number} committed as ${commit.sha}.`);
   }
@@ -798,11 +743,11 @@ export class ReleaseController {
     await this.assertValidationDidNotMutate(job, beforeDigest);
     this.assertOracleValidationCoverage(
       validation.receipt,
-      isReleasePlanV2(job.plan) ? oracleRefs(job.plan.issues) : [],
+      oracleRefs(job.plan.issues),
       "release_oracle_validation_missing",
     );
     if (!validation.receipt.passed) {
-      return this.scheduleHardening(job, "release-validation", renderValidationFailure(validation.receipt), validation.path);
+      return this.scheduleRepair(job, "release-validation", renderValidationFailure(validation.receipt), validation.path);
     }
 
     const stats = await this.deps.git.diffStats(job);
@@ -814,7 +759,7 @@ export class ReleaseController {
         validation.path,
       );
     }
-    job.phase = this.deps.store.config.review.enabled ? "review" : "deliver";
+    job.phase = "review";
     this.deps.store.save(job);
     return stepResult("release_validated", true, false, null, `Release candidate ${head} passed full validation.`);
   }
@@ -854,35 +799,35 @@ export class ReleaseController {
     }
     const blocking = blockingFindings(review, this.deps.store.config.review.blockingSeverities);
     if (review.status === "changes" && blocking.length > 0) {
-      return this.scheduleHardening(job, "release-review", renderReviewFailure(review), execution.record.resultPath);
+      return this.scheduleRepair(job, "release-review", renderReviewFailure(review), execution.record.resultPath);
     }
     job.phase = "deliver";
     this.deps.store.save(job);
     return stepResult("release_review_passed", true, false, null, `Candidate ${job.candidateSha} passed aggregate release review.`);
   }
 
-  private async harden(job: JobState): Promise<StepResult> {
-    const salvaged = await this.deps.git.salvageHardeningCommitAtHead(job, job.hardeningRounds);
+  private async repairRelease(job: JobState): Promise<StepResult> {
+    const salvaged = await this.deps.git.salvageHardeningCommitAtHead(job, job.codeRepairRounds);
     if (salvaged) {
       await this.assertReleaseCommitProtected(job, salvaged);
       job.candidateSha = null;
-      job.phase = "release_validate";
+      job.phase = "verify";
       job.activeRun = null;
       this.deps.store.save(job);
       return stepResult("hardening_commit_salvaged", true, false, null, `Recovered Controller-owned hardening commit ${salvaged}.`);
     }
-    if (!job.hardeningReasonPath || !existsSync(job.hardeningReasonPath)) {
+    if (!job.repairReasonPath || !existsSync(job.repairReasonPath)) {
       throw new ControllerError("hardening_reason_missing", "Release hardening has no durable blocking evidence.");
     }
     await this.assertReleaseWorktreeContract(job);
-    const prompt = renderReleaseHardeningPrompt({ job, reasonPath: job.hardeningReasonPath });
-    const runId = newId("release-harden");
+    const prompt = renderReleaseHardeningPrompt({ job, reasonPath: job.repairReasonPath });
+    const runId = newId("release-repair");
     const baseHeadSha = await this.deps.git.head(job.worktreePath);
-    job.activeRun = { id: runId, kind: "release-harden", issueNumber: null, startedAt: nowIso(), baseHeadSha };
+    job.activeRun = { id: runId, kind: "release-repair", issueNumber: null, startedAt: nowIso(), baseHeadSha };
     this.deps.store.save(job);
     const execution = await this.deps.codex.run({
       job,
-      kind: "release-harden",
+      kind: "release-repair",
       issueNumber: null,
       prompt,
       runsRoot: this.deps.store.runsRoot(job.id),
@@ -908,40 +853,39 @@ export class ReleaseController {
       this.deps.store.save(job);
       throw new ControllerError("hardening_self_review_missing", "Release hardening Worker did not perform self-review.", execution.record.resultPath);
     }
-    await this.assertSourceStillCurrent(job, "hardening commit");
     if (await this.deps.git.isClean(job.worktreePath)) {
       this.deps.store.save(job);
       throw new ControllerError("hardening_no_changes", "Release hardening completed without producing a repair diff.", execution.record.resultPath);
     }
-    const reason = readFileSync(job.hardeningReasonPath, "utf8");
+    const reason = readFileSync(job.repairReasonPath, "utf8");
     const commit = await this.deps.git.commitHardening(job, reason);
     if (!commit.created) throw new ControllerError("hardening_commit_missing", "Hardening changes could not be committed.");
     await this.assertReleaseCommitProtected(job, commit.sha);
     job.candidateSha = null;
-    job.phase = "release_validate";
+    job.phase = "verify";
     this.deps.store.save(job);
-    return stepResult("release_hardening_committed", true, false, null, `Hardening round ${job.hardeningRounds} committed as ${commit.sha}; full validation will rerun.`);
+    return stepResult("release_repair_committed", true, false, null, `Repair round ${job.codeRepairRounds} committed as ${commit.sha}; full validation will rerun.`);
   }
 
   private async deliver(job: JobState): Promise<StepResult> {
+    if (!job.pullRequest) return this.startDelivery(job);
+    if (job.deliveryAuthority && ["authorizing", "authorized"].includes(job.deliveryAuthority.status)) {
+      return this.observeMerge(job);
+    }
+    return this.observeCi(job);
+  }
+
+  private async startDelivery(job: JobState): Promise<StepResult> {
     if (!job.candidateSha || await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
       throw new ControllerError("delivery_candidate_drift", "Delivery requires the exact clean reviewed candidate.");
     }
-    const production = this.deps.store.config.executionMode === "release-plan-v2-direct";
-    const proof = production ? readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id)) : null;
-    await this.assertSourceStillCurrent(job, "delivery push");
-    if (!this.deps.store.config.delivery.createPullRequest) {
-      job.phase = "complete";
-      job.status = "completed";
-      this.deps.store.save(job);
-      return stepResult("release_completed_without_pr", true, true, null, `Release ${job.id} completed locally at ${job.candidateSha}.`);
-    }
+    const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    await this.assertBaseStillCurrent(job, "delivery");
     await this.deps.git.push(job);
-    await this.assertSourceStillCurrent(job, "pull request creation");
     if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
       throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before pull request creation.");
     }
-    if (production) readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
     const report = await buildReleaseReportModel({
       job,
       config: this.deps.store.config,
@@ -959,7 +903,7 @@ export class ReleaseController {
     }
     job.pullRequest = pullRequest;
     job.ciGate = null;
-    job.deliveryAuthority = proof ? {
+    job.deliveryAuthority = {
       version: 1,
       pullRequest,
       candidateSha: job.candidateSha,
@@ -970,8 +914,8 @@ export class ReleaseController {
       lastVerifiedAt: nowIso(),
       revocationReason: null,
       error: null,
-    } : null;
-    job.phase = "ci";
+    };
+    job.phase = "deliver";
     job.status = "running";
     this.deps.store.save(job);
     return stepResult("pull_request_ready", true, false, this.deps.store.config.delivery.pollIntervalMs, `Pull request #${pullRequest.number} created or recovered.`);
@@ -988,68 +932,10 @@ export class ReleaseController {
       merged ? "merged_candidate_mismatch" : "pull_request_identity_mismatch",
     );
     job.pullRequest = observed.pullRequest;
-    if (merged) return this.observeMerged(job, observed.checks, observed.mergedAt);
+    if (merged) return this.observeMerged(job, observed.mergedAt);
     if (observed.pullRequest.state === "CLOSED") throw new ControllerError("pull_request_closed", "The release pull request was closed without merge.");
     if (observed.pullRequest.state !== "OPEN") throw new ControllerError("pull_request_identity_mismatch", "Observed pull request state is invalid.");
-    await this.assertSourceStillCurrent(job, "CI observation");
-    if (requiredCheckContract(this.deps.store.config)) {
-      return this.observeContractCi(job, observed.checks);
-    }
-    const required = requiredCheckProblems(observed.checks, requiredCheckNames(this.deps.store.config));
-    if (required.failures.length > 0) {
-      if (job.ciRepairRounds >= (this.deps.store.config.policy.maxCiRepairRounds ?? 0)) {
-        const path = this.writeReason(job, "required-check-failure", JSON.stringify(observed.checks, null, 2));
-        this.deps.store.save(job);
-        throw new ControllerError("required_check_failed", "A required pull request check failed.", path);
-      }
-      return this.scheduleHardening(job, "required-check-failure", JSON.stringify(observed.checks, null, 2), null);
-    }
-    if (required.missing.length > 0) {
-      this.deps.store.save(job);
-      return stepResult("required_check_missing", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${required.missing.join(", ")}.`);
-    }
-    if (required.pending.length > 0) {
-      this.deps.store.save(job);
-      return stepResult("required_check_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, `Waiting for required checks: ${required.pending.map(({ name }) => name).join(", ")}.`);
-    }
-    if (observed.checks.state === "failure") {
-      if (job.ciRepairRounds >= (this.deps.store.config.policy.maxCiRepairRounds ?? 0)) {
-        const path = this.writeReason(job, "ci-failure", JSON.stringify(observed.checks, null, 2));
-        this.deps.store.save(job);
-        throw new ControllerError("ci_failed", "Pull request checks failed after the allowed CI repair rounds.", path);
-      }
-      return this.scheduleHardening(job, "ci-failure", JSON.stringify(observed.checks, null, 2), null);
-    }
-    if (observed.checks.state === "pending" || (observed.checks.state === "none" && !this.deps.store.config.delivery.allowNoChecks)) {
-      this.deps.store.save(job);
-      return stepResult("ci_pending", false, false, this.deps.store.config.delivery.pollIntervalMs, "Waiting for GitHub checks.");
-    }
-    if (this.deps.store.config.delivery.autoMerge) {
-      if (!(await this.deps.github.baseAllowsUpToDateAutoMerge())) {
-        throw new ControllerError(
-          "base_up_to_date_policy_unverified",
-          "Auto-merge requires branch protection or an active ruleset that requires pull requests and every configured required check on the latest base. Configure that server-side policy, or set autoMerge=false and merge manually.",
-        );
-      }
-      await this.assertSourceStillCurrent(job, "auto-merge enablement");
-      if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
-        throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before auto-merge authorization.");
-      }
-      await this.deps.github.enableAutoMerge(job.pullRequest.number, job.candidateSha);
-      job.status = "running";
-    } else {
-      await this.assertSourceStillCurrent(job, "ready-to-merge transition");
-      job.status = "ready_to_merge";
-    }
-    job.phase = "awaiting_merge";
-    this.deps.store.save(job);
-    return stepResult(
-      this.deps.store.config.delivery.autoMerge ? "auto_merge_enabled" : "ready_to_merge",
-      true,
-      !this.deps.store.config.delivery.autoMerge,
-      this.deps.store.config.delivery.autoMerge ? this.deps.store.config.delivery.pollIntervalMs : null,
-      this.deps.store.config.delivery.autoMerge ? "Checks passed; auto-merge is enabled." : "Checks passed; the exact reviewed PR is ready for manual merge.",
-    );
+    return this.observeContractCi(job, observed.checks);
   }
 
   private async observeContractCi(job: JobState, checks: GhCheckSummary): Promise<StepResult> {
@@ -1065,7 +951,6 @@ export class ReleaseController {
         firstObservedAt: now,
         firstAppearanceDeadlineAt: addMilliseconds(now, contract.firstAppearanceTimeoutMs),
         pendingDeadlineAt: null,
-        postMergeDeadlineAt: null,
         attempts: 0,
         lastObservation: null,
       };
@@ -1089,12 +974,12 @@ export class ReleaseController {
       throw new ControllerError("required_check_configuration_invalid", "A required check produced a non-accepted conclusion that is not code-repairable.", path);
     }
     if (infrastructure.length > 0) {
-      const maximum = this.deps.store.config.policy.maxCiInfrastructureReruns ?? 0;
-      if (job.ciInfrastructureReruns >= maximum) {
+      const maximum = this.deps.store.config.policy.maxInfrastructureReruns ?? 0;
+      if (job.infrastructureReruns >= maximum) {
         const path = this.writeCiObservation(job, "infrastructure-exhausted", checks);
         throw new ControllerError("ci_infrastructure_exhausted", "Required check infrastructure retries are exhausted.", path);
       }
-      job.ciInfrastructureReruns += 1;
+      job.infrastructureReruns += 1;
       this.deps.store.save(job);
       try {
         for (const check of infrastructure) await this.deps.github.rerunCheck(check, job.candidateSha);
@@ -1105,8 +990,8 @@ export class ReleaseController {
       return stepResult("ci_infrastructure_rerun", true, false, this.deps.store.config.delivery.pollIntervalMs, "Required check infrastructure rerun requested without changing code.");
     }
     if (codeFailures.length > 0) {
-      const maximum = this.deps.store.config.policy.maxCiCodeRepairRounds ?? 0;
-      if (job.ciCodeRepairRounds >= maximum) {
+      const maximum = this.deps.store.config.policy.maxCodeRepairRounds ?? 0;
+      if (job.codeRepairRounds >= maximum) {
         const path = this.writeCiObservation(job, "code-repair-exhausted", checks);
         throw new ControllerError("ci_code_repair_exhausted", "Required check code repair rounds are exhausted.", path);
       }
@@ -1123,7 +1008,7 @@ export class ReleaseController {
       job.pullRequest = null;
       job.ciGate = null;
       this.deps.store.save(job);
-      return this.scheduleHardening(job, "ci-code", JSON.stringify(evidence, null, 2), evidencePath);
+      return this.scheduleRepair(job, "ci-code", JSON.stringify(evidence, null, 2), evidencePath);
     }
     if (checks.missing.length > 0) {
       if (deadlineExpired(job.ciGate.firstAppearanceDeadlineAt, now)) {
@@ -1146,13 +1031,13 @@ export class ReleaseController {
     if (!(await this.deps.github.baseAllowsUpToDateAutoMerge())) {
       throw new ControllerError("base_up_to_date_policy_unverified", "Controller auto-merge requires strict server-side latest-base and required-check policy.");
     }
-    await this.assertSourceStillCurrent(job, "auto-merge authorization");
+    await this.assertBaseStillCurrent(job, "auto-merge authorization");
     if (await this.deps.git.head(job.worktreePath) !== job.candidateSha || !(await this.deps.git.isClean(job.worktreePath))) {
       throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before auto-merge authorization.");
     }
     job = await this.authorizeDelivery(job, digestJson(proof));
     job.status = "running";
-    job.phase = "awaiting_merge";
+    job.phase = "deliver";
     this.deps.store.save(job);
     return stepResult("auto_merge_enabled", true, false, this.deps.store.config.delivery.pollIntervalMs, "Required checks passed; exact-head Controller auto-merge is authorized.");
   }
@@ -1168,117 +1053,63 @@ export class ReleaseController {
       merged ? "merged_candidate_mismatch" : "pull_request_identity_mismatch",
     );
     job.pullRequest = observed.pullRequest;
-    if (merged) return this.observeMerged(job, observed.checks, observed.mergedAt);
+    if (merged) return this.observeMerged(job, observed.mergedAt);
     if (observed.pullRequest.state === "CLOSED") throw new ControllerError("pull_request_closed", "The release pull request was closed without merge.");
     if (observed.pullRequest.state !== "OPEN") throw new ControllerError("pull_request_identity_mismatch", "Observed pull request state is invalid.");
-    await this.assertSourceStillCurrent(job, "merge observation");
-    if (this.deps.store.config.executionMode === "release-plan-v2-direct") {
-      readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
-    }
-    job.status = this.deps.store.config.delivery.autoMerge ? "running" : "ready_to_merge";
+    readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    job.status = "running";
     this.deps.store.save(job);
-    return stepResult("awaiting_merge", false, !this.deps.store.config.delivery.autoMerge, this.deps.store.config.delivery.autoMerge ? this.deps.store.config.delivery.pollIntervalMs : null, "Waiting for the exact candidate PR to merge.");
+    return stepResult("awaiting_merge", false, false, this.deps.store.config.delivery.pollIntervalMs, "Waiting for the exact candidate PR to merge.");
   }
 
-  private async observeMerged(job: JobState, checks: GhCheckSummary, mergedAt: string | null): Promise<StepResult> {
+  private async observeMerged(job: JobState, mergedAt: string | null): Promise<StepResult> {
     if (!job.pullRequest || job.pullRequest.state !== "MERGED") {
       throw new ControllerError("merged_candidate_mismatch", "GitHub merge state is inconsistent with the observed pull request.");
     }
     const contract = requiredCheckContract(this.deps.store.config);
-    if (contract) {
-      if (!job.deliveryAuthority
-        || !["authorizing", "authorized"].includes(job.deliveryAuthority.status)
-        || job.deliveryAuthority.candidateSha !== job.candidateSha) {
-        throw new ControllerError("merged_without_controller_authority", "The candidate merged without a valid Controller-owned authority checkpoint.");
-      }
-      const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
-      if (job.deliveryAuthority.proofDigest !== digestJson(proof)) {
-        throw new ControllerError("merged_without_controller_authority", "The candidate merged without a valid Controller-owned authority checkpoint.");
-      }
-      const now = nowIso();
-      const contractDigest = digestJson(contract);
-      job.ciGate ??= {
-        version: 1,
-        candidateSha: job.candidateSha!,
-        checkContractDigest: contractDigest,
-        firstObservedAt: now,
-        firstAppearanceDeadlineAt: addMilliseconds(now, contract.firstAppearanceTimeoutMs),
-        pendingDeadlineAt: null,
-        postMergeDeadlineAt: addMilliseconds(now, contract.postMergeTimeoutMs),
-        attempts: 0,
-        lastObservation: null,
-      };
-      if (job.ciGate.candidateSha !== job.candidateSha || job.ciGate.checkContractDigest !== contractDigest) {
-        throw new ControllerError("ci_contract_drift", "Merged check evidence does not match the candidate-bound contract.");
-      }
-      job.ciGate.attempts += 1;
-      job.ciGate.lastObservation = checks;
-      job.ciGate.postMergeDeadlineAt ??= addMilliseconds(now, contract.postMergeTimeoutMs);
-      this.deps.store.save(job);
-      if ((checks.ambiguous ?? []).length > 0 || checks.failures.length > 0) {
-        const path = this.writeCiObservation(job, "post-merge-invalid", checks);
-        throw new ControllerError("post_merge_required_check_invalid", "Merged required check evidence is ambiguous or failed.", path);
-      }
-      if (checks.missing.length > 0 || checks.pending.length > 0) {
-        if (deadlineExpired(job.ciGate.postMergeDeadlineAt, now)) {
-          const path = this.writeCiObservation(job, "post-merge-deadline", checks);
-          throw new ControllerError("post_merge_check_deadline", "Merged required check evidence did not complete before the durable deadline.", path);
-        }
-        return stepResult("post_merge_checks_pending", true, false, this.deps.store.config.delivery.pollIntervalMs, "Merged candidate is waiting for exact required check evidence.");
-      }
+    const checks = job.ciGate?.lastObservation;
+    if (!contract || !job.deliveryAuthority
+      || !["authorizing", "authorized"].includes(job.deliveryAuthority.status)
+      || job.deliveryAuthority.candidateSha !== job.candidateSha
+      || job.ciGate?.candidateSha !== job.candidateSha
+      || job.ciGate.checkContractDigest !== digestJson(contract)
+      || checks?.state !== "success" || checks.missing.length > 0 || checks.pending.length > 0
+      || checks.failures.length > 0 || (checks.ambiguous ?? []).length > 0) {
+      throw new ControllerError("merged_without_controller_authority", "The candidate merged without successful exact-head checks and Controller-owned authority.");
     }
-    const required = requiredCheckProblems(checks, requiredCheckNames(this.deps.store.config));
-    if (required.failures.length > 0) {
-      throw new ControllerError("required_check_failed", "A merged pull request has a failed required check.");
-    }
-    if (required.missing.length > 0 || required.pending.length > 0) {
-      this.deps.store.save(job);
-      const missing = required.missing.length > 0;
-      return stepResult(
-        missing ? "required_check_missing" : "required_check_pending",
-        true,
-        false,
-        this.deps.store.config.delivery.pollIntervalMs,
-        `Merged candidate is not complete until required checks are ${missing ? "present" : "successful"}.`,
-      );
+    const proof = readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
+    if (job.deliveryAuthority.proofDigest !== digestJson(proof)) {
+      throw new ControllerError("merged_without_controller_authority", "The candidate merged without a valid Controller-owned authority checkpoint.");
     }
     if (mergedAt === null || !job.pullRequest.mergeSha) {
       throw new ControllerError("merge_commit_missing", "GitHub reports a merged pull request without a durable merge commit identity.");
     }
     this.assertCurrentInputs(job);
-    if (isReleasePlanV2(job.plan)) {
-      await this.fetchCurrentSourceIssues(job, "merge completion");
-      await this.assertOracleBindingsAtBase(job.plan);
-    }
     try {
       await this.deps.git.fetchBase();
       if (!(await this.deps.git.isAncestorOfRemoteBase(job.pullRequest.mergeSha))) {
         throw new Error("merge commit is not on the current remote base");
       }
-      if (isReleasePlanV2(job.plan)) {
-        const result = await this.deps.git.verifyMergeResult({
-          mergeSha: job.pullRequest.mergeSha,
-          candidateSha: job.candidateSha!,
-          baseSha: job.plan.source.baseSha,
-          mergeMethod: this.deps.store.config.delivery.mergeMethod,
-        });
-        if (result === "base_mismatch") {
-          throw new ControllerError(
-            "runtime_source_base_drift",
-            "The merged candidate was not applied to the Release Plan v2 source base.",
-          );
-        }
-        if (result === "candidate_mismatch") {
-          throw new ControllerError("merged_candidate_mismatch", "The merge result does not reproduce the exact reviewed candidate.");
-        }
+      const result = await this.deps.git.verifyMergeResult({
+        mergeSha: job.pullRequest.mergeSha,
+        candidateSha: job.candidateSha!,
+        baseSha: job.plan.source.baseSha,
+        mergeMethod: this.deps.store.config.delivery.mergeMethod,
+      });
+      if (result === "base_mismatch") {
+        throw new ControllerError(
+          "runtime_source_base_drift",
+          "The merged candidate was not applied to the Release Plan v2 source base.",
+        );
+      }
+      if (result === "candidate_mismatch") {
+        throw new ControllerError("merged_candidate_mismatch", "The merge result does not reproduce the exact reviewed candidate.");
       }
     } catch (error) {
       if (error instanceof ControllerError) throw error;
       throw new ControllerError("merge_commit_unverified", "The merge commit cannot be read from Git or is not an ancestor of the current remote base.");
     }
-    if (isReleasePlanV2(job.plan)
-      && this.deps.store.config.executionMode === "release-plan-v2-direct"
-      && this.deps.store.config.review.enabled) {
+    {
       if (job.deliveryAuthority) {
         job.deliveryAuthority = {
           ...job.deliveryAuthority,
@@ -1413,45 +1244,29 @@ export class ReleaseController {
     return path;
   }
 
-  private scheduleHardening(
+  private scheduleRepair(
     job: JobState,
     kind: string,
     evidence: string,
     detailsPath: string | null,
   ): StepResult {
-    const policy = this.deps.store.config.policy;
-    const category = kind === "release-validation" ? "validation"
-      : kind === "release-review" ? "review"
-        : kind === "ci-code" ? "ci"
-          : "legacy-ci";
-    const used = category === "validation" ? job.releaseValidationRepairRounds
-      : category === "review" ? job.reviewRepairRounds
-        : category === "ci" ? job.ciCodeRepairRounds
-          : job.ciRepairRounds;
-    const maximum = category === "validation" ? (policy.maxReleaseValidationRepairRounds ?? policy.maxReleaseHardeningRounds ?? 0)
-      : category === "review" ? (policy.maxReviewRepairRounds ?? policy.maxReleaseHardeningRounds ?? 0)
-        : category === "ci" ? (policy.maxCiCodeRepairRounds ?? policy.maxCiRepairRounds ?? 0)
-          : (policy.maxCiRepairRounds ?? 0);
-    if (used >= maximum) {
-      const code = category === "ci" || category === "legacy-ci" ? "ci_code_repair_exhausted" : "release_hardening_exhausted";
-      const message = "Release requires another hardening round beyond the configured limit.";
+    const maximum = this.deps.store.config.policy.maxCodeRepairRounds ?? 0;
+    if (job.codeRepairRounds >= maximum) {
+      const code = kind === "ci-code" ? "ci_code_repair_exhausted" : "release_repair_exhausted";
+      const message = "Release requires another code repair beyond the configured limit.";
       const blocked = blockJob(job, code, message, detailsPath);
       this.deps.store.save(blocked);
       return stepResult("blocked", true, true, null, `${blocked.blocked!.code}: ${blocked.blocked!.message}`);
     }
-    if (category === "validation") job.releaseValidationRepairRounds += 1;
-    else if (category === "review") job.reviewRepairRounds += 1;
-    else if (category === "ci") job.ciCodeRepairRounds += 1;
-    else if (category === "legacy-ci") job.ciRepairRounds += 1;
-    job.hardeningRounds += 1;
-    job.hardeningReasonPath = this.writeReason(job, kind, evidence);
-    job.phase = "harden";
+    job.codeRepairRounds += 1;
+    job.repairReasonPath = this.writeReason(job, kind, evidence);
+    job.phase = "repair";
     this.deps.store.save(job);
-    return stepResult("release_hardening_scheduled", true, false, null, `Scheduled fresh release hardening round ${job.hardeningRounds}.`);
+    return stepResult("release_repair_scheduled", true, false, null, `Scheduled fresh release repair ${job.codeRepairRounds}.`);
   }
 
   private writeReason(job: JobState, kind: string, evidence: string): string {
-    const path = join(this.deps.store.root(job.id), `hardening-${String(job.hardeningRounds).padStart(2, "0")}-${kind}.md`);
+    const path = join(this.deps.store.root(job.id), `repair-${String(job.codeRepairRounds).padStart(2, "0")}-${kind}.md`);
     writeTextAtomic(path, `# ${kind}\n\n${evidence.trim()}\n`);
     return path;
   }
@@ -1501,19 +1316,6 @@ function assertPullRequestIdentity(
   }
 }
 
-function requiredCheckProblems(checks: GhCheckSummary, requiredChecks: string[]): {
-  missing: string[];
-  failures: GhCheckSummary["failures"];
-  pending: GhCheckSummary["pending"];
-} {
-  const required = new Set(requiredChecks);
-  return {
-    missing: checks.missing ?? requiredChecks,
-    failures: checks.failures.filter(({ name }) => required.has(name)),
-    pending: checks.pending.filter(({ name }) => required.has(name)),
-  };
-}
-
 function appendValidation(job: JobState, receipt: ValidationReceipt, path: string): void {
   job.validations.push({
     id: receipt.id,
@@ -1552,13 +1354,11 @@ function dedupeCommands(commands: CommandConfig[]): CommandConfig[] {
 type BoundOracleRef = OracleExecutionRef & { command: string };
 
 function oracleRefs(issues: JobState["plan"]["issues"]): BoundOracleRef[] {
-  return issues.flatMap((issue) => "oracleBindings" in issue
-    ? issue.oracleBindings.map((binding) => ({
+  return issues.flatMap((issue) => issue.oracleBindings.map((binding) => ({
       issueNumber: issue.number,
       oracleId: binding.id,
       command: binding.execution.command,
-    }))
-    : []);
+    })));
 }
 
 function bindOracleValidationCommands(

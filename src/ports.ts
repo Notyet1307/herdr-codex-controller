@@ -4,12 +4,10 @@ import type {
   IssueSnapshot,
   JobState,
   PullRequestState,
-  QueueIssue,
   ReviewResult,
   RunKind,
   ValidationReceipt,
   WorkerResult,
-  WorkflowGateSummary,
   RepositoryFileSnapshot,
   ValidationCommandConfig,
   GitRemoteIdentity,
@@ -94,11 +92,6 @@ export interface GitHubPort {
   disableAutoMerge(number: number, candidateSha: string): Promise<void>;
   fetchCheckFailureEvidence(check: GhCheckObservation, candidateSha: string): Promise<CiFailureEvidence>;
   rerunCheck(check: GhCheckObservation, candidateSha: string): Promise<void>;
-  currentLogin(): Promise<string>;
-  listSubIssues(parentIssue: number): Promise<QueueIssue[]>;
-  fetchQueueIssue(number: number): Promise<QueueIssue>;
-  claimIssue(number: number, login: string): Promise<void>;
-  inspectWorkflowGate(sha: string, requiredWorkflows: string[]): Promise<WorkflowGateSummary>;
 }
 
 export interface CodexPort {

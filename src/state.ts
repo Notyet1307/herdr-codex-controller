@@ -10,7 +10,7 @@ import type {
 } from "./types.js";
 import { copyJsonSnapshot, ensurePrivateDir, readJsonFile, writeJsonAtomic } from "./fs-atomic.js";
 import { digestJson, nowIso, pathWithin, safeToken, sha256 } from "./util.js";
-import { assertPlanCompatibleWithConfig, isReleasePlanV2 } from "./plan.js";
+import { assertPlanCompatibleWithConfig } from "./plan.js";
 import { ControllerError } from "./errors.js";
 import {
   assertControllerProvenance,
@@ -46,6 +46,7 @@ const REPLAN_CAUSES = new Set([
   "protected_path_changed",
   "release_diff_too_large",
   "release_hardening_exhausted",
+  "release_repair_exhausted",
   "release_oracle_validation_missing",
   "release_review_blocked",
   "release_too_many_issues",
@@ -102,7 +103,7 @@ export class JobStore {
     const worktreePath = resolve(this.config.worktreeRoot, id);
     const now = nowIso();
     const job: JobState = {
-      version: this.config.version === 3 ? 4 : this.config.version === 2 ? 3 : 2,
+      version: 4,
       id,
       provenance,
       configPath: resolve(input.configPath),
@@ -136,15 +137,10 @@ export class JobStore {
       validations: [],
       candidateSha: null,
       reviewRound: 0,
-      hardeningRounds: 0,
-      ciRepairRounds: 0,
-      releaseValidationRepairRounds: 0,
-      reviewRepairRounds: 0,
-      ciCodeRepairRounds: 0,
-      ciInfrastructureReruns: 0,
-      providerRetryAttempts: 0,
+      codeRepairRounds: 0,
+      infrastructureReruns: 0,
       lastReviewPath: null,
-      hardeningReasonPath: null,
+      repairReasonPath: null,
       pullRequest: null,
       ciGate: null,
       deliveryAuthority: null,
@@ -170,16 +166,15 @@ export class JobStore {
     }
     if (job.retryAuthorizations === undefined) job.retryAuthorizations = [];
     if (job.completion === undefined) job.completion = null;
-    if (job.version < 4) {
-      job.releaseValidationRepairRounds ??= 0;
-      job.reviewRepairRounds ??= 0;
-      job.ciCodeRepairRounds ??= 0;
-      job.ciInfrastructureReruns ??= 0;
-      job.providerRetryAttempts ??= 0;
-      job.ciGate ??= null;
-      job.deliveryAuthority ??= null;
-      job.publicCompletion ??= null;
-    }
+    const legacy = job as JobState & Record<string, any>;
+    job.codeRepairRounds ??= Number(legacy.releaseValidationRepairRounds ?? 0)
+      + Number(legacy.reviewRepairRounds ?? 0)
+      + Number(legacy.ciCodeRepairRounds ?? legacy.ciRepairRounds ?? 0);
+    job.infrastructureReruns ??= Number(legacy.ciInfrastructureReruns ?? 0);
+    job.repairReasonPath ??= legacy.hardeningReasonPath ?? null;
+    job.ciGate ??= null;
+    job.deliveryAuthority ??= null;
+    job.publicCompletion ??= null;
     assertJob(job);
     assertRetryEvidence(job, this.root(job.id));
     return job;
@@ -306,7 +301,7 @@ export function assertJob(job: JobState): void {
     throw new Error("job Git remote identity does not match Controller provenance");
   }
   if (job.version === 4) {
-    for (const value of [job.releaseValidationRepairRounds, job.reviewRepairRounds, job.ciCodeRepairRounds, job.ciInfrastructureReruns, job.providerRetryAttempts]) {
+    for (const value of [job.codeRepairRounds, job.infrastructureReruns]) {
       if (!Number.isSafeInteger(value) || value < 0) throw new Error("job repair counters are invalid");
     }
     if (job.ciGate && (job.ciGate.version !== 1 || job.ciGate.candidateSha !== job.candidateSha
@@ -314,7 +309,6 @@ export function assertJob(job: JobState): void {
       || !isCanonicalIsoTime(job.ciGate.firstObservedAt)
       || !isCanonicalIsoTime(job.ciGate.firstAppearanceDeadlineAt)
       || (job.ciGate.pendingDeadlineAt !== null && !isCanonicalIsoTime(job.ciGate.pendingDeadlineAt))
-      || (job.ciGate.postMergeDeadlineAt !== null && !isCanonicalIsoTime(job.ciGate.postMergeDeadlineAt))
       || !Number.isSafeInteger(job.ciGate.attempts) || job.ciGate.attempts < 0)) {
       throw new Error("job CI gate state is invalid");
     }
@@ -331,7 +325,7 @@ export function assertJob(job: JobState): void {
     || job.provenance.releasePlan.digest !== job.planDigest) {
     throw new Error("job Controller provenance does not bind its config and Release Plan");
   }
-  if (isReleasePlanV2(job.plan) && job.baseSha !== null && job.baseSha !== job.plan.source.baseSha) {
+  if (job.baseSha !== null && job.baseSha !== job.plan.source.baseSha) {
     throw new Error("job base SHA differs from its Release Plan v2 source binding");
   }
   const issueNumbers = job.issues.map((issue) => issue.number);
@@ -413,7 +407,7 @@ function assertRetryEvidenceBinding(authorization: RetryAuthorization, jobRoot: 
 }
 
 function isJobPhase(value: unknown): boolean {
-  return ["prepare", "implement", "issue_validate", "release_validate", "review", "harden", "deliver", "ci", "awaiting_merge", "complete"].includes(String(value));
+  return ["prepare", "implement", "verify", "review", "repair", "deliver", "complete"].includes(String(value));
 }
 
 function isCanonicalIsoTime(value: unknown): boolean {

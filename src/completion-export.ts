@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { validateReviewResult } from "./codex.js";
 import { ControllerError } from "./errors.js";
 import { readJsonFile, writePublicJsonAtomic } from "./fs-atomic.js";
-import { isReleasePlanV2 } from "./plan.js";
 import { assertControllerProvenance } from "./provenance.js";
 import type { GitHubPort, GitPort } from "./ports.js";
 import type { JobStore } from "./state.js";
@@ -349,8 +348,8 @@ export function assertReleaseCompletion(value: ReleaseCompletionV1 | ReleaseComp
 }
 
 export function readCanonicalCandidateProof(job: JobState, config: ControllerConfig, jobRoot: string) {
-  if (config.executionMode !== "release-plan-v2-direct" || job.provenance.executionMode !== "release-plan-v2-direct"
-    || !isReleasePlanV2(job.plan) || !config.delivery.createPullRequest || config.delivery.allowNoChecks
+  if (job.provenance.executionMode !== "release-plan-v2-direct"
+    || !config.delivery.createPullRequest || config.delivery.allowNoChecks
     || !config.review.enabled || requiredCheckNames(config).length === 0 || !job.candidateSha) {
     throw new ControllerError("completion_export_production_mode_invalid", "Completion export requires production Release Plan v2 direct delivery.");
   }

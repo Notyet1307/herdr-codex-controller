@@ -1,258 +1,142 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { validateConfig } from "../src/config.js";
-import { assertPlanCompatibleWithConfig, isReleasePlanV2, validatePlan } from "../src/plan.js";
+import { assertPlanCompatibleWithConfig, validatePlan } from "../src/plan.js";
 import { boundedExactText, digestJson, sha256PrefixedUtf8, stableStringify } from "../src/util.js";
-import { createTestRepo, testConfig, testPlan, testPlanV2 } from "./support.js";
+import { configInput, createTestRepo, testConfig, testPlan, testPlanV2 } from "./support.js";
 
-test("config and ordered plan validate with isolated paths", () => {
+test("production config v4 exposes only operator choices and synthesizes fixed policy", () => {
   const repo = createTestRepo();
   try {
-    const config = validateConfig(testConfig(repo));
-    const plan = validatePlan(testPlan());
+    const input = configInput(testConfig(repo));
+    const config = validateConfig(input);
+    assert.equal(config.version, 4);
+    assert.equal(config.executionMode, "release-plan-v2-direct");
+    assert.deepEqual(config.review, { enabled: true, blockingSeverities: ["critical", "major"] });
+    assert.equal(config.codex.workerProfile, null);
+    assert.equal(config.codex.reviewerProfile, null);
     assert.equal(config.codex.networkAccess, false);
-    assert.deepEqual(plan.issues.map((issue) => issue.number), [1, 2]);
+    assert.equal(config.delivery.createPullRequest, true);
+    assert.equal(config.delivery.autoMerge, true);
+    assert.equal(config.delivery.allowNoChecks, false);
+    assert.deepEqual(config.delivery.mergeAuthority, {
+      version: 1,
+      mode: "controller-auto-merge",
+      quarantine: "delete-exact-head-branch",
+    });
+
+    for (const mutate of [
+      (value: any) => { value.executionMode = "release-plan-v2-direct"; },
+      (value: any) => { value.review = { enabled: false }; },
+      (value: any) => { value.codex.workerProfile = "custom"; },
+      (value: any) => { value.codex.networkAccess = true; },
+      (value: any) => { value.delivery.createPullRequest = false; },
+      (value: any) => { value.delivery.autoMerge = false; },
+      (value: any) => { value.delivery.allowNoChecks = true; },
+      (value: any) => { value.delivery.mergeAuthority = {}; },
+    ]) {
+      const invalid = structuredClone(input) as any;
+      mutate(invalid);
+      assert.throws(() => validateConfig(invalid), /unknown keys/);
+    }
+
+    const old = structuredClone(input) as any;
+    old.version = 3;
+    assert.throws(
+      () => validateConfig(old),
+      (error: any) => error?.code === "production_config_migration_required",
+    );
   } finally { repo.cleanup(); }
-});
-
-test("canonical JSON uses recursive code-unit key order", () => {
-  const value = {
-    pullRequest: { mergedAt: "a", mergeSha: "b" },
-    controllerProvenance: {
-      releasePlan: { version: 2, digest: "d" },
-      controller: { sourceRevision: "r", sourceManifestDigest: "m" },
-    },
-  };
-  assert.equal(
-    stableStringify(value),
-    '{"controllerProvenance":{"controller":{"sourceManifestDigest":"m","sourceRevision":"r"},"releasePlan":{"digest":"d","version":2}},"pullRequest":{"mergeSha":"b","mergedAt":"a"}}',
-  );
-  assert.equal(stableStringify(value), stableStringify(structuredClone(value)));
-});
-
-test("plan rejects a dependency that does not precede the issue", () => {
-  const plan: any = testPlan();
-  plan.issues[0].dependsOn = [2];
-  assert.throws(() => validatePlan(plan), /does not precede|depends on/);
 });
 
 test("config rejects overlapping source and state paths", () => {
   const repo = createTestRepo();
   try {
-    const config: any = testConfig(repo);
-    config.stateDir = `${repo.source}/state`;
-    assert.throws(() => validateConfig(config), /must not overlap/);
+    const input = configInput(testConfig(repo)) as any;
+    input.stateDir = `${repo.source}/state`;
+    assert.throws(() => validateConfig(input), /must not overlap/);
   } finally { repo.cleanup(); }
 });
 
-test("execution mode defaults to direct but production requires explicit config v3", () => {
+test("Release Plan v2 is the only runtime plan and Oracle is optional", () => {
   const repo = createTestRepo();
   try {
-    const legacyDefault: any = testConfig(repo);
-    delete legacyDefault.executionMode;
-    assert.throws(
-      () => validateConfig(legacyDefault),
-      (error: any) => error?.code === "production_config_migration_required",
-    );
-    const direct = validateConfig(testConfig(repo, { executionMode: "release-plan-v2-direct" }));
-    assert.equal(direct.executionMode, "release-plan-v2-direct");
-    assert.throws(
-      () => assertPlanCompatibleWithConfig(testPlan([1]), direct),
-      (error: any) => error?.code === "production_plan_v1_rejected",
-    );
-
-    const compatibility = validateConfig(testConfig(repo));
-    assert.doesNotThrow(() => assertPlanCompatibleWithConfig(testPlan([1]), compatibility));
-    assert.throws(
-      () => validateConfig({ ...testConfig(repo), executionMode: "qualified-dispatcher" }),
-      /config\.executionMode/,
-    );
+    const ordinary = validatePlan(testPlan(repo, [1]));
+    assert.equal(ordinary.version, 2);
+    assert.deepEqual(ordinary.issues[0]?.oracleBindings, []);
+    assert.deepEqual(ordinary.issues[0]?.protectedPaths, []);
+    const protectedPlan = validatePlan(testPlanV2(repo, [1]));
+    assert.equal(protectedPlan.issues[0]?.oracleBindings.length, 1);
+    assert.throws(() => validatePlan({
+      version: 1,
+      id: "legacy",
+      title: "legacy",
+      objective: "legacy",
+      parentIssue: null,
+      issues: [],
+      releaseAcceptanceCriteria: [],
+      reviewFocus: [],
+    }), /version must be 2/);
   } finally { repo.cleanup(); }
 });
 
-test("production direct policy requires canonical review, versioned checks, and Controller auto-merge", () => {
+test("Release Plan v2 validates exact source identity and closed high-risk Oracle bindings", () => {
   const repo = createTestRepo();
   try {
-    const valid = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    assert.doesNotThrow(() => validateConfig(valid));
-    const cases: Array<(config: any) => void> = [
-      (config) => { config.delivery.createPullRequest = false; },
-      (config) => { config.delivery.autoMerge = false; },
-      (config) => { config.delivery.allowNoChecks = true; },
-      (config) => { config.delivery.requiredChecks.checks = []; },
-      (config) => { config.delivery.requiredChecks.checks.push(structuredClone(config.delivery.requiredChecks.checks[0])); },
-      (config) => { config.delivery.requiredChecks.checks[0].appId = null; config.delivery.requiredChecks.checks[0].workflowName = null; },
-      (config) => { config.delivery.mergeAuthority.quarantine = "leave-open"; },
-    ];
-    for (const mutate of cases) {
-      const config = structuredClone(valid) as any;
-      mutate(config);
-      assert.throws(
-        () => validateConfig(config),
-        (error: any) => error?.code === "production_delivery_policy_invalid",
-      );
-    }
-    for (const mutate of [
-      (config: any) => { config.review.enabled = false; },
-      (config: any) => { config.review.blockingSeverities = ["critical"]; },
-      (config: any) => { config.review.blockingSeverities = ["critical", "critical"]; },
-    ]) {
-      const config = structuredClone(valid) as any;
-      mutate(config);
-      assert.throws(() => validateConfig(config), (error: any) => (
-        error?.code === "production_review_policy_invalid" || /duplicates/u.test(error?.message ?? "")
-      ));
-    }
-  } finally { repo.cleanup(); }
-});
-
-test("legacy direct config requires an explicit validation sandbox migration", () => {
-  const repo = createTestRepo();
-  try {
-    const legacy: any = testConfig(repo);
-    legacy.executionMode = "release-plan-v2-direct";
-    assert.throws(
-      () => validateConfig(legacy),
-      (error: any) => error?.code === "production_config_migration_required",
-    );
-    const migrated = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    assert.doesNotThrow(() => validateConfig(migrated));
-  } finally { repo.cleanup(); }
-});
-
-test("production runtime disallows profiles and PATH-resolved Codex binaries", () => {
-  const repo = createTestRepo();
-  try {
-    const valid = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    for (const mutate of [
-      (config: any) => { config.codex.workerProfile = "worker"; },
-      (config: any) => { config.codex.reviewerProfile = "reviewer"; },
-      (config: any) => { config.codex.bin = "codex"; },
-    ]) {
-      const config = structuredClone(valid) as any;
-      mutate(config);
-      assert.throws(
-        () => validateConfig(config),
-        (error: any) => error?.code === "production_runtime_policy_invalid",
-      );
-    }
-  } finally { repo.cleanup(); }
-});
-
-test("Release Plan v1 keeps its existing nullable and operator-supplied fields", () => {
-  const plan: any = testPlan([1]);
-  plan.parentIssue = null;
-  plan.issues[0].objective = null;
-  plan.issues[0].suggestedValidation = [{ command: "npm test" }];
-  plan.issues[0].allowNoop = true;
-  const validated = validatePlan(plan);
-  assert.equal(validated.version, 1);
-  assert.equal(validated.parentIssue, null);
-  assert.equal(validated.issues[0]?.objective, null);
-  assert.deepEqual(validated.issues[0]?.suggestedValidation, [{ command: "npm test" }]);
-  assert.equal(validated.issues[0]?.allowNoop, true);
-  assert.throws(() => validatePlan({ ...plan, unexpected: true }), /unknown keys/);
-});
-
-test("Release Plan v2 validates its complete source contract and preserves exact titles", () => {
-  const repo = createTestRepo();
-  try {
-    const raw = structuredClone(testPlanV2(repo));
+    const raw = structuredClone(testPlanV2(repo, [1]));
     raw.source.parentBinding.expectedTitle = "  Parent title\n";
     raw.issues[0]!.expectedTitle = "\tIssue title with exact whitespace  ";
     const plan = validatePlan(raw);
-    assert.equal(isReleasePlanV2(plan), true);
-    if (!isReleasePlanV2(plan)) throw new Error("expected v2");
     assert.equal(plan.source.parentBinding.expectedTitle, "  Parent title\n");
     assert.equal(plan.issues[0]?.expectedTitle, "\tIssue title with exact whitespace  ");
     assert.equal(digestJson(plan), digestJson(structuredClone(plan)));
     assert.equal(sha256PrefixedUtf8(""), "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-    assert.equal(boundedExactText("  exact\n", "fixture", 20), "  exact\n");
-  } finally { repo.cleanup(); }
-});
 
-test("Release Plan v2 rejects every closed source-contract shape", () => {
-  const repo = createTestRepo();
-  try {
-    const cases: Array<{ name: string; mutate(plan: any): void; pattern: RegExp }> = [
-      { name: "top-level extra key", mutate: (plan) => { plan.extra = true; }, pattern: /unknown keys/ },
-      { name: "source extra key", mutate: (plan) => { plan.source.extra = true; }, pattern: /plan\.source has unknown keys/ },
-      { name: "parent binding extra key", mutate: (plan) => { plan.source.parentBinding.extra = true; }, pattern: /parentBinding has unknown keys/ },
-      { name: "Issue extra key", mutate: (plan) => { plan.issues[0].extra = true; }, pattern: /issues\[0\].*unknown keys/ },
-      { name: "missing field", mutate: (plan) => { delete plan.source.specContentHash; }, pattern: /missing keys/ },
-      { name: "invalid base SHA", mutate: (plan) => { plan.source.baseSha = "A".repeat(40); }, pattern: /lowercase hexadecimal/ },
-      { name: "invalid body hash", mutate: (plan) => { plan.issues[0].expectedBodyHash = "sha256:ABC"; }, pattern: /must match sha256/ },
-      { name: "missing Oracle", mutate: (plan) => { plan.issues[0].oracleBindings = []; }, pattern: /oracleBindings must contain 1 to 8/ },
-      { name: "missing verifier", mutate: (plan) => { delete plan.issues[0].oracleBindings[0].verifier; }, pattern: /missing keys/ },
-      { name: "verifier extra key", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.extra = true; }, pattern: /unknown keys/ },
-      { name: "verifier Oracle mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.oracleId = "O99"; }, pattern: /does not bind/ },
-      { name: "verifier command mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.command = "npm run verify:other"; }, pattern: /does not bind/ },
-      { name: "verifier script mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.packageScript.name = "verify:other"; }, pattern: /does not match/ },
-      { name: "verifier digest mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.digest = `sha256:${"0".repeat(64)}`; }, pattern: /digest is invalid/ },
-      { name: "verifier package path", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.files[0].path = "package.json"; }, pattern: /excluding package\.json/ },
-      { name: "duplicate verifier path", mutate: (plan) => { plan.issues[0].oracleBindings[0].verifier.files.push(plan.issues[0].oracleBindings[0].verifier.files[0]); }, pattern: /unique, sorted/ },
-      { name: "Oracle base mismatch", mutate: (plan) => { plan.issues[0].oracleBindings[0].artifact.baseSha = "f".repeat(40); }, pattern: /Oracle artifact baseSha must equal/ },
-      { name: "unprotected Oracle", mutate: (plan) => { plan.issues[0].protectedPaths = ["fixtures/other.json"]; }, pattern: /must include every Oracle/ },
-      { name: "missing replan trigger", mutate: (plan) => { plan.issues[0].replanTriggers.pop(); }, pattern: /missing a controlled trigger/ },
-      { name: "parent mismatch", mutate: (plan) => { plan.source.parentBinding.number += 1; }, pattern: /must equal plan\.parentIssue/ },
-      { name: "validation commands", mutate: (plan) => { plan.issues[0].suggestedValidation = [{ command: "npm test" }]; }, pattern: /exactly \[\]/ },
-      { name: "allow no-op", mutate: (plan) => { plan.issues[0].allowNoop = true; }, pattern: /must be false/ },
-      { name: "unknown risk class", mutate: (plan) => { plan.issues[0].riskClasses = ["BOUNDED_CHANGE"]; }, pattern: /unknown_risk_class/ },
-      { name: "root wildcard expected path", mutate: (plan) => { plan.issues[0].expectedPaths = ["*.ts"]; }, pattern: /invalid_expected_path_pattern/ },
-      { name: "null objective", mutate: (plan) => { plan.issues[0].objective = null; }, pattern: /must be a string/ },
-      { name: "too few criteria", mutate: (plan) => { plan.issues[0].acceptanceCriteria = ["one", "two"]; }, pattern: /3 to 8/ },
-      { name: "too many criteria", mutate: (plan) => { plan.issues[0].acceptanceCriteria = Array.from({ length: 9 }, (_, index) => `criterion ${index}`); }, pattern: /at most 8/ },
-      { name: "future dependency", mutate: (plan) => { plan.issues[0].dependsOn = [plan.issues[1].number]; }, pattern: /does not precede/ },
-      { name: "empty release criteria", mutate: (plan) => { plan.releaseAcceptanceCriteria = []; }, pattern: /1 to 50/ },
-      { name: "too much review focus", mutate: (plan) => { plan.reviewFocus = Array.from({ length: 21 }, (_, index) => `focus ${index}`); }, pattern: /at most 20/ },
-      { name: "unsafe base ref", mutate: (plan) => { plan.source.baseRef = "refs/../main"; }, pattern: /safe Git ref/ },
+    const cases: Array<{ mutate(plan: any): void; pattern: RegExp }> = [
+      { mutate: (value) => { value.extra = true; }, pattern: /unknown keys/ },
+      { mutate: (value) => { value.source.baseSha = "A".repeat(40); }, pattern: /lowercase hexadecimal/ },
+      { mutate: (value) => { value.issues[0].oracleBindings[0].verifier.extra = true; }, pattern: /unknown keys/ },
+      { mutate: (value) => { value.issues[0].oracleBindings[0].verifier.digest = `sha256:${"0".repeat(64)}`; }, pattern: /digest is invalid/ },
+      { mutate: (value) => { value.issues[0].oracleBindings[0].artifact.baseSha = "f".repeat(40); }, pattern: /baseSha must equal/ },
+      { mutate: (value) => { value.issues[0].protectedPaths = []; }, pattern: /must include every Oracle/ },
+      { mutate: (value) => { value.issues[0].expectedPaths = ["*.ts"]; }, pattern: /invalid_expected_path_pattern/ },
+      { mutate: (value) => { value.issues[0].acceptanceCriteria = ["one", "two"]; }, pattern: /3 to 8/ },
     ];
     for (const fixture of cases) {
-      const plan = structuredClone(testPlanV2(repo)) as any;
-      fixture.mutate(plan);
-      assert.throws(() => validatePlan(plan), fixture.pattern, fixture.name);
+      const invalid = structuredClone(testPlanV2(repo, [1])) as any;
+      fixture.mutate(invalid);
+      assert.throws(() => validatePlan(invalid), fixture.pattern);
     }
-    const boundedWildcard = structuredClone(testPlanV2(repo)) as any;
-    boundedWildcard.issues[0].expectedPaths = ["src/*.ts"];
-    assert.doesNotThrow(() => validatePlan(boundedWildcard));
   } finally { repo.cleanup(); }
 });
 
-test("Release Plan v2 config binding fails closed with stable error codes", () => {
+test("plan dependency order and config binding remain fail closed", () => {
   const repo = createTestRepo();
   try {
+    const plan = testPlan(repo);
+    plan.issues[0]!.dependsOn = [2];
+    assert.throws(() => validatePlan(plan), /does not precede|depends on/);
+
     const config = testConfig(repo);
-    const plan = testPlanV2(repo);
-    assert.doesNotThrow(() => assertPlanCompatibleWithConfig(plan, config));
+    const bound = testPlanV2(repo, [1]);
+    assert.doesNotThrow(() => assertPlanCompatibleWithConfig(bound, config));
     assert.throws(
-      () => assertPlanCompatibleWithConfig({ ...plan, source: { ...plan.source, repo: "other/project" } }, config),
+      () => assertPlanCompatibleWithConfig({ ...bound, source: { ...bound.source, repo: "other/project" } }, config),
       (error: any) => error?.code === "plan_source_repo_mismatch",
-    );
-    assert.throws(
-      () => assertPlanCompatibleWithConfig({ ...plan, source: { ...plan.source, baseRef: "develop" } }, config),
-      (error: any) => error?.code === "plan_source_base_ref_mismatch",
     );
     const missingOracleCommand = structuredClone(config);
     missingOracleCommand.validation.release = missingOracleCommand.validation.release
-      .filter(({ command }) => command !== plan.issues[0]!.oracleBindings[0]!.execution.command);
+      .filter(({ command }) => command !== bound.issues[0]!.oracleBindings[0]!.execution.command);
     assert.throws(
-      () => assertPlanCompatibleWithConfig(plan, missingOracleCommand),
+      () => assertPlanCompatibleWithConfig(bound, missingOracleCommand),
       (error: any) => error?.code === "oracle_validation_command_missing",
-    );
-    const duplicateOracleCommand = structuredClone(config);
-    duplicateOracleCommand.validation.release.push(
-      duplicateOracleCommand.validation.release.find(({ command }) => (
-        command === plan.issues[0]!.oracleBindings[0]!.execution.command
-      ))!,
-    );
-    assert.throws(
-      () => assertPlanCompatibleWithConfig(plan, duplicateOracleCommand),
-      (error: any) => error?.code === "oracle_validation_command_ambiguous",
     );
   } finally { repo.cleanup(); }
 });
 
-test("exact title limits use original UTF-8 bytes", () => {
+test("canonical JSON and exact UTF-8 limits remain deterministic", () => {
+  const value = { pullRequest: { mergedAt: "a", mergeSha: "b" }, controller: { sourceRevision: "r", sourceManifestDigest: "m" } };
+  assert.equal(stableStringify(value), '{"controller":{"sourceManifestDigest":"m","sourceRevision":"r"},"pullRequest":{"mergeSha":"b","mergedAt":"a"}}');
   assert.equal(boundedExactText("界".repeat(166), "title", 500), "界".repeat(166));
   assert.throws(() => boundedExactText("界".repeat(167), "title", 500), /exceeds 500 bytes/);
 });

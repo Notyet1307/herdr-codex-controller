@@ -8,7 +8,7 @@ import { blockJob, JobStore, retryBlockedJob } from "../src/state.js";
 import { ReleaseController } from "../src/controller.js";
 import { digestJson, sha256 } from "../src/util.js";
 import { ControllerError } from "../src/errors.js";
-import type { RetryAuthorization } from "../src/types.js";
+import type { JobState, RetryAuthorization } from "../src/types.js";
 import { summarizeChecks } from "../src/github.js";
 import {
   FakeCodex,
@@ -32,6 +32,17 @@ async function runToTerminal(controller: ReleaseController, store: JobStore, id:
   throw new Error("controller did not settle");
 }
 
+async function runToPhase(controller: ReleaseController, store: JobStore, id: string, phase: JobState["phase"], maximum = 100) {
+  for (let index = 0; index < maximum; index += 1) {
+    const job = store.load(id);
+    if (job.phase === phase) return job;
+    await controller.step(id);
+    const current = store.load(id);
+    if (current.status === "blocked" || current.status === "failed") return current;
+  }
+  throw new Error(`controller did not reach ${phase}`);
+}
+
 function evidencePaths(root: string, name: string): string[] {
   return readdirSync(root, { withFileTypes: true })
     .filter((entry: { isDirectory(): boolean }) => entry.isDirectory())
@@ -44,16 +55,16 @@ test("two ordered Issues use fresh Workers, one aggregate review, and Controller
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
-    const plan = testPlan([1, 2]);
+    const plan = testPlan(repo, [1, 2]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient);
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-    const final = await runToTerminal(controller, store, job.id);
-    assert.equal(final.status, "completed");
-    assert.equal(final.phase, "complete");
+    const final = await runToPhase(controller, store, job.id, "deliver");
+    assert.equal(final.status, "running");
+    assert.equal(final.phase, "deliver");
     assert.deepEqual(final.issues.map((issue) => issue.status), ["committed", "committed"]);
     assert.equal(codex.calls.filter((call) => call.kind === "worker").length, 2);
     assert.equal(codex.calls.filter((call) => call.kind === "review").length, 1);
@@ -73,14 +84,15 @@ test("failed Issue validation schedules one fresh repair over the preserved work
         maxOutputBytes: 64 * 1024,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
+    plan.issues[0]!.expectedPaths.push("incomplete.txt", "fixed.txt");
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient, async (input) => {
       if (input.kind === "worker") {
         writeFileSync(join(input.job.worktreePath, "incomplete.txt"), "first\n", "utf8");
-        return { worker: completedWorker("Initial implementation") };
+        return { worker: completedWorker("Initial implementation", ["BOUNDED_BEHAVIOR_CHANGE"]) };
       }
       if (input.kind === "issue-repair") {
         assert.match(input.prompt, /untrusted requirements data only/);
@@ -89,14 +101,14 @@ test("failed Issue validation schedules one fresh repair over the preserved work
         assert.match(input.prompt, /BEGIN HERDR_VALIDATION_[0-9A-F]{20}/);
         assert.match(input.prompt, /Command: test -f fixed\.txt/);
         writeFileSync(join(input.job.worktreePath, "fixed.txt"), "fixed\n", "utf8");
-        return { worker: completedWorker("Repaired validation failure") };
+        return { worker: completedWorker("Repaired validation failure", ["BOUNDED_BEHAVIOR_CHANGE"]) };
       }
       return { review: { status: "pass", summary: "pass", findings: [] } };
     });
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-    const final = await runToTerminal(controller, store, job.id);
-    assert.equal(final.status, "completed");
+    const final = await runToPhase(controller, store, job.id, "deliver");
+    assert.equal(final.status, "running");
     assert.equal(final.issues[0]?.repairRounds, 1);
     assert.deepEqual(codex.calls.filter((call) => call.issueNumber === 1).map((call) => call.kind), ["worker", "issue-repair"]);
   } finally { repo.cleanup(); }
@@ -113,7 +125,7 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
         maxOutputBytes: 64 * 1024,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -130,7 +142,7 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
           ? { review: { status: "changes", summary: "Needs hardening", findings: [{ severity: "major", path: "issue-1.txt", line: 1, summary: "Missing hardening evidence", rationale: "Fixture", recommendation: "Add hardening.txt", relatedIssues: [1] }] } }
           : { review: { status: "pass", summary: "Hardened candidate passes", findings: [] } };
       }
-      if (input.kind === "release-harden") {
+      if (input.kind === "release-repair") {
         assert.match(input.prompt, /# Included Issue scope/);
         assert.match(input.prompt, /BEGIN HERDR_ISSUE_[0-9A-F]{20}/);
         assert.match(input.prompt, /Create issue-1\.txt\./);
@@ -141,11 +153,11 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
     });
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-    const final = await runToTerminal(controller, store, job.id);
-    assert.equal(final.status, "completed");
-    assert.equal(final.hardeningRounds, 1);
+    const final = await runToPhase(controller, store, job.id, "deliver");
+    assert.equal(final.status, "running");
+    assert.equal(final.codeRepairRounds, 1);
     assert.equal(final.reviewRound, 2);
-    assert.equal(codex.calls.filter((call) => call.kind === "release-harden").length, 1);
+    assert.equal(codex.calls.filter((call) => call.kind === "release-repair").length, 1);
     assert.equal(git(final.worktreePath, ["rev-list", "--count", "HEAD"]), "3");
   } finally { repo.cleanup(); }
 });
@@ -194,7 +206,7 @@ test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", asy
         maxOutputBytes: 64 * 1024,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -216,7 +228,7 @@ test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", asy
           },
         };
       }
-      if (input.kind === "release-harden") {
+      if (input.kind === "release-repair") {
         assert.match(input.prompt, /accepted ADR/);
         assert.match(input.prompt, /new Release Plan v2 and a new Job/);
         return {
@@ -253,7 +265,7 @@ test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", asy
 
     assert.equal(settled.blocked?.code, "replan_required");
     assert.equal(settled.status, "blocked");
-    assert.equal(settled.phase, "harden");
+    assert.equal(settled.phase, "repair");
   } finally { repo.cleanup(); }
 });
 
@@ -268,7 +280,7 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
         maxOutputBytes: 64 * 1024,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -295,7 +307,7 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
             }
           : { review: { status: "pass", summary: "Recovered candidate passes.", findings: [] } };
       }
-      if (input.kind === "release-harden") {
+      if (input.kind === "release-repair") {
         hardeningRuns += 1;
         if (hardeningRuns === 1) {
           return {
@@ -305,7 +317,7 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
               selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
               testsRun: [],
               residualRisks: [],
-              observedRiskClasses: [],
+              observedRiskClasses: ["BOUNDED_BEHAVIOR_CHANGE"],
               blockedReason: "Retry after the local dependency is restored.",
               blockedKind: "recoverable",
             },
@@ -336,7 +348,7 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
     writeFileSync(evidencePath, evidence, "utf8");
     job = retryBlockedJob(job, {
       previousBlockedCode: "codex_hardening_recoverable",
-      previousBlockedPhase: "harden",
+      previousBlockedPhase: "repair",
       previousDetailsPath: job.blocked?.detailsPath ?? null,
       operatorReason: "The local dependency is restored.",
       recoveryEvidencePath: evidencePath,
@@ -345,10 +357,10 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
     }, store.root(job.id));
     store.save(job);
 
-    const completed = await runToTerminal(controller, store, job.id);
-    assert.equal(completed.status, "completed");
+    const completed = await runToPhase(controller, store, job.id, "deliver");
+    assert.equal(completed.status, "running");
     assert.equal(hardeningRuns, 2);
-    assert.equal(completed.hardeningRounds, 1);
+    assert.equal(completed.codeRepairRounds, 1);
   } finally { repo.cleanup(); }
 });
 
@@ -362,9 +374,9 @@ test("release validation evidence remains exactly bound after hardening exhausti
         release: [{ command: "test -f missing-release-evidence.txt" }],
         maxOutputBytes: 64 * 1024,
       },
-      policy: { ...testConfig(repo).policy, maxReleaseHardeningRounds: 0 },
+      policy: { ...testConfig(repo).policy, maxCodeRepairRounds: 0 },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -386,14 +398,14 @@ test("release validation evidence remains exactly bound after hardening exhausti
     const settled = await runToTerminal(controller, store, created.id);
     assert.equal(settled.status, "blocked");
     assert.equal(settled.blocked?.code, "replan_required");
-    assert.match(settled.blocked?.message ?? "", /release_hardening_exhausted/);
+    assert.match(settled.blocked?.message ?? "", /release_repair_exhausted/);
 
     const restarted = new JobStore(config).load(created.id);
     const releaseBinding = restarted.validations.at(-1);
     assert.equal(releaseBinding?.scope, "release");
     assert.equal(releaseBinding?.passed, false);
     assert.equal(restarted.blocked?.detailsPath, releaseBinding?.path);
-    assert.equal(restarted.hardeningRounds, 0);
+    assert.equal(restarted.codeRepairRounds, 0);
     assert.equal(restarted.reviewRound, 0);
     assert.equal(restarted.activeRun, null);
 
@@ -419,7 +431,7 @@ test("release validation writes stay disposable and cannot mutate the candidate 
         maxOutputBytes: 64 * 1024,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -438,8 +450,8 @@ test("release validation writes stay disposable and cannot mutate the candidate 
       planDigest: digestJson(plan),
     });
 
-    const settled = await runToTerminal(controller, store, created.id);
-    assert.equal(settled.status, "completed");
+    const settled = await runToPhase(controller, store, created.id, "deliver");
+    assert.equal(settled.status, "running");
     assert.equal(existsSync(join(settled.worktreePath, "validation-policy-violation.txt")), false);
 
     const restarted = new JobStore(config).load(created.id);
@@ -466,9 +478,9 @@ test("latest blocking review and run remain exactly bound after hardening exhaus
         release: [{ command: "test -f issue-1.txt" }],
         maxOutputBytes: 64 * 1024,
       },
-      policy: { ...testConfig(repo).policy, maxReleaseHardeningRounds: 1 },
+      policy: { ...testConfig(repo).policy, maxCodeRepairRounds: 1 },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -506,7 +518,7 @@ test("latest blocking review and run remain exactly bound after hardening exhaus
     const settled = await runToTerminal(controller, store, created.id);
     assert.equal(settled.status, "blocked");
     assert.equal(settled.blocked?.code, "replan_required");
-    assert.match(settled.blocked?.message ?? "", /release_hardening_exhausted/);
+    assert.match(settled.blocked?.message ?? "", /release_repair_exhausted/);
 
     const restarted = new JobStore(config).load(created.id);
     const reviewRuns = restarted.runs.filter((run) => run.kind === "review");
@@ -518,7 +530,7 @@ test("latest blocking review and run remain exactly bound after hardening exhaus
     assert.equal(latestReview?.resultDigest, digestJson(blockingReview));
     assert.equal(latestReview?.baseHeadSha, restarted.candidateSha);
     assert.equal(latestReview?.finalHeadSha, restarted.candidateSha);
-    assert.equal(restarted.hardeningRounds, 1);
+    assert.equal(restarted.codeRepairRounds, 1);
     assert.equal(restarted.activeRun, null);
     assert.deepEqual(
       evidencePaths(store.runsRoot(created.id), "result.json"),
@@ -538,7 +550,7 @@ test("validated review evidence is checkpointed before post-run worktree policy"
         maxOutputBytes: 64 * 1024,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -585,9 +597,9 @@ test("REPLAN_REQUIRED after hardening exhaustion cannot be retried", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
-      policy: { ...testConfig(repo).policy, maxReleaseHardeningRounds: 1 },
+      policy: { ...testConfig(repo).policy, maxCodeRepairRounds: 1 },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     let job = store.create({
@@ -598,7 +610,7 @@ test("REPLAN_REQUIRED after hardening exhaustion cannot be retried", () => {
       planDigest: digestJson(plan),
     });
     job.phase = "review";
-    job.hardeningRounds = 1;
+    job.codeRepairRounds = 1;
     job = blockJob(
       job,
       "release_hardening_exhausted",
@@ -612,7 +624,7 @@ test("REPLAN_REQUIRED after hardening exhaustion cannot be retried", () => {
       (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
     );
     assert.equal(job.status, "blocked");
-    assert.equal(job.hardeningRounds, 1);
+    assert.equal(job.codeRepairRounds, 1);
 
     job.blocked!.code = "release_hardening_exhausted";
     job.blocked!.message = "legacy durable checkpoint";
@@ -629,7 +641,7 @@ test("REPLAN_REQUIRED after an oversized release diff cannot be retried", () => 
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     let job = store.create({
@@ -639,8 +651,8 @@ test("REPLAN_REQUIRED after an oversized release diff cannot be retried", () => 
       configDigest: digestJson(config),
       planDigest: digestJson(plan),
     });
-    job.phase = "release_validate";
-    job.hardeningRounds = 3;
+    job.phase = "verify";
+    job.codeRepairRounds = 3;
     job = blockJob(
       job,
       "release_diff_too_large",
@@ -654,7 +666,7 @@ test("REPLAN_REQUIRED after an oversized release diff cannot be retried", () => 
       (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
     );
     assert.equal(job.status, "blocked");
-    assert.equal(job.hardeningRounds, 3);
+    assert.equal(job.codeRepairRounds, 3);
   } finally {
     repo.cleanup();
   }
@@ -664,7 +676,7 @@ test("legacy Worker blocked checkpoints fail closed as REPLAN_REQUIRED", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     let job = store.create({
@@ -674,7 +686,7 @@ test("legacy Worker blocked checkpoints fail closed as REPLAN_REQUIRED", () => {
       configDigest: digestJson(config),
       planDigest: digestJson(plan),
     });
-    job.phase = "harden";
+    job.phase = "repair";
     job = blockJob(job, "codex_hardening_blocked", "legacy result has no blockedKind", join(store.root(job.id), "legacy-result.json"));
 
     assert.equal(job.blocked?.code, "replan_required");
@@ -690,9 +702,9 @@ test("new infrastructure evidence authorizes one fresh recovery without changing
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
-      policy: { ...testConfig(repo).policy, maxCiRepairRounds: 0 },
+      policy: { ...testConfig(repo).policy, maxCodeRepairRounds: 0 },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     let job = store.create({
@@ -702,10 +714,9 @@ test("new infrastructure evidence authorizes one fresh recovery without changing
       configDigest: digestJson(config),
       planDigest: digestJson(plan),
     });
-    job.phase = "ci";
+    job.phase = "deliver";
     job.baseSha = "1".repeat(40);
-    job.hardeningRounds = 2;
-    job.ciRepairRounds = 0;
+    job.codeRepairRounds = 2;
     job = blockJob(
       job,
       "ci_failed",
@@ -723,7 +734,7 @@ test("new infrastructure evidence authorizes one fresh recovery without changing
     writeFileSync(recoveryEvidencePath, recoveryEvidence, "utf8");
     const authorization: RetryAuthorization = {
       previousBlockedCode: "ci_failed",
-      previousBlockedPhase: "ci",
+      previousBlockedPhase: "deliver",
       previousDetailsPath: job.blocked?.detailsPath ?? null,
       operatorReason: "GitHub Actions runner recovered and the exact candidate checks were rerun.",
       recoveryEvidencePath,
@@ -734,10 +745,9 @@ test("new infrastructure evidence authorizes one fresh recovery without changing
     const retried = retryBlockedJob(job, authorization, store.root(job.id));
 
     assert.equal(retried.status, "running");
-    assert.equal(retried.phase, "ci");
-    assert.equal(retried.hardeningRounds, 2);
-    assert.equal(retried.ciRepairRounds, 0);
-    assert.equal(retried.hardeningReasonPath, job.hardeningReasonPath);
+    assert.equal(retried.phase, "deliver");
+    assert.equal(retried.codeRepairRounds, 2);
+    assert.equal(retried.repairReasonPath, job.repairReasonPath);
     assert.deepEqual(retried.retryAuthorizations, [authorization]);
     assert.deepEqual(
       { plan: retried.plan, planDigest: retried.planDigest, baseSha: retried.baseSha, issues: retried.issues },
@@ -753,7 +763,7 @@ test("the same blocked code and evidence digest cannot authorize retry twice", (
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     let job = store.create({
@@ -803,9 +813,8 @@ test("an interrupted Worker run is reconciled as a fresh recovery run without se
   try {
     const config = testConfig(repo, {
       validation: { setup: [], issue: [], release: [], maxOutputBytes: 64 * 1024 },
-      review: { enabled: false, blockingSeverities: ["critical", "major"] },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -825,7 +834,7 @@ test("an interrupted Worker run is reconciled as a fresh recovery run without se
     assert.equal(result.action, "interrupted_run_reconciled");
     assert.equal(active.activeRun, null);
     assert.equal(active.issues[0]?.nextRunKind, "recovery");
-    assert.equal(active.phase, "implement");
+    assert.equal(active.phase, "repair");
   } finally { repo.cleanup(); }
 });
 
@@ -841,13 +850,8 @@ test("production v2 completes only after exact candidate, required checks, and m
         maxOutputBytes: 64 * 1024,
       },
       delivery: {
-        createPullRequest: true,
-        draft: false,
-        autoMerge: false,
+        ...testConfig(repo).delivery,
         mergeMethod: "merge",
-        allowNoChecks: false,
-        requiredChecks: ["verify"],
-        pollIntervalMs: 1_000,
       },
     } as any);
     const plan = testPlanV2(repo, [1]);
@@ -875,7 +879,9 @@ test("production v2 completes only after exact candidate, required checks, and m
         const pullRequest = { ...this.pr, state: this.merged ? "MERGED" : "OPEN", mergeSha: this.mergeSha };
         return {
           pullRequest,
-          checks: summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }], config.delivery.requiredChecks),
+          checks: this.merged
+            ? summarizeChecks([], config.delivery.requiredChecks)
+            : summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }], config.delivery.requiredChecks),
           mergedAt: this.merged ? new Date().toISOString() : null,
           autoMergeEnabled: this.autoMergeEnabled,
         };
@@ -886,7 +892,7 @@ test("production v2 completes only after exact candidate, required checks, and m
     const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let observed = store.load(job.id);
-    for (let index = 0; index < 100 && observed.phase !== "awaiting_merge"; index += 1) {
+    for (let index = 0; index < 100 && observed.deliveryAuthority?.status !== "authorized"; index += 1) {
       await controller.step(job.id);
       observed = store.load(job.id);
       if (observed.status === "blocked") throw new Error(observed.blocked?.message);
@@ -921,13 +927,8 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
         maxOutputBytes: 64 * 1024,
       },
       delivery: {
-        createPullRequest: true,
-        draft: false,
-        autoMerge: true,
+        ...testConfig(repo).delivery,
         mergeMethod: "merge",
-        allowNoChecks: false,
-        requiredChecks: ["verify"],
-        pollIntervalMs: 1_000,
       },
     } as any);
     const plan = testPlanV2(repo, [1]);
@@ -984,7 +985,7 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
       if (observed.status === "blocked") throw new Error(observed.blocked?.message);
     }
     assert.deepEqual(github.enabled, { number: 8, candidateSha: observed.candidateSha });
-    assert.equal(observed.phase, "awaiting_merge");
+    assert.equal(observed.phase, "deliver");
     git(repo.source, ["merge", "--no-ff", observed.candidateSha!, "-m", "merge auto candidate"]);
     git(repo.source, ["push", "origin", "main"]);
     github.mergeSha = git(repo.source, ["rev-parse", "HEAD"]);
@@ -993,72 +994,6 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
     assert.equal(result.action, "release_merged", JSON.stringify(store.load(created.id).blocked));
     assert.equal(store.load(created.id).status, "completed");
   } finally { repo.cleanup(); }
-});
-
-test("MERGED identity, merge SHA, and Git ancestry are verified before completion", async () => {
-  for (const scenario of ["wrong-head", "missing-merge", "unreadable-merge"] as const) {
-    const repo = createTestRepo();
-    try {
-      const config = testConfig(repo, {
-        delivery: {
-          ...testConfig(repo).delivery,
-          createPullRequest: true,
-          requiredChecks: ["verify"],
-        },
-      } as any);
-      const plan = testPlan([1]);
-      const { configPath, planPath } = writeInputs(repo, config, plan);
-      const store = new JobStore(config);
-      const candidateSha = git(repo.source, ["rev-parse", "origin/main"]);
-      let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-      job.baseSha = candidateSha;
-      job.candidateSha = candidateSha;
-      job.phase = "awaiting_merge";
-      job.status = "ready_to_merge";
-      job.pullRequest = {
-        number: 17,
-        url: "https://github.com/example/project/pull/17",
-        state: "OPEN",
-        headRef: job.branch,
-        baseRef: job.baseRef,
-        headSha: candidateSha,
-        mergeSha: null,
-      };
-      store.save(job);
-      class MergedGitHub extends FakeGitHub {
-        override async inspectPullRequest() {
-          return {
-            pullRequest: {
-              ...job.pullRequest!,
-              state: "MERGED" as const,
-              headSha: scenario === "wrong-head" ? "f".repeat(40) : candidateSha,
-              mergeSha: scenario === "missing-merge" ? null : "e".repeat(40),
-            },
-            checks: { state: "success" as const, missing: [], failures: [], pending: [] },
-            mergedAt: new Date().toISOString(),
-          };
-        }
-      }
-      const controller = new ReleaseController({
-        store,
-        git: new TestGitClient(config),
-        github: new MergedGitHub(),
-        codex: new FakeCodex(new TestGitClient(config)),
-        validator: new Validator(config),
-      });
-      const result = await controller.step(job.id);
-      const blocked = store.load(job.id);
-      assert.equal(result.action, "blocked", scenario);
-      assert.equal(blocked.status, "blocked", scenario);
-      assert.equal(
-        blocked.blocked?.code,
-        scenario === "wrong-head" ? "merged_candidate_mismatch"
-          : scenario === "missing-merge" ? "merge_commit_missing"
-            : "merge_commit_unverified",
-        scenario,
-      );
-    } finally { repo.cleanup(); }
-  }
 });
 
 test("Git merge-result verification covers merge, squash, and rebase delivery methods", async () => {
@@ -1097,9 +1032,7 @@ test("MERGED v2 without Controller authority is rejected before completion", asy
         executionMode: "release-plan-v2-direct",
         delivery: {
           ...testConfig(repo).delivery,
-          createPullRequest: true,
           mergeMethod: "merge",
-          requiredChecks: ["verify"],
         },
       } as any);
       const plan = testPlanV2(repo, [1]);
@@ -1124,8 +1057,8 @@ test("MERGED v2 without Controller authority is rejected before completion", asy
 
       job.baseSha = baseSha;
       job.candidateSha = candidateSha;
-      job.phase = "awaiting_merge";
-      job.status = "ready_to_merge";
+      job.phase = "deliver";
+      job.status = "running";
       job.pullRequest = {
         number: 20,
         url: "https://github.com/example/project/pull/20",
@@ -1160,36 +1093,35 @@ test("MERGED v2 without Controller authority is rejected before completion", asy
   }
 });
 
-test("required check missing, pending, or failed never reaches ready_to_merge", async () => {
+test("required check missing, pending, or failed never authorizes merge", async () => {
   const scenarios = [
     {
       action: "required_check_missing",
-      checks: { state: "pending" as const, missing: ["verify"], failures: [], pending: [] },
+      checks: [],
     },
     {
       action: "required_check_pending",
-      checks: { state: "pending" as const, missing: [], failures: [], pending: [{ name: "verify", state: "IN_PROGRESS", link: null }] },
+      checks: [{ name: "verify", status: "IN_PROGRESS", conclusion: null, app: { id: 15368 } }],
     },
     {
       action: "blocked",
-      checks: { state: "failure" as const, missing: [], failures: [{ name: "verify", state: "FAILURE", link: null }], pending: [] },
+      checks: [{ name: "verify", status: "COMPLETED", conclusion: "FAILURE", app: { id: 15368 } }],
     },
   ];
   for (const scenario of scenarios) {
     const repo = createTestRepo();
     try {
       const config = testConfig(repo, {
-        policy: { ...testConfig(repo).policy, maxCiRepairRounds: 0 },
-        delivery: { ...testConfig(repo).delivery, createPullRequest: true, requiredChecks: ["verify"] },
+        policy: { ...testConfig(repo).policy, maxCodeRepairRounds: 0 },
       } as any);
-      const plan = testPlan([1]);
+      const plan = testPlan(repo, [1]);
       const { configPath, planPath } = writeInputs(repo, config, plan);
       const store = new JobStore(config);
       const candidateSha = git(repo.source, ["rev-parse", "origin/main"]);
       const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       job.baseSha = candidateSha;
       job.candidateSha = candidateSha;
-      job.phase = "ci";
+      job.phase = "deliver";
       job.pullRequest = {
         number: 18,
         url: "https://github.com/example/project/pull/18",
@@ -1202,7 +1134,11 @@ test("required check missing, pending, or failed never reaches ready_to_merge", 
       store.save(job);
       class ChecksGitHub extends FakeGitHub {
         override async inspectPullRequest() {
-          return { pullRequest: job.pullRequest!, checks: scenario.checks, mergedAt: null };
+          return {
+            pullRequest: job.pullRequest!,
+            checks: summarizeChecks(scenario.checks, config.delivery.requiredChecks),
+            mergedAt: null,
+          };
         }
       }
       const gitClient = new TestGitClient(config);
@@ -1210,8 +1146,8 @@ test("required check missing, pending, or failed never reaches ready_to_merge", 
       const result = await controller.step(job.id);
       assert.equal(result.action, scenario.action);
       const observed = store.load(job.id);
-      assert.notEqual(observed.status, "ready_to_merge");
-      if (scenario.action === "blocked") assert.equal(observed.blocked?.code, "required_check_failed");
+      assert.notEqual(observed.deliveryAuthority?.status, "authorized");
+      if (scenario.action === "blocked") assert.equal(observed.blocked?.code, "ci_code_repair_exhausted");
     } finally { repo.cleanup(); }
   }
 });
@@ -1219,33 +1155,21 @@ test("required check missing, pending, or failed never reaches ready_to_merge", 
 test("auto-merge fails closed when GitHub cannot prove latest-base protection", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, {
-      delivery: { ...testConfig(repo).delivery, createPullRequest: true, autoMerge: true, requiredChecks: ["verify"] },
-    } as any);
-    const plan = testPlan([1]);
+    const config = testConfig(repo);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
-    const candidateSha = git(repo.source, ["rev-parse", "origin/main"]);
-    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-    job.baseSha = candidateSha;
-    job.candidateSha = candidateSha;
-    job.phase = "ci";
-    job.pullRequest = {
-      number: 19,
-      url: "https://github.com/example/project/pull/19",
-      state: "OPEN",
-      headRef: job.branch,
-      baseRef: job.baseRef,
-      headSha: candidateSha,
-      mergeSha: null,
-    };
-    store.save(job);
     class UnprotectedGitHub extends FakeGitHub {
       enabled = false;
+      pr: any = null;
+      override async createPullRequest(job: JobState) {
+        this.pr = { number: 19, url: "https://github.com/example/project/pull/19", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: job.candidateSha, mergeSha: null };
+        return this.pr;
+      }
       override async inspectPullRequest() {
         return {
-          pullRequest: job.pullRequest!,
-          checks: { state: "success" as const, missing: [], failures: [], pending: [] },
+          pullRequest: this.pr,
+          checks: summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS", app: { id: 15368 } }], config.delivery.requiredChecks),
           mergedAt: null,
         };
       }
@@ -1255,9 +1179,9 @@ test("auto-merge fails closed when GitHub cannot prove latest-base protection", 
     const github = new UnprotectedGitHub();
     const gitClient = new TestGitClient(config);
     const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
-    const result = await controller.step(job.id);
-    assert.equal(result.action, "blocked");
-    assert.equal(store.load(job.id).blocked?.code, "base_up_to_date_policy_unverified");
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    const blocked = await runToTerminal(controller, store, job.id);
+    assert.equal(blocked.blocked?.code, "base_up_to_date_policy_unverified");
     assert.equal(github.enabled, false);
   } finally { repo.cleanup(); }
 });
@@ -1267,13 +1191,12 @@ test("delivery rejects an existing PR that targets the wrong base branch", async
   try {
     const config = testConfig(repo, {
       validation: { setup: [], issue: [], release: [], maxOutputBytes: 64 * 1024 },
-      review: { enabled: false, blockingSeverities: ["critical", "major"] },
       delivery: {
-        createPullRequest: true, draft: false, autoMerge: false, mergeMethod: "squash",
-        allowNoChecks: false, pollIntervalMs: 1_000,
+        ...testConfig(repo).delivery,
+        mergeMethod: "squash",
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -1338,7 +1261,7 @@ test("abort revokes auto-merge and quarantines the exact remote branch", async (
     let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.baseSha = plan.source.baseSha;
     job.candidateSha = candidateSha;
-    job.phase = "awaiting_merge";
+    job.phase = "deliver";
     job.pullRequest = { number: 44, url: "https://github.com/example/project/pull/44", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
     job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "a".repeat(64), status: "authorized", autoMergeEnabled: true, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
     store.save(job);
@@ -1352,7 +1275,7 @@ test("abort revokes auto-merge and quarantines the exact remote branch", async (
   } finally { repo.cleanup(); }
 });
 
-test("source drift after auto-merge authorization revokes and quarantines before terminal block", async () => {
+test("Issue text drift after admission does not invalidate an authorized Job", async () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
@@ -1396,7 +1319,7 @@ test("source drift after auto-merge authorization revokes and quarantines before
     const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let job = store.load(created.id);
-    for (let index = 0; index < 100 && job.phase !== "awaiting_merge"; index += 1) {
+    for (let index = 0; index < 100 && job.deliveryAuthority?.status !== "authorized"; index += 1) {
       await controller.step(job.id);
       job = store.load(job.id);
       if (job.status === "blocked") throw new Error(job.blocked?.message);
@@ -1405,12 +1328,11 @@ test("source drift after auto-merge authorization revokes and quarantines before
     drift = true;
     const result = await controller.step(job.id);
     job = store.load(job.id);
-    assert.equal(result.action, "blocked");
-    assert.equal(job.blocked?.code, "replan_required");
-    assert.match(job.blocked?.message ?? "", /runtime_child_binding_drift/u);
-    assert.equal(job.deliveryAuthority?.status, "revoked");
+    assert.equal(result.action, "awaiting_merge");
+    assert.equal(job.blocked, null);
+    assert.equal(job.deliveryAuthority?.status, "authorized");
     assert.equal(job.pullRequest?.state, "OPEN");
-    assert.equal(disabled, 1);
+    assert.equal(disabled, 0);
   } finally { repo.cleanup(); }
 });
 
@@ -1439,7 +1361,7 @@ test("revocation refuses a wrong PR identity without closing it", async () => {
     let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.baseSha = plan.source.baseSha;
     job.candidateSha = candidateSha;
-    job.phase = "awaiting_merge";
+    job.phase = "deliver";
     job.pullRequest = { number: 45, url: "https://github.com/example/project/pull/45", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
     job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "b".repeat(64), status: "authorized", autoMergeEnabled: true, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
     store.save(job);
@@ -1483,7 +1405,7 @@ test("revocation resumes after interruption between disable and quarantine", asy
     let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.baseSha = plan.source.baseSha;
     job.candidateSha = candidateSha;
-    job.phase = "awaiting_merge";
+    job.phase = "deliver";
     job.pullRequest = { number: 49, url: "https://github.com/example/project/pull/49", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
     job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "e".repeat(64), status: "authorized", autoMergeEnabled: true, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
     store.save(job);
@@ -1528,7 +1450,7 @@ test("missing and pending required checks reach durable deadlines without resett
       let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       job.baseSha = plan.source.baseSha;
       job.candidateSha = candidateSha;
-      job.phase = "ci";
+      job.phase = "deliver";
       job.pullRequest = { number: 46, url: "https://github.com/example/project/pull/46", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
       job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "c".repeat(64), status: "pending", autoMergeEnabled: false, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
       job.ciGate = {
@@ -1538,7 +1460,6 @@ test("missing and pending required checks reach durable deadlines without resett
         firstObservedAt: "2026-08-30T00:00:00.000Z",
         firstAppearanceDeadlineAt: scenario === "missing" ? "2026-08-30T00:00:01.000Z" : "2099-01-01T00:00:00.000Z",
         pendingDeadlineAt: scenario === "pending" ? "2026-08-30T00:00:01.000Z" : null,
-        postMergeDeadlineAt: null,
         attempts: 1,
         lastObservation: null,
       };
@@ -1562,7 +1483,7 @@ test("CI code and infrastructure failures consume separate budgets and only code
     try {
       const config = testConfig(repo, {
         executionMode: "release-plan-v2-direct",
-        policy: { ...testConfig(repo).policy, maxCiRepairRounds: 1 },
+        policy: { ...testConfig(repo).policy, maxCodeRepairRounds: 1 },
       } as any);
       const contract = config.delivery.requiredChecks as Exclude<typeof config.delivery.requiredChecks, string[]>;
       const plan = testPlanV2(repo, [1]);
@@ -1595,27 +1516,25 @@ test("CI code and infrastructure failures consume separate budgets and only code
       let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       job.baseSha = plan.source.baseSha;
       job.candidateSha = candidateSha;
-      job.phase = "ci";
+      job.phase = "deliver";
       job.pullRequest = { number: 47, url: "https://github.com/example/project/pull/47", state: "OPEN", headRef: job.branch, baseRef: job.baseRef, headSha: candidateSha, mergeSha: null };
       job.deliveryAuthority = { version: 1, pullRequest: job.pullRequest, candidateSha, proofDigest: "d".repeat(64), status: "pending", autoMergeEnabled: false, quarantined: false, lastVerifiedAt: new Date().toISOString(), revocationReason: null, error: null };
       store.save(job);
       const result = await controller.step(job.id);
       job = store.load(job.id);
       if (scenario === "code") {
-        assert.equal(result.action, "release_hardening_scheduled");
-        assert.equal(job.phase, "harden");
-        assert.equal(job.ciCodeRepairRounds, 1);
-        assert.equal(job.ciInfrastructureReruns, 0);
-        assert.equal(job.reviewRepairRounds, 0);
+        assert.equal(result.action, "release_repair_scheduled");
+        assert.equal(job.phase, "repair");
+        assert.equal(job.codeRepairRounds, 1);
+        assert.equal(job.infrastructureReruns, 0);
         assert.equal(evidenceReads, 1);
         assert.equal(reruns, 0);
         assert.equal(job.deliveryAuthority?.status, "revoked");
       } else {
         assert.equal(result.action, "ci_infrastructure_rerun");
-        assert.equal(job.phase, "ci");
-        assert.equal(job.ciInfrastructureReruns, 1);
-        assert.equal(job.ciCodeRepairRounds, 0);
-        assert.equal(job.hardeningRounds, 0);
+        assert.equal(job.phase, "deliver");
+        assert.equal(job.infrastructureReruns, 1);
+        assert.equal(job.codeRepairRounds, 0);
         assert.equal(evidenceReads, 0);
         assert.equal(reruns, 1);
         assert.equal(job.pullRequest?.state, "OPEN");
@@ -1635,7 +1554,7 @@ test("a Controller hardening commit is salvaged after a crash before job state u
         maxOutputBytes: 64 * 1024,
       },
     } as any);
-    const plan = testPlan([1]);
+    const plan = testPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
@@ -1650,21 +1569,21 @@ test("a Controller hardening commit is salvaged after a crash before job state u
     const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let job = store.load(created.id);
-    for (let index = 0; index < 100 && job.phase !== "harden"; index += 1) {
+    for (let index = 0; index < 100 && job.phase !== "repair"; index += 1) {
       await controller.step(job.id);
       job = store.load(job.id);
       if (job.status === "blocked") throw new Error(job.blocked?.message);
     }
-    assert.equal(job.phase, "harden");
+    assert.equal(job.phase, "repair");
     const baseHead = await gitClient.head(job.worktreePath);
-    job.activeRun = { id: "crashed-hardening", kind: "release-harden", issueNumber: null, startedAt: new Date().toISOString(), baseHeadSha: baseHead };
+    job.activeRun = { id: "crashed-hardening", kind: "release-repair", issueNumber: null, startedAt: new Date().toISOString(), baseHeadSha: baseHead };
     store.save(job);
     writeFileSync(join(job.worktreePath, "hardening.txt"), "fixed\n", "utf8");
     await gitClient.commitHardening(job, "synthetic crash window");
     const result = await controller.step(job.id);
     job = store.load(job.id);
     assert.equal(result.action, "hardening_commit_salvaged");
-    assert.equal(job.phase, "release_validate");
+    assert.equal(job.phase, "verify");
     assert.equal(job.activeRun, null);
     assert.equal(reviewCalls, 1);
   } finally { repo.cleanup(); }
