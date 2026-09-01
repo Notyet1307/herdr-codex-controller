@@ -302,6 +302,18 @@ node dist/src/cli.js completion export \
   --json
 ```
 
+任何 running、blocked、ready、completed 或 failed Job 都可按需生成面向人工审查的 `review.md`。报告只读取现有 Job、validation、Agent structured result 与 Git/CI checkpoint，不新增可变 evidence ledger；同一路径仅允许写入完全相同的字节：
+
+```bash
+node dist/src/cli.js report export \
+  --config /PRIVATE/PATH/controller.json \
+  --job RELEASE_ID \
+  --out /PUBLIC/PATH/review.md \
+  --json
+```
+
+PR Body 与 `review.md` 使用同一个动态 report model；PR 只保留目标、Issues、diff、checks、review、风险和 candidate，不公开本地 review 路径。
+
 ## 人工操作
 
 Job blocked 后，先处理真实原因，再显式授权一次 fresh retry：

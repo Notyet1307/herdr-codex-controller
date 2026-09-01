@@ -71,11 +71,11 @@ export class GitHubClient {
     return parsePullRequest(result.stdoutTail);
   }
 
-  async createPullRequest(job: JobState, deliveryRoot: string): Promise<PullRequestState> {
+  async createPullRequest(job: JobState, deliveryRoot: string, body: string): Promise<PullRequestState> {
     const existing = await this.findPullRequest(job);
     if (existing && existing.state !== "CLOSED") return existing;
     const bodyPath = join(deliveryRoot, "pull-request-body.md");
-    writeTextAtomic(bodyPath, renderPullRequestBody(job));
+    writeTextAtomic(bodyPath, body);
     const args = [
       "pr", "create", "--repo", this.config.repo,
       "--head", job.branch,
@@ -586,19 +586,7 @@ function addRequiredCheckContext(target: Map<string, Set<number | null>>, name: 
   target.set(name, identities);
 }
 
-export function renderPullRequestBody(job: JobState): string {
-  const issues = job.issues
-    .map((issue) => `- ${job.plan.version === 2 ? "Issue" : "Closes"} #${issue.number}`)
-    .join("\n");
-  const criteria = job.plan.releaseAcceptanceCriteria.length > 0
-    ? job.plan.releaseAcceptanceCriteria.map((item) => `- ${item}`).join("\n")
-    : "- No additional release-level acceptance criteria were declared.";
-  const validations = job.validations
-    .filter((entry) => entry.scope === "release")
-    .map((entry) => `- ${entry.id}: ${entry.passed ? "passed" : "failed"}`)
-    .join("\n") || "- No release validation receipt recorded.";
-  return `# ${job.plan.title}\n\n${job.plan.objective}\n\n## Issues\n\n${issues}\n\n## Release acceptance\n\n${criteria}\n\n## Validation\n\n${validations}\n\n## Review\n\n- Candidate: ${job.candidateSha ?? "not recorded"}\n- Review round: ${job.reviewRound}\n- Plan digest: ${job.planDigest}\n`;
-}
+export { renderPullRequestBody } from "./report.js";
 
 function parseJson(value: string, label: string): unknown {
   try { return JSON.parse(value); } catch { throw new Error(`${label} did not return valid JSON`); }

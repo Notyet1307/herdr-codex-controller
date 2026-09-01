@@ -65,6 +65,13 @@ export interface GitPort {
   salvageHardeningCommitAtHead(job: JobState, round: number): Promise<string | null>;
   commitHardening(job: JobState, reason: string): Promise<{ sha: string; created: boolean }>;
   diffStats(job: JobState): Promise<{ files: number; changedLines: number; summary: string; entries: Array<{ path: string; changedLines: number; binary: boolean }> }>;
+  reportDiffStats(job: JobState): Promise<{
+    files: number;
+    changedLines: number;
+    paths: string[];
+    summary: string;
+    entries: Array<{ path: string; changedLines: number; binary: boolean }>;
+  } | null>;
   diffText(job: JobState, maximumBytes: number): Promise<string>;
   push(job: JobState): Promise<void>;
   quarantineRemoteBranch(job: JobState, candidateSha: string): Promise<void>;
@@ -75,7 +82,7 @@ export interface GitHubPort {
   preflight(): Promise<void>;
   fetchIssue(number: number, options?: { allowClosed?: boolean }): Promise<IssueSnapshot>;
   findPullRequest(job: JobState): Promise<PullRequestState | null>;
-  createPullRequest(job: JobState, deliveryRoot: string): Promise<PullRequestState>;
+  createPullRequest(job: JobState, deliveryRoot: string, body: string): Promise<PullRequestState>;
   inspectPullRequest(number: number): Promise<{
     pullRequest: PullRequestState;
     checks: GhCheckSummary;

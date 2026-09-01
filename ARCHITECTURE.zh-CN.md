@@ -117,6 +117,8 @@ clean exact HEAD
 → verified merge + public completion v3 checkpoint
 ```
 
+人工审查入口由同一份动态 report model 生成：完整 `review.md` 可在任意 Job 状态导出，精简视图用于 PR Body。该 model 只汇总现有 Job、receipt、structured Agent result、Git 与 CI checkpoint，不持久化为新的事实层。
+
 Review 只对一个精确 candidate SHA 有效。任何 hardening commit 都会生成新 candidate，并要求重新执行 full validation 和 aggregate review。
 
 生产 direct 不存在人工 `ready_to_merge` authority。授权后发生 source/config/provenance drift 或 abort 时，Controller 先按 exact PR identity disable auto-merge，再以 expected-head force-with-lease 删除自有远端 branch；remote head 已变化时不会执行删除，并持久化 visible revocation failure。

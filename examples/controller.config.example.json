@@ -29,7 +29,7 @@
   },
   "validation": {
     "setup": [
-      { "command": "npm ci", "timeoutMs": 1800000 }
+      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm test", "timeoutMs": 2700000 }
     ],
     "issue": [
       { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run typecheck", "timeoutMs": 1800000 }

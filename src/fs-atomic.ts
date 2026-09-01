@@ -47,13 +47,17 @@ export function writeBytesAtomic(path: string, value: Uint8Array, mode = 0o600):
 }
 
 export function writePublicJsonAtomic(path: string, value: unknown): "created" | "unchanged" {
+  return writePublicTextAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export function writePublicTextAtomic(path: string, value: string): "created" | "unchanged" {
   const absolute = resolve(path);
   const parent = resolve(dirname(absolute));
   const parentStat = lstatSync(parent);
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink() || realpathSync(parent) !== parent) {
     throw new Error("public output parent is unsafe");
   }
-  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const bytes = Buffer.from(value, "utf8");
   if (existsSync(absolute)) return assertExistingPublicOutput(absolute, bytes);
 
   const temporary = resolve(parent, `.${newId("public-output")}`);

@@ -37,6 +37,7 @@ import {
   renderReleaseHardeningPrompt,
   renderReleaseReviewPrompt,
 } from "./prompts.js";
+import { buildReleaseReportModel, renderPullRequestBody } from "./report.js";
 
 const MAX_REVIEW_DIFF_BYTES = 8 * 1024 * 1024;
 
@@ -941,7 +942,17 @@ export class ReleaseController {
       throw new ControllerError("delivery_candidate_drift", "The reviewed candidate changed before pull request creation.");
     }
     if (production) readCanonicalCandidateProof(job, this.deps.store.config, this.deps.store.root(job.id));
-    const pullRequest = await this.deps.github.createPullRequest(job, this.deps.store.deliveryRoot(job.id));
+    const report = await buildReleaseReportModel({
+      job,
+      config: this.deps.store.config,
+      jobRoot: this.deps.store.root(job.id),
+      git: this.deps.git,
+    });
+    const pullRequest = await this.deps.github.createPullRequest(
+      job,
+      this.deps.store.deliveryRoot(job.id),
+      renderPullRequestBody(report),
+    );
     assertPullRequestIdentity(job, pullRequest);
     if (pullRequest.state !== "OPEN") {
       throw new ControllerError("pull_request_identity_mismatch", "Delivery requires an OPEN pull request for the exact candidate.");
