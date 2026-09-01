@@ -77,8 +77,17 @@ export class ValidationExecutor {
       writeTextAtomic(join(workspace, "probe.mjs"), `
 import fs from "node:fs";
 import net from "node:net";
-const report = { env: process.env.CONTROLLER_SANDBOX_SENTINEL ?? null, outsideWrite: false, network: false };
+import path from "node:path";
+const temporary = fs.realpathSync(process.env.TMPDIR ?? "");
+const report = {
+  env: process.env.CONTROLLER_SANDBOX_SENTINEL ?? null,
+  outsideWrite: false,
+  network: false,
+  temporary,
+  temporaryWrite: false,
+};
 try { fs.writeFileSync(${JSON.stringify(join(outside, "unsafe.txt"))}, "unsafe"); report.outsideWrite = true; } catch {}
+try { fs.writeFileSync(path.join(temporary, "doctor-write-canary"), "safe"); report.temporaryWrite = true; } catch {}
 report.network = await new Promise((resolve) => {
   const socket = net.connect(${address.port}, "127.0.0.1");
   socket.once("connect", () => { socket.destroy(); resolve(true); });
@@ -109,8 +118,15 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
       }
       const line = result.stdoutTail.trim().split("\n").at(-1);
       const report = line ? JSON.parse(line) as Record<string, unknown> : null;
+      const temporary = typeof report?.temporary === "string" && existsSync(report.temporary)
+        ? realpathSync(report.temporary)
+        : null;
+      const temporaryOutsideCandidate = temporary !== null
+        && pathWithin(runRoot, temporary)
+        && !pathWithin(workspace, temporary);
       if (result.exitCode !== 0 || result.signal !== null || result.timedOut || result.outputLimitExceeded
-        || !report || report.env !== null || report.outsideWrite !== false || report.network !== expectedNetwork) {
+        || !report || report.env !== null || report.outsideWrite !== false || report.network !== expectedNetwork
+        || report.temporaryWrite !== true || !temporaryOutsideCandidate) {
         const diagnostic = JSON.stringify({
           exited: result.exitCode === 0 && result.signal === null,
           timedOut: result.timedOut,
@@ -118,6 +134,8 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
           reportPresent: report !== null,
           environmentCleared: report?.env === null,
           outsideWriteDenied: report?.outsideWrite === false,
+          temporaryWriteAllowed: report?.temporaryWrite === true,
+          temporaryOutsideCandidate,
           networkMatchesPolicy: report?.network === expectedNetwork,
         });
         throw new Error(`${result.stderrTail || "sandbox capability probe did not enforce its policy"}; ${diagnostic}`);

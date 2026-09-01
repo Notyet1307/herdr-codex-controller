@@ -16,6 +16,8 @@ Config 必须是 v4；required-check identity、timeout、merge method、paths �
 
 `validation.sandbox.environmentPath` 必须指向 sandbox 可读的稳定系统 runtime。不要使用被 HOME 拒绝规则覆盖的版本管理器路径，不要全局安装项目工具，也不要复制 checkout 的 `node_modules`。
 
+Controller 为每条 command projection 在 configured sandbox root 内创建独立 runtime sibling；其 TMP 位于 candidate 根之外，bootstrap 与对应 semantic command 共享，下一条 command、另一个 Job 或另一个 repository 不复用。整个 validation run 最终统一清理。不同 repository 仍应配置不同的 `stateDir`、`worktreeRoot` 与 `validation.sandbox.root`，便于运维隔离；即使误用同一 sandbox root，run/command identity 也不得发生路径碰撞或临时状态复用。
+
 ## 启动与观察
 
 ```bash
