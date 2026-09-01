@@ -3,12 +3,12 @@ import test from "node:test";
 import { createServer } from "node:net";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { CodexSandboxProvider } from "../src/validation-sandbox.js";
 import { GitClient } from "../src/git.js";
 import { createTestRepo, git, testConfig, testSandboxBin } from "./support.js";
-import { testPlanV2, writeInputs } from "./support.js";
+import { highRiskPlan, writeInputs } from "./support.js";
 import { JobStore } from "../src/state.js";
 import { Validator } from "../src/validator.js";
 import { digestJson } from "../src/util.js";
@@ -52,12 +52,12 @@ test("interrupted sandbox cleanup is recovered idempotently after restart", () =
 test("missing sandbox capability blocks before candidate validation", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo);
     const unavailableSandbox = join(repo.root, "unavailable-sandbox");
     writeFileSync(unavailableSandbox, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo sandbox-test; exit 0; fi\nexit 1\n", "utf8");
     chmodSync(unavailableSandbox, 0o700);
     config.validation.sandbox!.bin = unavailableSandbox;
-    const plan = testPlanV2(repo, [1]);
+    const plan = highRiskPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({
@@ -68,7 +68,7 @@ test("missing sandbox capability blocks before candidate validation", async () =
       planDigest: digestJson(plan),
     });
     job.worktreePath = repo.source;
-    job.baseSha = plan.source.baseSha;
+    job.baseSha = plan.baseSha;
     const gitClient = new GitClient(config);
     await assert.rejects(new Validator(config, gitClient).run({
       job,
@@ -84,52 +84,14 @@ test("missing sandbox capability blocks before candidate validation", async () =
   }
 });
 
-test("validation sandbox executable drift blocks before capability or candidate execution", async () => {
-  const repo = createTestRepo();
-  try {
-    const wrapper = join(repo.root, "sandbox-codex");
-    const realSandbox = resolve("node_modules/.bin/codex");
-    const source = `#!/bin/sh\nexec ${JSON.stringify(realSandbox)} "$@"\n`;
-    writeFileSync(wrapper, source, "utf8");
-    chmodSync(wrapper, 0o700);
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    config.validation.sandbox!.bin = wrapper;
-    const plan = testPlanV2(repo, [1]);
-    const { configPath, planPath } = writeInputs(repo, config, plan);
-    const store = new JobStore(config);
-    const job = store.create({
-      configPath,
-      planPath,
-      plan,
-      configDigest: digestJson(config),
-      planDigest: digestJson(plan),
-    });
-    job.worktreePath = repo.source;
-    job.baseSha = plan.source.baseSha;
-    writeFileSync(wrapper, `${source}# drifted\n`, "utf8");
-    const gitClient = new GitClient(config);
-    await assert.rejects(new Validator(config, gitClient).run({
-      job,
-      scope: "release",
-      issueNumber: null,
-      commands: [{ command: "candidate-command-must-not-run" }],
-      validationsRoot: store.validationsRoot(job.id),
-      sourceHeadSha: await gitClient.head(repo.source),
-      sourceWorktreeDigest: await gitClient.worktreeDigest(repo.source),
-    }), (error: any) => error?.code === "validation_sandbox_drift");
-  } finally {
-    repo.cleanup();
-  }
-});
-
 test("validation output flooding is bounded and recorded as a failed termination", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const config = testConfig(repo);
     config.validation.maxStdoutBytes = 4_096;
     config.validation.maxStderrBytes = 4_096;
     config.validation.maxAggregateBytes = 6_144;
-    const plan = testPlanV2(repo, [1]);
+    const plan = highRiskPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({
@@ -140,7 +102,7 @@ test("validation output flooding is bounded and recorded as a failed termination
       planDigest: digestJson(plan),
     });
     job.worktreePath = repo.source;
-    job.baseSha = plan.source.baseSha;
+    job.baseSha = plan.baseSha;
     const gitClient = new GitClient(config);
     const receipt = (await new Validator(config, gitClient).run({
       job,
@@ -173,8 +135,8 @@ test("validation output flooding is bounded and recorded as a failed termination
 test("validation command cannot validate a modified disposable substitute for the candidate", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    const plan = testPlanV2(repo, [1]);
+    const config = testConfig(repo);
+    const plan = highRiskPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({
@@ -185,7 +147,7 @@ test("validation command cannot validate a modified disposable substitute for th
       planDigest: digestJson(plan),
     });
     job.worktreePath = repo.source;
-    job.baseSha = plan.source.baseSha;
+    job.baseSha = plan.baseSha;
     const gitClient = new GitClient(config);
     await assert.rejects(new Validator(config, gitClient).run({
       job,
@@ -205,13 +167,13 @@ test("validation command cannot validate a modified disposable substitute for th
 test("validation commands cannot pass state to later commands", async () => {
   const repo = createTestRepo();
   try {
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    const plan = testPlanV2(repo, [1]);
+    const config = testConfig(repo);
+    const plan = highRiskPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.worktreePath = repo.source;
-    job.baseSha = plan.source.baseSha;
+    job.baseSha = plan.baseSha;
     const gitClient = new GitClient(config);
     const receipt = (await new Validator(config, gitClient).run({
       job,
@@ -270,8 +232,8 @@ report.network = await new Promise((resolve) => {
 console.log(JSON.stringify(report));
 `, "utf8");
     process.env.CONTROLLER_SENTINEL = "must-not-cross";
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
-    const plan = testPlanV2(repo, [1]);
+    const config = testConfig(repo);
+    const plan = highRiskPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({
@@ -282,7 +244,7 @@ console.log(JSON.stringify(report));
       planDigest: digestJson(plan),
     });
     job.worktreePath = repo.source;
-    job.baseSha = plan.source.baseSha;
+    job.baseSha = plan.baseSha;
     const gitClient = new GitClient(config);
     const receipt = (await new Validator(config, gitClient).run({
       job,
@@ -318,13 +280,13 @@ test("validation sandbox denies Controller state outside HOME and system temp", 
   try {
     const secret = join(externalState, "controller-secret");
     writeFileSync(secret, "private", "utf8");
-    const config = testConfig(repo, { executionMode: "release-plan-v2-direct", stateDir: externalState });
-    const plan = testPlanV2(repo, [1]);
+    const config = testConfig(repo, { stateDir: externalState });
+    const plan = highRiskPlan(repo, [1]);
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.worktreePath = repo.source;
-    job.baseSha = plan.source.baseSha;
+    job.baseSha = plan.baseSha;
     writeFileSync(join(repo.source, "state-probe.mjs"), `
 import fs from "node:fs";
 let readable = false;

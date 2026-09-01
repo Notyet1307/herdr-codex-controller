@@ -456,7 +456,7 @@ export async function exportReleaseReport(input: {
   writeStatus: "created" | "unchanged";
 }> {
   const job = input.store.load(input.jobId);
-  const config = historicalJobConfig(input.store.root(job.id), job);
+  const config = jobConfig(input.store.root(job.id), job);
   const model = await buildReleaseReportModel({
     job,
     config,
@@ -488,13 +488,12 @@ export async function exportReleaseReport(input: {
   };
 }
 
-function historicalJobConfig(jobRoot: string, job: JobState): ControllerConfig {
+function jobConfig(jobRoot: string, job: JobState): ControllerConfig {
   let config: ControllerConfig;
   try {
     config = validateConfig(
       readPrivateJson<unknown>(jobRoot, join(jobRoot, "config.snapshot.json")),
-      "historical config snapshot",
-      { allowHistoricalDirectV2: true },
+      "Job config snapshot",
     );
   } catch {
     throw new ControllerError("report_config_snapshot_invalid", "The Job config snapshot is missing or invalid.");
@@ -511,8 +510,8 @@ function renderCiChecks(
   clean: ReturnType<typeof cleaner>,
 ): ReleaseReportModel["checks"] {
   if (!checks) {
-    return job.status === "completed" && job.completion
-      ? job.completion.requiredChecks.map((name) => ({
+    return job.status === "completed" && job.result
+      ? job.result.requiredChecks.names.map((name) => ({
         stage: "CI",
         command: clean(name, 500),
         status: "PASS" as const,

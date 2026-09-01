@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import type {
   ControllerConfig,
   JobState,
@@ -8,10 +7,10 @@ import type {
 } from "./types.js";
 import { ControllerError } from "./errors.js";
 import { ensurePrivateDir, writeJsonAtomic } from "./fs-atomic.js";
-import { digestJson, newId, nowIso, sha256 } from "./util.js";
+import { digestJson, newId, nowIso } from "./util.js";
 import { GitClient } from "./git.js";
 import type { GitPort } from "./ports.js";
-import { CodexSandboxProvider, HostSandboxProvider } from "./validation-sandbox.js";
+import { CodexSandboxProvider } from "./validation-sandbox.js";
 import { ValidationExecutor } from "./validation-executor.js";
 
 export class Validator {
@@ -28,31 +27,29 @@ export class Validator {
       return;
     }
     const sandbox = config.validation.sandbox;
-    const provider = sandbox
-      ? new CodexSandboxProvider({
-        codexBin: sandbox.bin,
-        shell: config.shell,
-        environmentPath: sandbox.environmentPath,
-        deniedReadPaths: [config.localPath, config.stateDir, config.worktreeRoot],
-        terminationGraceMs: config.codex.terminationGraceMs,
-      })
-      : new HostSandboxProvider(config.shell, config.codex.terminationGraceMs);
+    const provider = new CodexSandboxProvider({
+      codexBin: sandbox.bin,
+      shell: config.shell,
+      environmentPath: sandbox.environmentPath,
+      deniedReadPaths: [config.localPath, config.stateDir, config.worktreeRoot],
+      terminationGraceMs: config.codex.terminationGraceMs,
+    });
     this.executor = new ValidationExecutor(
       git,
       provider,
-      sandbox?.root ?? join("/var/tmp", `herdr-validation-compat-${sha256(config.repo).slice(0, 16)}`),
+      sandbox.root,
     );
   }
 
   async preflight(): Promise<{ verified: boolean; policyDigest: string }> {
     if (this.verified) {
-      return { verified: this.config.executionMode === "release-plan-v2-direct", policyDigest: this.executor.policyDigest };
+      return { verified: true, policyDigest: this.executor.policyDigest };
     }
     const result = await this.executor.doctor();
-    if (this.config.executionMode === "release-plan-v2-direct" && !result.verified) {
+    if (!result.verified) {
       throw new ControllerError(
         "validation_sandbox_capability_unavailable",
-        "release-plan-v2-direct requires a verified validation sandbox capability.",
+        "Production delivery requires a verified validation sandbox capability.",
       );
     }
     this.verified = true;
@@ -68,13 +65,6 @@ export class Validator {
     sourceHeadSha: string;
     sourceWorktreeDigest: string;
   }): Promise<{ receipt: ValidationReceipt; path: string }> {
-    if (input.job.provenance.version >= 2
-      && input.job.provenance.validationSandbox?.policyDigest !== this.executor.policyDigest) {
-      throw new ControllerError(
-        "validation_sandbox_drift",
-        "Validation sandbox executable bytes or policy differ from the Job provenance.",
-      );
-    }
     await this.preflight();
     const id = newId(`${input.scope}-validation`);
     const root = ensurePrivateDir(join(input.validationsRoot, id));
@@ -91,7 +81,6 @@ export class Validator {
     });
     const results: ValidationCommandResult[] = execution.results.map((entry, index) => ({
       command: entry.command.command,
-      oracles: entry.command.oracles ?? [],
       timeoutMs: entry.timeoutMs,
       exitCode: entry.result.exitCode,
       signal: entry.result.signal,
@@ -110,14 +99,12 @@ export class Validator {
       commandIdentityDigest: digestJson({
         index,
         command: entry.command.command,
-        oracles: entry.command.oracles ?? [],
         timeoutMs: entry.timeoutMs,
       }),
       verifiedAt: nowIso(),
     }));
     const configuredCommands = input.commands.map((command) => ({
       command: command.command,
-      oracles: command.oracles ?? [],
       timeoutMs: command.timeoutMs ?? 30 * 60_000,
     }));
     const identity = {
@@ -168,10 +155,8 @@ export function assertValidationReceipt(receipt: ValidationReceipt): void {
   for (let index = 0; index < receipt.commands.length; index += 1) {
     const command = receipt.commands[index]!;
     if (!command.command
-      || !Array.isArray(command.oracles)
       || !Number.isSafeInteger(command.timeoutMs)
       || command.timeoutMs < 1_000
-      || command.oracles.some((oracle) => !Number.isSafeInteger(oracle.issueNumber) || oracle.issueNumber < 1 || !oracle.oracleId)
       || !/^sha256:[a-f0-9]{64}$/.test(command.stdoutSha256)
       || !/^sha256:[a-f0-9]{64}$/.test(command.stderrSha256)
       || !command.stdoutPath
@@ -187,7 +172,6 @@ export function assertValidationReceipt(receipt: ValidationReceipt): void {
       || command.commandIdentityDigest !== digestJson({
         index,
         command: command.command,
-        oracles: command.oracles,
         timeoutMs: command.timeoutMs,
       })
     )) {
@@ -208,7 +192,7 @@ export function assertValidationReceipt(receipt: ValidationReceipt): void {
       || !Array.isArray(commandSet) || commandSet.length !== receipt.commandCount
       || receipt.commandSetDigest !== digestJson(commandSet)
       || receipt.commands.some((command, index) => (
-        JSON.stringify({ command: command.command, oracles: command.oracles, timeoutMs: command.timeoutMs })
+        JSON.stringify({ command: command.command, timeoutMs: command.timeoutMs })
           !== JSON.stringify(commandSet[index])
       ))
       || !Number.isSafeInteger(receipt.projectionFileCount) || Number(receipt.projectionFileCount) < 0
@@ -220,3 +204,4 @@ export function assertValidationReceipt(receipt: ValidationReceipt): void {
   const { digest, ...identity } = receipt;
   if (digest !== digestJson(identity)) throw new ControllerError("validation_receipt_invalid", `Validation receipt ${receipt.id} failed its self-digest.`);
 }
+import { join } from "node:path";

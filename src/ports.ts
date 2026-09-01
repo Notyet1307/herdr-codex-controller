@@ -8,9 +8,8 @@ import type {
   RunKind,
   ValidationReceipt,
   WorkerResult,
-  RepositoryFileSnapshot,
   ValidationCommandConfig,
-  GitRemoteIdentity,
+  VerifiedGitRemote,
   GhCheckObservation,
   CiFailureEvidence,
   ValidationProjectionEntry,
@@ -19,7 +18,7 @@ import type {
 
 export interface GitPort {
   preflight(): Promise<void>;
-  remoteIdentity(): Promise<GitRemoteIdentity | null>;
+  remoteIdentity(): Promise<VerifiedGitRemote>;
   fetchBase(): Promise<string>;
   isAncestorOfRemoteBase(sha: string): Promise<boolean>;
   verifyMergeResult(input: {
@@ -53,12 +52,10 @@ export interface GitPort {
     destination: string,
     manifest: ValidationProjectionEntry[],
   ): Promise<void>;
-  fileAtRevision(revision: string, path: string): Promise<RepositoryFileSnapshot>;
-  fileInWorktree(job: JobState, path: string): Promise<RepositoryFileSnapshot>;
   commitStats(job: JobState, sha: string): Promise<{ files: number; changedLines: number; paths: string[]; entries: Array<{ path: string; changedLines: number; binary: boolean }> }>;
   worktreeDigest(cwd: string): Promise<string>;
   assertAgentDidNotCommit(job: JobState, expectedHead: string): Promise<void>;
-  commitIssue(job: JobState, issueNumber: number, title: string, allowNoop: boolean): Promise<{ sha: string; created: boolean }>;
+  commitIssue(job: JobState, issueNumber: number, title: string): Promise<{ sha: string; created: boolean }>;
   commitParent(job: JobState, sha: string): Promise<string>;
   salvageIssueCommitAtHead(job: JobState, issueNumber: number): Promise<string | null>;
   salvageHardeningCommitAtHead(job: JobState, round: number): Promise<string | null>;

@@ -38,7 +38,7 @@ test("fixed Codex config parses and excludes repository AGENTS from model input"
     const repo = createTestRepo();
     try {
       writeFileSync(join(repo.source, "AGENTS.md"), "HERDR_UNTRUSTED_AGENTS_SENTINEL\n", "utf8");
-      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const config = testConfig(repo);
       const controls = codexRuntimeControlArgs(config, repo.source);
       const args: string[] = [];
       for (let index = 0; index < controls.length; index += 1) {
@@ -66,7 +66,7 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
     const fake = join(repo.root, "fake-codex.mjs");
     const argsPath = join(repo.root, "codex-args.json");
     process.env.FAKE_CODEX_ARGS_PATH = argsPath;
-    writeFileSync(fake, `#!/usr/bin/env node\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);\nif(args[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(args[0]==='exec'&&args[1]==='--help'){console.log('--ignore-user-config --ignore-rules --output-schema --output-last-message');process.exit(0)}\nif(args[0]==='login'&&args[1]==='status'){console.log('logged in');process.exit(0)}\nfs.writeFileSync(process.env.FAKE_CODEX_ARGS_PATH, JSON.stringify(args));\nlet input='';for await (const chunk of process.stdin) input+=chunk;\nconst output=args[args.indexOf('--output-last-message')+1];\nconst review=args.includes('read-only');\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],observedRiskClasses:[],blockedReason:null,blockedKind:null};\nfs.writeFileSync(output, JSON.stringify(result));\nconsole.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
+    writeFileSync(fake, `#!/usr/bin/env node\nimport fs from 'node:fs';\nconst args=process.argv.slice(2);\nif(args[0]==='--version'){console.log('codex-test');process.exit(0)}\nif(args[0]==='exec'&&args[1]==='--help'){console.log('--ignore-user-config --ignore-rules --output-schema --output-last-message');process.exit(0)}\nif(args[0]==='login'&&args[1]==='status'){console.log('logged in');process.exit(0)}\nfs.writeFileSync(process.env.FAKE_CODEX_ARGS_PATH, JSON.stringify(args));\nlet input='';for await (const chunk of process.stdin) input+=chunk;\nconst output=args[args.indexOf('--output-last-message')+1];\nconst review=args.includes('read-only');\nconst result=review?{status:'pass',summary:'pass',findings:[]}:{status:'completed',summary:'done',selfReview:{performed:true,findingsFixed:[],remainingConcerns:[]},testsRun:[],residualRisks:[],blockedReason:null,blockedKind:null};\nfs.writeFileSync(output, JSON.stringify(result));\nconsole.log(JSON.stringify({type:'turn.completed'}));\n`, "utf8");
     chmodSync(fake, 0o700);
     const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fake } } as any);
     const plan = testPlan(repo, [1]);
@@ -148,55 +148,13 @@ test("worker blockedKind is required and closed", () => {
     selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
     testsRun: [],
     residualRisks: [],
-    observedRiskClasses: [],
     blockedReason: "The accepted ADR must change.",
     blockedKind: "replan_required",
   };
   assert.equal(validateWorkerResult(blocked).blockedKind, "replan_required");
   assert.throws(() => validateWorkerResult({ ...blocked, blockedKind: "guess" }), /blockedKind is invalid/);
-  assert.throws(() => validateWorkerResult({ ...blocked, observedRiskClasses: ["not-valid"] }), /observedRiskClasses is invalid/);
-  assert.throws(() => validateWorkerResult({ ...blocked, observedRiskClasses: ["AUTHORITY_BOUNDARY", "AUTHORITY_BOUNDARY"] }), /observedRiskClasses is invalid/);
   assert.throws(() => validateWorkerResult({ ...blocked, blockedKind: null }), /requires blockedReason and blockedKind/);
   assert.throws(() => validateWorkerResult({ ...blocked, status: "completed" }), /cannot include blockedReason or blockedKind/);
-});
-
-test("Codex executable byte drift blocks before model execution", async () => {
-  const repo = createTestRepo();
-  try {
-    const fake = join(repo.root, "runtime-bound-codex.mjs");
-    const marker = join(repo.root, "model-executed");
-    const source = `#!/usr/bin/env node
-import fs from "node:fs";
-const args=process.argv.slice(2);
-if(args[0]==="--version"){console.log("codex-runtime-test");process.exit(0)}
-if(args[0]==="login"&&args[1]==="status"){console.log("logged in");process.exit(0)}
-fs.writeFileSync(${JSON.stringify(marker)}, "executed");
-`;
-    writeFileSync(fake, source, "utf8");
-    chmodSync(fake, 0o700);
-    const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fake } } as any);
-    const plan = testPlan(repo, [1]);
-    const { configPath, planPath } = writeInputs(repo, config, plan);
-    const store = new JobStore(config);
-    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
-    job.baseSha = await new TestGitClient(config).fetchBase();
-    job.worktreePath = repo.source;
-    writeFileSync(fake, `${source}\n// changed after Job creation\n`, "utf8");
-
-    await assert.rejects(
-      new CodexRunner(config, new TestGitClient(config)).run({
-        job,
-        kind: "worker",
-        issueNumber: 1,
-        prompt: "Do not run.",
-        runsRoot: store.runsRoot(job.id),
-      }),
-      (error: any) => error?.code === "execution_runtime_drift",
-    );
-    assert.equal(existsSync(marker), false);
-  } finally {
-    repo.cleanup();
-  }
 });
 
 test("oversized Codex final result is rejected before unbounded parsing", async () => {

@@ -30,7 +30,7 @@ export class GitHubClient {
     ]), "gh repo view");
     const value = parseJson(result.stdoutTail, "gh repo view") as { nameWithOwner?: unknown };
     if (value.nameWithOwner !== this.config.repo) throw new Error("GitHub repository identity differs from config.repo");
-    if (this.config.executionMode === "release-plan-v2-direct" && !(await this.baseAllowsUpToDateAutoMerge())) {
+    if (!(await this.baseAllowsUpToDateAutoMerge())) {
       throw new ControllerError("merge_policy_unverified", "Production Controller auto-merge requires strict latest-base pull-request and required-check server policy.");
     }
   }
@@ -38,13 +38,12 @@ export class GitHubClient {
   async fetchIssue(number: number, options: { allowClosed?: boolean } = {}): Promise<IssueSnapshot> {
     const result = requireCommandSuccess(await this.run([
       "issue", "view", String(number), "--repo", this.config.repo,
-      "--json", "number,title,body,state,labels,assignees,url",
+      "--json", "number,title,state,labels,assignees,url",
     ]), `gh issue view #${number}`);
     const value = parseJson(result.stdoutTail, `issue #${number}`) as Record<string, unknown>;
     const snapshotIdentity = {
       number: expectInteger(value.number, "issue.number"),
       title: expectString(value.title, "issue.title", false, 500),
-      body: expectString(value.body, "issue.body", true, 64 * 1024),
       state: expectState(value.state),
       labels: expectNames(value.labels, "issue.labels", "name"),
       assignees: expectNames(value.assignees, "issue.assignees", "login"),

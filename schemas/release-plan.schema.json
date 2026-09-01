@@ -1,5 +1,42 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Herdr Codex Release Plan",
-  "$ref": "release-plan-v2.schema.json"
+  "title": "Herdr Codex Release Plan contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["controllerContractVersion", "id", "title", "objective", "repo", "baseRef", "baseSha", "parentIssue", "issues", "releaseAcceptanceCriteria", "reviewFocus"],
+  "properties": {
+    "controllerContractVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9._-]+$", "minLength": 1, "maxLength": 80 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "objective": { "type": "string", "minLength": 1, "maxLength": 8000 },
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "baseRef": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "baseSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "parentIssue": { "type": "integer", "minimum": 1 },
+    "plannerContextDigest": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "issues": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "order", "dependsOn", "objective", "acceptanceCriteria", "risk"],
+        "if": { "properties": { "risk": { "enum": ["low", "normal"] } }, "required": ["risk"] },
+        "then": { "properties": { "oracleCommands": { "maxItems": 0 } } },
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "order": { "type": "integer", "minimum": 1 },
+          "dependsOn": { "type": "array", "maxItems": 50, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+          "objective": { "type": "string", "minLength": 1, "maxLength": 8000 },
+          "acceptanceCriteria": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+          "expectedPaths": { "type": "array", "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+          "risk": { "enum": ["low", "normal", "high"] },
+          "oracleCommands": { "type": "array", "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 512 } }
+        }
+      }
+    },
+    "releaseAcceptanceCriteria": { "type": "array", "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+    "reviewFocus": { "type": "array", "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+  }
 }

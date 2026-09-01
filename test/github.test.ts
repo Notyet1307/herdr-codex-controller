@@ -96,7 +96,7 @@ test("auto-merge policy requires a pull-request rule and strict protection for e
   chmodSync(ghPath, 0o700);
   process.env["PATH"] = `${fakeBin}:${originalPath ?? ""}`;
   try {
-    const valid = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+    const valid = testConfig(repo);
     const missing = structuredClone(valid) as any;
     missing.delivery.requiredChecks.checks[0].name = "other";
     assert.equal(await new GitHubClient(valid).baseAllowsUpToDateAutoMerge(), true);
@@ -174,7 +174,7 @@ process.exit(2);
     chmodSync(ghPath, 0o700);
     process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
     try {
-      const config = testConfig(repo, { executionMode: "release-plan-v2-direct" });
+      const config = testConfig(repo);
       const observed = await new GitHubClient(config).inspectPullRequest(88);
       assert.equal(observed.checks.state, appId === 15368 ? "success" : "failure");
       assert.deepEqual(observed.checks.ambiguous, appId === 15368 ? [] : ["verify"]);

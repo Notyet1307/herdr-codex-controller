@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import type { ControllerConfig, JobState, RepositoryFileSnapshot, ValidationProjectionEntry } from "./types.js";
-import type { GitRemoteIdentity } from "./types.js";
+import type { ControllerConfig, JobState, ValidationProjectionEntry } from "./types.js";
+import type { VerifiedGitRemote } from "./types.js";
 import { runCommand, requireCommandSuccess } from "./command.js";
 import { ensurePrivateDir } from "./fs-atomic.js";
 import { digestJson, newId, pathWithin, sha256 } from "./util.js";
@@ -10,7 +10,6 @@ import { configuredRemoteIdentity, inspectGitRemoteIdentity } from "./remote-ide
 
 const GIT_TIMEOUT_MS = 120_000;
 const GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
-const ORACLE_MAX_BYTES = 64 * 1024 * 1024;
 const PROJECTION_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const PROJECTION_MAX_BYTES = 512 * 1024 * 1024;
 const PROJECTION_MAX_FILES = 100_000;
@@ -32,7 +31,7 @@ export class GitClient {
     await this.verifiedRemoteIdentity();
   }
 
-  async remoteIdentity(): Promise<GitRemoteIdentity | null> {
+  async remoteIdentity(): Promise<VerifiedGitRemote> {
     return this.verifiedRemoteIdentity();
   }
 
@@ -296,37 +295,6 @@ export class GitClient {
     }
   }
 
-  async fileAtRevision(revision: string, path: string): Promise<RepositoryFileSnapshot> {
-    assertSha(revision);
-    assertSafeRepoPath(path);
-    const tree = await this.textRawBounded(this.config.localPath, ["ls-tree", "-z", revision, "--", path], 8_192);
-    const match = tree.replace(/\0$/u, "").match(/^(100644|100755) blob [a-f0-9]+\t([^\u0000]+)$/u);
-    if (!match || match[2] !== path) throw new Error("Oracle artifact is not a reviewed-base regular file");
-    return fileBinding(gitBytes(
-      this.config.localPath,
-      ["show", `${revision}:${path}`],
-      ORACLE_MAX_BYTES,
-      { GIT_CONFIG_COUNT: "0" },
-      safeGitArguments(this.config),
-    ));
-  }
-
-  async fileInWorktree(job: JobState, path: string): Promise<RepositoryFileSnapshot> {
-    assertSafeRepoPath(path);
-    const root = realpathSync(job.worktreePath);
-    let current = root;
-    for (const segment of path.split("/")) {
-      current = join(current, segment);
-      const stat = lstatSync(current);
-      if (stat.isSymbolicLink()) throw new Error("Oracle artifact path contains a symlink");
-    }
-    const target = realpathSync(current);
-    if (!pathWithin(root, target)) throw new Error("Oracle artifact escapes the release worktree");
-    const stat = lstatSync(target);
-    if (!stat.isFile() || stat.nlink !== 1) throw new Error("Oracle artifact is not a private regular file");
-    return fileBinding(readFileSync(target));
-  }
-
   async commitStats(job: JobState, sha: string): Promise<BoundedDiff> {
     assertSha(sha);
     return this.statsBetween(job.worktreePath, `${sha}^`, sha);
@@ -357,22 +325,11 @@ export class GitClient {
     if (branch !== job.branch) throw new Error("Codex changed the release branch identity");
   }
 
-  async commitIssue(job: JobState, issueNumber: number, title: string, allowNoop: boolean): Promise<{ sha: string; created: boolean }> {
+  async commitIssue(job: JobState, issueNumber: number, title: string): Promise<{ sha: string; created: boolean }> {
     await this.success(job.worktreePath, ["add", "-A"], "git stage issue changes");
     const diff = await this.run(job.worktreePath, ["diff", "--cached", "--quiet"]);
     if (diff.exitCode === 0) {
-      if (!allowNoop) throw new Error(`issue #${issueNumber} produced no changes`);
-      const subject = normalizeSubject(title, `record no-op issue #${issueNumber}`);
-      const body = [
-        `Issue: #${issueNumber}`,
-        "",
-        `Herdr-Release-Id: ${job.id}`,
-        `Herdr-Issue: ${issueNumber}`,
-        `Herdr-Plan-Digest: ${job.planDigest}`,
-        "Herdr-Noop: true",
-      ].join("\n");
-      await this.success(job.worktreePath, ["commit", "--no-verify", "--allow-empty", "-m", subject, "-m", body], "git commit no-op issue");
-      return { sha: await this.head(job.worktreePath), created: true };
+      throw new Error(`issue #${issueNumber} produced no changes`);
     }
     if (diff.exitCode !== 1) throw new Error(`cannot inspect staged diff: ${diff.stderrTail || diff.stdoutTail}`);
     const subject = normalizeSubject(title, `implement issue #${issueNumber}`);
@@ -617,7 +574,7 @@ export class GitClient {
   }
 
   private run(cwd: string, args: string[], maxTailBytes = GIT_OUTPUT_BYTES, timeoutMs = GIT_TIMEOUT_MS) {
-    const remoteIdentity = this.config.remoteIdentity ? configuredRemoteIdentity(this.config) : null;
+    const remoteIdentity = configuredRemoteIdentity(this.config);
     return runCommand({
       command: "git",
       args: [...safeGitArguments(this.config), "-C", cwd, ...args],
@@ -638,10 +595,8 @@ export class GitClient {
     });
   }
 
-  protected async verifiedRemoteIdentity(): Promise<GitRemoteIdentity | null> {
-    return this.config.executionMode === "release-plan-v2-direct" && this.config.remoteIdentity
-      ? inspectGitRemoteIdentity(this.config)
-      : null;
+  protected async verifiedRemoteIdentity(): Promise<VerifiedGitRemote> {
+    return inspectGitRemoteIdentity(this.config);
   }
 }
 
@@ -653,7 +608,7 @@ function safeGitArguments(config: ControllerConfig): string[] {
     "-c", "protocol.allow=never",
     "-c", "protocol.https.allow=always",
     "-c", "protocol.ssh.allow=always",
-    "-c", `protocol.file.allow=${config.executionMode === "release-plan-v2-direct" ? "never" : "always"}`,
+    "-c", "protocol.file.allow=never",
     "-c", "protocol.ext.allow=never",
   ];
 }
@@ -671,15 +626,10 @@ function assertSafeRepoPath(value: string): void {
   }
 }
 
-function fileBinding(bytes: Uint8Array): RepositoryFileSnapshot {
-  if (bytes.byteLength > ORACLE_MAX_BYTES) throw new Error("Oracle artifact exceeds the byte bound");
-  return { sha256: `sha256:${sha256(bytes)}`, byteCount: bytes.byteLength, bytes };
-}
-
 function gitBytes(
   cwd: string,
   args: string[],
-  maximumBytes = ORACLE_MAX_BYTES,
+  maximumBytes = PROJECTION_MAX_FILE_BYTES,
   environment: Record<string, string> = {},
   prefix: string[] = [],
 ): Uint8Array {
