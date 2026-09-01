@@ -19,7 +19,7 @@ export function codexRuntimeControlArgs(config: ControllerConfig, worktreePath: 
     "--config", "features.plugins=false",
     "--config", "project_doc_max_bytes=0",
     "--config", "project_doc_fallback_filenames=[]",
-    "--config", `projects.${JSON.stringify(worktreePath)}.trust_level="untrusted"`,
+    "--config", `projects={${JSON.stringify(worktreePath)}={trust_level="untrusted"}}`,
     "--config", 'shell_environment_policy.inherit="none"',
     "--config", "shell_environment_policy.ignore_default_excludes=false",
   ];

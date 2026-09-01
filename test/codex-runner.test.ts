@@ -96,7 +96,8 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
     assert.ok(args.includes("plugins={}"));
     assert.ok(args.includes("project_doc_max_bytes=0"));
     assert.ok(args.includes("project_doc_fallback_filenames=[]"));
-    assert.ok(args.some((entry) => entry.startsWith("projects.") && entry.endsWith('.trust_level="untrusted"')));
+    assert.ok(args.includes(`projects={${JSON.stringify(repo.source)}={trust_level="untrusted"}}`));
+    assert.ok(!args.some((entry) => entry.startsWith("projects.")));
     assert.ok(!args.includes("--profile"));
     assert.ok(args.includes("shell_environment_policy.ignore_default_excludes=false"));
     assert.equal(optionValue(args, "--model"), "gpt-5.6-terra");
