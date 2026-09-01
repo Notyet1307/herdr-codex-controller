@@ -24,17 +24,22 @@
     "maxAggregateBytes": 12582912
   },
   "validation": {
+    "bootstrap": {
+      "command": "npm ci --ignore-scripts --no-audit --no-fund",
+      "timeoutMs": 1800000,
+      "networkAccess": true
+    },
     "setup": [
-      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm test", "timeoutMs": 2700000 }
+      { "command": "npm run typecheck", "timeoutMs": 1800000 }
     ],
     "issue": [
-      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run typecheck", "timeoutMs": 1800000 }
+      { "command": "npm run typecheck", "timeoutMs": 1800000 }
     ],
     "release": [
-      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run verify:oracle:o01", "timeoutMs": 1800000 },
-      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run typecheck", "timeoutMs": 1800000 },
-      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm test", "timeoutMs": 2700000 },
-      { "command": "npm ci --ignore-scripts --no-audit --no-fund && npm run build", "timeoutMs": 1800000 }
+      { "command": "npm run verify:oracle:o01", "timeoutMs": 1800000 },
+      { "command": "npm run typecheck", "timeoutMs": 1800000 },
+      { "command": "npm test", "timeoutMs": 2700000 },
+      { "command": "npm run build", "timeoutMs": 1800000 }
     ],
     "maxOutputBytes": 131072,
     "maxStdoutBytes": 1048576,

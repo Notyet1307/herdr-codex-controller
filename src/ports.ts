@@ -109,7 +109,12 @@ export interface CodexPort {
 }
 
 export interface ValidationPort {
-  preflight(): Promise<{ verified: boolean; policyDigest: string }>;
+  preflight(): Promise<{
+    verified: boolean;
+    policyDigest: string;
+    validationPolicyDigest: string;
+    bootstrapPolicyDigest: string | null;
+  }>;
   run(input: {
     job: JobState;
     scope: "setup" | "issue" | "release";

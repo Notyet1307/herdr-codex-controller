@@ -30,6 +30,14 @@ test("current config fixture agrees across schema and runtime", () => {
     const validate = new Ajv2020({ allErrors: true, strict: false }).compile(schema("controller-config.schema.json"));
     assert.equal(validate(config), true, JSON.stringify(validate.errors));
     assert.doesNotThrow(() => validateConfig(config));
+    const withBootstrap = structuredClone(config) as any;
+    withBootstrap.validation.bootstrap = {
+      command: "npm ci --ignore-scripts --no-audit --no-fund",
+      timeoutMs: 1_800_000,
+      networkAccess: true,
+    };
+    assert.equal(validate(withBootstrap), true, JSON.stringify(validate.errors));
+    assert.deepEqual(validateConfig(withBootstrap).validation.bootstrap, withBootstrap.validation.bootstrap);
     const invalid = structuredClone(config) as any;
     invalid.executionMode = "release-plan-v2-direct";
     assert.equal(validate(invalid), false);

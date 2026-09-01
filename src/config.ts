@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import type { CommandConfig, ControllerConfig, RequiredCheckContractV1 } from "./types.js";
+import type { CommandConfig, ControllerConfig, RequiredCheckContractV1, ValidationBootstrapConfig } from "./types.js";
 import { assertAbsolutePath, boundedStringArray, boundedText, parsePositiveInteger, pathWithin } from "./util.js";
 import { parseRemoteIdentityContract } from "./remote-identity.js";
 
@@ -83,8 +83,8 @@ function validateCodex(value: unknown): ControllerConfig["codex"] {
 function validateValidation(value: unknown): ControllerConfig["validation"] {
   const object = expectObject(value, "config.validation");
   expectExactKeys(object, [
-    "issue", "maxAggregateBytes", "maxOutputBytes", "maxStderrBytes", "maxStdoutBytes", "release", "sandbox", "setup",
-  ], "config.validation");
+    "bootstrap", "issue", "maxAggregateBytes", "maxOutputBytes", "maxStderrBytes", "maxStdoutBytes", "release", "sandbox", "setup",
+  ], "config.validation", ["bootstrap"]);
   const maxStdoutBytes = parsePositiveInteger(object.maxStdoutBytes, "config.validation.maxStdoutBytes", 4_096, 8 * 1024 * 1024);
   const maxStderrBytes = parsePositiveInteger(object.maxStderrBytes, "config.validation.maxStderrBytes", 4_096, 8 * 1024 * 1024);
   const maxAggregateBytes = parsePositiveInteger(object.maxAggregateBytes, "config.validation.maxAggregateBytes", 4_096, 16 * 1024 * 1024);
@@ -92,6 +92,7 @@ function validateValidation(value: unknown): ControllerConfig["validation"] {
     throw new Error("config.validation.maxAggregateBytes must cover each stream limit");
   }
   return {
+    ...(object.bootstrap === undefined ? {} : { bootstrap: validateBootstrap(object.bootstrap) }),
     setup: validateCommands(object.setup, "config.validation.setup", 30),
     issue: validateCommands(object.issue, "config.validation.issue", 50),
     release: validateCommands(object.release, "config.validation.release", 50),
@@ -100,6 +101,18 @@ function validateValidation(value: unknown): ControllerConfig["validation"] {
     maxStderrBytes,
     maxAggregateBytes,
     sandbox: validateSandbox(object.sandbox),
+  };
+}
+
+function validateBootstrap(value: unknown): ValidationBootstrapConfig | null {
+  if (value === null) return null;
+  const object = expectObject(value, "config.validation.bootstrap");
+  expectExactKeys(object, ["command", "networkAccess", "timeoutMs"], "config.validation.bootstrap");
+  if (typeof object.networkAccess !== "boolean") throw new Error("config.validation.bootstrap.networkAccess must be boolean");
+  return {
+    command: boundedText(object.command, "config.validation.bootstrap.command", 8_192),
+    timeoutMs: parsePositiveInteger(object.timeoutMs, "config.validation.bootstrap.timeoutMs", 1_000, 8 * 60 * 60_000),
+    networkAccess: object.networkAccess,
   };
 }
 
