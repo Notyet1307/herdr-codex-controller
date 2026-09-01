@@ -31,6 +31,7 @@ type CodexSandboxConfig = {
   shell: string;
   environmentPath: string[];
   deniedReadPaths?: string[];
+  networkAccess?: boolean;
   terminationGraceMs: number;
 };
 
@@ -69,7 +70,7 @@ export class CodexSandboxProvider implements SandboxProvider {
       version: 1,
       provider: "codex-permission-profile",
       binary: this.binaryIdentity,
-      profile: profileTemplate(this.deniedRoots),
+      profile: profileTemplate(this.deniedRoots, config.networkAccess ?? false),
       nodeStdioShimSha256: sha256PrefixedUtf8(NODE_STDIO_SHIM),
       environmentPath: config.environmentPath,
       shell: config.shell,
@@ -86,7 +87,7 @@ export class CodexSandboxProvider implements SandboxProvider {
     const isolatedTmp = ensurePrivateDir(join(workspace, ".herdr-tmp"));
     const cacheRoot = ensurePrivateDir(join(workspace, ".herdr-cache"));
     const nodeStdioShim = join(profileRoot, "node-stdio.cjs");
-    writeTextAtomic(join(profileRoot, "config.toml"), profileTemplate(this.deniedRoots));
+    writeTextAtomic(join(profileRoot, "config.toml"), profileTemplate(this.deniedRoots, this.config.networkAccess ?? false));
     writeTextAtomic(nodeStdioShim, NODE_STDIO_SHIM);
     const environment = sandboxEnvironment({
       configured: input.environment,
@@ -230,7 +231,7 @@ function sensitiveRoots(additional: string[]): string[] {
   return canonical.filter((entry, index) => !canonical.slice(0, index).some((parent) => pathWithin(parent, entry)));
 }
 
-function profileTemplate(deniedRoots: string[]): string {
+function profileTemplate(deniedRoots: string[], networkAccess: boolean): string {
   const denied = deniedRoots.map((entry) => `${tomlString(entry)} = "deny"`).join("\n");
   return `default_permissions = "validation"
 
@@ -244,7 +245,7 @@ ${denied}
 "." = "write"
 
 [permissions.validation.network]
-enabled = false
+enabled = ${networkAccess}
 `;
 }
 

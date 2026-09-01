@@ -19,6 +19,7 @@ test("production config v4 exposes only operator choices and synthesizes fixed p
     assert.equal(config.delivery.createPullRequest, true);
     assert.equal(config.delivery.autoMerge, true);
     assert.equal(config.delivery.allowNoChecks, false);
+    assert.equal(config.reviewDemo, null);
     assert.deepEqual(config.delivery.mergeAuthority, {
       version: 1,
       mode: "controller-auto-merge",
@@ -34,11 +35,16 @@ test("production config v4 exposes only operator choices and synthesizes fixed p
       (value: any) => { value.delivery.autoMerge = false; },
       (value: any) => { value.delivery.allowNoChecks = true; },
       (value: any) => { value.delivery.mergeAuthority = {}; },
+      (value: any) => { value.reviewDemo = { command: "npm run demo" }; },
     ]) {
       const invalid = structuredClone(input) as any;
       mutate(invalid);
-      assert.throws(() => validateConfig(invalid), /unknown keys/);
+      assert.throws(() => validateConfig(invalid), /unknown keys|missing keys/);
     }
+
+    const withDemo = structuredClone(input) as any;
+    withDemo.reviewDemo = { command: "npm run review:demo", required: true, networkAccess: false, timeoutMs: 60_000, maxOutputBytes: 65_536 };
+    assert.deepEqual(validateConfig(withDemo).reviewDemo, withDemo.reviewDemo);
 
     const old = structuredClone(input) as any;
     old.version = 3;

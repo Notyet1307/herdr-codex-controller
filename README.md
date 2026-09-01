@@ -21,6 +21,8 @@ High-value boundaries remain unchanged:
 
 Config v4 contains only operator choices. Review, critical/major blocking, PR creation, required checks, exact-head auto-merge, disabled custom profiles, and disabled Worker/Reviewer network are code invariants.
 
+An optional single `reviewDemo` command runs after aggregate review on a disposable exact-candidate projection. It has isolated HOME/TMP/cache, no inherited credentials, network off by default, and copies only safe regular files from `.herdr-review-output/` into private Job artifacts.
+
 ```bash
 npm ci
 npm run verify

@@ -109,6 +109,7 @@ test("qualified Controller A completion remains exportable after Controller B is
     };
     historicalConfig.delivery.requiredChecks = ["verify"];
     delete historicalConfig.delivery.mergeAuthority;
+    delete historicalConfig.reviewDemo;
     const configDigest = digestJson(historicalConfig);
     const historicalIdentity = readControllerIdentityHistory().entries[0]!.identity;
     const job = fixture.store.load(fixture.jobId);

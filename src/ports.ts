@@ -14,6 +14,7 @@ import type {
   GhCheckObservation,
   CiFailureEvidence,
   ValidationProjectionEntry,
+  ReviewDemoResult,
 } from "./types.js";
 
 export interface GitPort {
@@ -121,4 +122,11 @@ export interface ValidationPort {
     sourceHeadSha: string;
     sourceWorktreeDigest: string;
   }): Promise<{ receipt: ValidationReceipt; path: string }>;
+}
+
+export interface DemoPort {
+  run(input: {
+    job: JobState;
+    demoRoot: string;
+  }): Promise<{ result: ReviewDemoResult; path: string }>;
 }

@@ -14,6 +14,8 @@ node dist/src/cli.js plan validate --config /PRIVATE/PATH/controller.json --plan
 
 Config 必须是 v4。固定生产策略不接受 JSON override；required-check app/workflow identity、timeouts、merge method 和 paths 必须与目标仓库真实策略一致。
 
+`reviewDemo` 缺省为 `null`。启用后只配置一个目标仓库命令；required 失败会在 PR 前阻断，optional 失败记录 WARN。只有确实需要 API、浏览器或运行时下载时才设置 `networkAccess=true`。
+
 ## 启动与观察
 
 ```bash

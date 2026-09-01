@@ -84,6 +84,18 @@
         "maxChangedLines": { "type": "integer", "minimum": 1, "maximum": 100000 }
       }
     },
+    "reviewDemo": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["command", "required", "networkAccess", "timeoutMs", "maxOutputBytes"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "required": { "type": "boolean" },
+        "networkAccess": { "type": "boolean" },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+        "maxOutputBytes": { "type": "integer", "minimum": 4096, "maximum": 8388608 }
+      }
+    },
     "delivery": {
       "type": "object",
       "additionalProperties": false,

@@ -69,6 +69,7 @@ test("pull request bodies keep source-bound Issues open", () => {
     change: { available: true, files: 1, changedLines: 1 },
     checks: [],
     aggregateReview: { status: "PASS", summary: "pass" },
+    demonstration: { status: "NOT RUN", networkAccess: null },
     remainingConcerns: { items: [] },
     technical: { planDigest: "b".repeat(64) },
   } as any;
