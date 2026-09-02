@@ -211,7 +211,24 @@ export class ReleaseController {
       issue.snapshot = snapshot;
     }
     this.deps.store.save(job);
-    return this.runSetupValidation(job, verified.baseSha);
+    await this.deps.validator.runDevelopmentGate({
+      job,
+      validationsRoot: this.deps.store.validationsRoot(job.id),
+    });
+    await this.deps.git.remoteIdentity();
+    await this.deps.git.verifyWorktree(job);
+    if (await this.deps.git.head(job.worktreePath) !== verified.baseSha
+      || !(await this.deps.git.isClean(job.worktreePath))) {
+      throw new ControllerError(
+        "development_setup_mutated_source",
+        "The release source identity or Git-visible worktree changed during the Development Gate.",
+      );
+    }
+    await this.assertReleaseWorktreeContract(job);
+    job.phase = "implement";
+    job.currentIssueNumber = null;
+    this.deps.store.save(job);
+    return stepResult("release_prepared", true, false, null, `Release ${job.id} prepared at ${verified.baseSha}.`);
   }
 
   private async verifyPlanSourceBeforeSideEffects(job: JobState): Promise<{
@@ -343,29 +360,6 @@ export class ReleaseController {
       throw new ControllerError("issue_validation_missing", `Issue #${issue.number} has no passed durable validation receipt.`);
     }
     return receipt;
-  }
-
-  private async runSetupValidation(job: JobState, baseSha: string): Promise<StepResult> {
-    const head = await this.deps.git.head(job.worktreePath);
-    const worktreeDigest = await this.deps.git.worktreeDigest(job.worktreePath);
-    const setup = await this.deps.validator.run({
-      job,
-      scope: "setup",
-      issueNumber: null,
-      commands: this.deps.store.config.validation.setup,
-      validationsRoot: this.deps.store.validationsRoot(job.id),
-      sourceHeadSha: head,
-      sourceWorktreeDigest: worktreeDigest,
-    });
-    await this.assertValidationDidNotMutate(job, worktreeDigest);
-    appendValidation(job, setup.receipt, setup.path);
-    if (!setup.receipt.passed) {
-      throw new ControllerError("setup_validation_failed", "Release setup validation failed.", setup.path);
-    }
-    job.phase = "implement";
-    job.currentIssueNumber = null;
-    this.deps.store.save(job);
-    return stepResult("release_prepared", true, false, null, `Release ${job.id} prepared at ${baseSha}.`);
   }
 
   private async implement(job: JobState): Promise<StepResult> {

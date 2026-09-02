@@ -115,6 +115,10 @@ export interface ValidationPort {
     validationPolicyDigest: string;
     bootstrapPolicyDigest: string | null;
   }>;
+  runDevelopmentGate(input: {
+    job: JobState;
+    validationsRoot: string;
+  }): Promise<{ path: string }>;
   run(input: {
     job: JobState;
     scope: "setup" | "issue" | "release";

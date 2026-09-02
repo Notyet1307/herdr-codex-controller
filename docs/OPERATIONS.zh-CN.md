@@ -12,7 +12,9 @@ node dist/src/cli.js plan validate --config /PRIVATE/PATH/controller.json --plan
 
 Config 必须是 v4；required-check identity、timeout、merge method、paths 与 validation commands 必须符合目标仓库真实策略。
 
-依赖准备必须放在可选 `validation.bootstrap`，不能拼入 Planner 绑定的 Oracle command。Bootstrap 对每一条 semantic command 的独立 projection 重跑；`validation.setup` 只验证 baseline，不提供后续缓存。通常使用 `npm ci --ignore-scripts --no-audit --no-fund`。只有 bootstrap 可按配置联网，随后 semantic validation 总是重新进入断网 policy；doctor 分别返回 validation 与 bootstrap policy digest。
+Prepare Gate 在真实 Release Worktree 中先执行一次可选 `validation.bootstrap`，再执行 `validation.setup`。Bootstrap 只使用既有 `networkAccess`；setup 强制断网。两者前后都重验 HEAD、branch、remote 与 Git-visible clean；允许保留被 `.gitignore` 忽略的依赖/cache，不允许修改源码、测试、脚本、manifest 或 lockfile。失败时 Job 保留在 `prepare`，且零产品 Worker；显式 retry 会重跑完整 Gate。
+
+依赖准备必须放在可选 `validation.bootstrap`，不能拼入 Planner 绑定的 Oracle command。后续 Issue/Release semantic validation 仍在每条 command 的独立 projection 中重跑 Bootstrap；semantic command 始终断网。通常使用 `npm ci --ignore-scripts --no-audit --no-fund`。doctor 分别返回 validation 与 bootstrap policy digest。
 
 `validation.sandbox.environmentPath` 必须指向 sandbox 可读的稳定系统 runtime。不要使用被 HOME 拒绝规则覆盖的版本管理器路径，不要全局安装项目工具，也不要复制 checkout 的 `node_modules`。
 
@@ -37,6 +39,8 @@ node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE
 
 - `replan_required`：保存 report/receipt，执行 `abort`，回 Planner 生成并批准新 Plan，再创建新 Job。
 - recoverable：修复不改变 Plan authority 的基础设施问题，提供新的 regular evidence file，再执行 `retry --reason ... --evidence ...`。
+
+`development_bootstrap_failed` 与 `development_setup_failed` 是可修复环境失败；`development_bootstrap_mutated_source`、`development_setup_mutated_source` 与 bootstrap policy 失败需要人工检查。不要因此给 Worker 开网。
 
 优先用 SIGINT/SIGTERM。若异常中断，先确认无遗留 Codex 进程，再执行 `step`；Controller 会核对 Worktree/HEAD 并启动 fresh recovery。
 

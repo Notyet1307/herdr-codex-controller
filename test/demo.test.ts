@@ -118,7 +118,7 @@ test("required Demo blocks PR, optional Demo warns, and stale candidate evidence
         git: gitClient,
         github,
         codex: new FakeCodex(gitClient),
-        validator: new Validator(config),
+        validator: new Validator(config, gitClient),
         demo,
       });
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
