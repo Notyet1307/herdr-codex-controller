@@ -64,7 +64,9 @@ test("base or Issue state drift fails before Worktree, validation, or Codex", as
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       const result = await controller.step(created.id);
       assert.equal(result.action, "blocked", scenario);
-      assert.equal(store.load(created.id).blocked?.code, "replan_required", scenario);
+      const blocked = store.load(created.id).blocked;
+      assert.equal(blocked?.code, scenario === "base" ? "plan_base_drift" : scenario === "parent" ? "plan_parent_not_open" : "plan_issue_not_open", scenario);
+      assert.equal(blocked?.kind, "replan_required", scenario);
       assert.equal(gitClient.ensureCalls, 0, scenario);
       assert.equal(codex.calls.length, 0, scenario);
       assert.equal(existsSync(created.worktreePath), false, scenario);
@@ -129,7 +131,8 @@ test("remote base is rechecked before delivery and auto-merge authorization", as
       const result = await controller.step(job.id);
       job = store.load(job.id);
       assert.equal(result.action, "blocked", boundary);
-      assert.equal(job.blocked?.code, "replan_required", boundary);
+      assert.equal(job.blocked?.code, "runtime_source_base_drift", boundary);
+      assert.equal(job.blocked?.kind, "replan_required", boundary);
       assert.equal(github.enabled, false, boundary);
     } finally { repo.cleanup(); }
   }

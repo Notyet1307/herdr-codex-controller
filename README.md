@@ -4,7 +4,7 @@ A thin Codex-first controller for one ordered group of GitHub Issues:
 
 ```text
 release-plan.json
-→ baseline
+→ Prepare Gate (network-optional bootstrap, offline setup, clean source)
 → fresh Worker per Issue
 → Controller validation and commits
 → aggregate read-only review
@@ -26,7 +26,10 @@ node dist/src/cli.js start \
   --approve-plan 64HEX \
   --json
 node dist/src/cli.js run --config /private/controller.json --job RELEASE_ID --json
+node dist/src/cli.js status --config /private/controller.json --job RELEASE_ID --public --json
 ```
+
+Public status is a bounded, redacted, on-demand projection. It never exposes private Job paths or replaces `release-result:v1`.
 
 Export the human review bundle at any Job state:
 

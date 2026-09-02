@@ -2,6 +2,8 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
   ControllerConfig,
+  BlockedKind,
+  BlockedState,
   JobState,
   ReleasePlan,
   RetryAuthorization,
@@ -17,20 +19,43 @@ import { assertReleaseResult } from "./release-result.js";
 export const REPLAN_REQUIRED_CODE = "replan_required";
 
 const REPLAN_CAUSES = new Set([
-  "codex_hardening_replan_required",
-  "codex_worker_replan_required",
-  "issue_dependency_incomplete",
-  "issue_scope_path_drift",
-  "repair_scope_unattributed",
+  REPLAN_REQUIRED_CODE,
+  "invalid_expected_path_pattern",
   "plan_base_drift",
+  "plan_base_ref_mismatch",
+  "plan_drift",
   "plan_issue_not_open",
   "plan_parent_not_open",
-  "release_diff_too_large",
-  "release_repair_exhausted",
-  "release_review_blocked",
-  "release_too_many_issues",
+  "plan_repo_mismatch",
   "runtime_source_base_drift",
+  "unknown_risk_class",
+  "unsupported_controller_contract_version",
 ]);
+
+const RECOVERABLE_CAUSES = new Set([
+  "bootstrap_sandbox_capability_unavailable",
+  "ci_infrastructure_exhausted",
+  "codex_hardening_failed",
+  "codex_hardening_recoverable",
+  "codex_review_failed",
+  "codex_worker_failed",
+  "codex_worker_recoverable",
+  "development_bootstrap_failed",
+  "development_setup_failed",
+  "review_demo_runner_missing",
+  "setup_validation_failed",
+  "validation_sandbox_capability_unavailable",
+]);
+
+export function classifyBlock(code: string): BlockedKind {
+  if (REPLAN_CAUSES.has(code)) return "replan_required";
+  if (RECOVERABLE_CAUSES.has(code)) return "recoverable";
+  return "manual";
+}
+
+export function effectiveBlockedKind(blocked: BlockedState): BlockedKind {
+  return blocked.kind ?? classifyBlock(blocked.code);
+}
 
 export class JobStore {
   readonly jobsRoot: string;
@@ -113,6 +138,7 @@ export class JobStore {
 
   load(id: string): JobState {
     const job = readJsonFile<JobState>(this.path(id));
+    if (job.id !== safeToken(id)) throw new Error("job state identity does not match the requested Job");
     assertJob(job);
     assertRetryEvidence(job, this.root(job.id));
     assertReviewDemoEvidence(job, this.root(job.id));
@@ -189,13 +215,13 @@ export function nextPendingIssue(job: JobState) {
 }
 
 export function blockJob(job: JobState, code: string, message: string, detailsPath: string | null = null): JobState {
-  const replanRequired = REPLAN_CAUSES.has(code);
   return {
     ...job,
     status: "blocked",
     blocked: {
-      code: replanRequired ? REPLAN_REQUIRED_CODE : code,
-      message: replanRequired ? `${code}: ${message}` : message,
+      code,
+      kind: classifyBlock(code),
+      message,
       fromPhase: job.phase,
       createdAt: nowIso(),
       detailsPath,
@@ -206,7 +232,7 @@ export function blockJob(job: JobState, code: string, message: string, detailsPa
 
 export function retryBlockedJob(job: JobState, authorization?: RetryAuthorization, jobRoot?: string): JobState {
   if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
-  if (job.blocked.code === REPLAN_REQUIRED_CODE) {
+  if (effectiveBlockedKind(job.blocked) === "replan_required") {
     throw new ControllerError(REPLAN_REQUIRED_CODE, "This Job requires abort, a new Release Plan, and a new Job.");
   }
   if (!authorization) {
@@ -263,6 +289,10 @@ export function assertJob(job: JobState): void {
   }
   if (job.status === "blocked" && !job.blocked) throw new Error("blocked job has no blocked record");
   if (job.status !== "blocked" && job.blocked) throw new Error("non-blocked job has a blocked record");
+  if (job.blocked && job.blocked.kind !== undefined
+    && !["recoverable", "replan_required", "manual"].includes(job.blocked.kind)) {
+    throw new Error("job blocked kind is invalid");
+  }
   if (!Array.isArray(job.retryAuthorizations)) throw new Error("job retry authorizations are invalid");
   for (const authorization of job.retryAuthorizations) assertRetryAuthorization(authorization);
   if (job.status === "completed" && job.phase !== "complete") throw new Error("completed job must be in complete phase");
