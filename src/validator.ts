@@ -7,6 +7,7 @@ import type {
   ValidationCommandResult,
   ValidationReceipt,
 } from "./types.js";
+import { join } from "node:path";
 import { ControllerError } from "./errors.js";
 import { ensurePrivateDir, writeJsonAtomic } from "./fs-atomic.js";
 import { digestJson, newId, nowIso } from "./util.js";
@@ -70,6 +71,73 @@ export class Validator {
     }
     this.verified = result;
     return result;
+  }
+
+  async runDevelopmentGate(input: {
+    job: JobState;
+    validationsRoot: string;
+  }): Promise<{ path: string }> {
+    await this.preflight();
+    if (!input.job.baseSha) throw new Error("development gate requires the bound base SHA");
+    const id = newId("development-gate");
+    const root = ensurePrivateDir(join(input.validationsRoot, id));
+    const path = join(root, "result.json");
+    const execution = await this.executor.executeDevelopmentGate({
+      job: input.job,
+      validationId: id,
+      commands: this.config.validation.setup,
+      evidenceRoot: root,
+      sourceHeadSha: input.job.baseSha,
+      stdoutByteLimit: this.config.validation.maxStdoutBytes,
+      stderrByteLimit: this.config.validation.maxStderrBytes,
+      aggregateByteLimit: this.config.validation.maxAggregateBytes,
+    });
+    const commands = execution.results.map((entry, index) => ({
+      index,
+      stage: entry.stage,
+      command: entry.command.command,
+      timeoutMs: entry.command.timeoutMs ?? 30 * 60_000,
+      stdoutPath: entry.stdoutPath,
+      stderrPath: entry.stderrPath,
+      error: entry.error,
+      ...(entry.result ? {
+        exitCode: entry.result.exitCode,
+        signal: entry.result.signal,
+        timedOut: entry.result.timedOut,
+        outputLimitExceeded: entry.result.outputLimitExceeded,
+        stdoutBytes: entry.result.stdoutBytes,
+        stderrBytes: entry.result.stderrBytes,
+        stdoutSha256: entry.result.stdoutSha256,
+        stderrSha256: entry.result.stderrSha256,
+      } : {}),
+    }));
+    const identity = {
+      version: 1 as const,
+      id,
+      sourceHeadSha: input.job.baseSha,
+      sandboxPolicyDigest: execution.sandboxPolicyDigest,
+      bootstrapPolicyDigest: execution.bootstrapPolicyDigest,
+      integrityFailure: execution.integrityFailure,
+      commands,
+      createdAt: nowIso(),
+    };
+    writeJsonAtomic(path, { ...identity, digest: digestJson(identity) });
+
+    if (execution.integrityFailure === "bootstrap") {
+      throw new ControllerError("development_bootstrap_mutated_source", "Development Bootstrap changed the release source identity or Git-visible worktree.", path);
+    }
+    if (execution.integrityFailure === "setup") {
+      throw new ControllerError("development_setup_mutated_source", "Offline Development Setup changed the release source identity or Git-visible worktree.", path);
+    }
+    const failed = execution.results.find((entry) => entry.result === null || !commandPassed(entry.result));
+    if (failed?.stage === "bootstrap") {
+      const code = failed.result === null ? "development_bootstrap_policy_failed" : "development_bootstrap_failed";
+      throw new ControllerError(code, "Development Bootstrap did not complete successfully.", path);
+    }
+    if (failed) {
+      throw new ControllerError("development_setup_failed", "Offline Development Setup did not complete successfully.", path);
+    }
+    return { path };
   }
 
   async run(input: {
@@ -327,4 +395,3 @@ function assertV4Evidence(receipt: ValidationReceipt): boolean {
     && (bootstrap === null || (bootstrap.runs.length === receipt.commandCount
       && bootstrap.runs.every((entry) => commandPassed(entry) && entry.sourceIntegrityVerified)));
 }
-import { join } from "node:path";

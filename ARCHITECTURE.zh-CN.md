@@ -4,7 +4,10 @@
 
 ```text
 semantic Release Plan
-  → prepare: preflight + base/OPEN Issue admission + baseline
+  → prepare: preflight + base/OPEN Issue admission + exact worktree
+      → network-optional Development Bootstrap
+      → offline Development Setup
+      → clean source proof
   → implement: ordered fresh Workers
   → verify: Issue 或 Release authoritative validation
   → review: one fresh read-only aggregate review
@@ -14,6 +17,8 @@ semantic Release Plan
 ```
 
 `currentIssueNumber` 区分 Issue/Release verify；PR、CI gate 与 delivery authority 保存可恢复的 delivery 断点，不另建 session runtime。
+
+Prepare Gate 通过后才持久化 `phase=implement`。Gate 失败保留同一 Job 作为恢复锚点，但不会产生产品 Worker run、Worker result、commit、push、PR 或 GitHub mutation；显式 retry 从完整 Gate 重新开始。
 
 ## 语义边界
 
@@ -27,7 +32,7 @@ Planner 不传 Spec、Graph、decision、predecessor、waiver、Controller revis
 - Reviewer：`read-only`、network false，只审 exact aggregate candidate。
 - Controller：唯一拥有 state、commit、push、PR、CI、auto-merge 与 merge facts。
 
-每条 validation command 在独立 disposable projection 内执行，隔离 HOME/TMP/cache，默认断网，并在命令后重验 candidate 文件。TMP 是该 command projection 专属、位于 candidate 根之外的私有 runtime sibling；bootstrap 与紧随其后的 semantic command 共享这一轮 runtime，但不同 command、Job 或 repository 不共享，validation run 结束时统一清理。Oracle command 必须匹配 trusted config，普通任务不要求独立 Oracle。
+Development Bootstrap 与 Offline Development Setup 在真实 Release Worktree 执行，隔离 HOME/TMP/cache，且只允许 `.gitignore` 已忽略的依赖产物留下。Bootstrap 使用既有网络配置，setup 强制断网。之后每条 validation command 仍在独立 disposable projection 内执行，默认断网，并在命令后重验 candidate 文件；每个 projection 会独立运行配置的 bootstrap。Oracle command 必须匹配 trusted config，普通任务不要求独立 Oracle。
 
 PR 前 candidate 必须 clean、通过 Release validation、aggregate review 与 required Demo（若配置），并且 remote base 未漂移。required checks 绑定 exact candidate 和 app/workflow identity；成功后 Controller 用 `--match-head-commit` 授权 auto-merge。merge 后不再轮询 CI，只验证 PR/merge identity、远端祖先关系与 merge tree。
 

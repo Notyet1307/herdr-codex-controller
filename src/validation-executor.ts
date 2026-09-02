@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { GitPort } from "./ports.js";
 import type { JobState, ValidationBootstrapConfig, ValidationCommandConfig } from "./types.js";
 import type { SandboxProvider } from "./validation-sandbox.js";
@@ -149,6 +149,132 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
     } finally {
       if (listening) await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
       rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+
+  async executeDevelopmentGate(input: {
+    job: JobState;
+    validationId: string;
+    commands: ValidationCommandConfig[];
+    evidenceRoot: string;
+    sourceHeadSha: string;
+    stdoutByteLimit: number;
+    stderrByteLimit: number;
+    aggregateByteLimit: number;
+  }) {
+    this.recover(resolve(input.evidenceRoot, ".."));
+    const jobRoot = ensurePrivateDir(join(this.sandboxRoot, safeToken(input.job.id)));
+    const sandboxRunRoot = resolve(jobRoot, safeToken(input.validationId));
+    if (existsSync(sandboxRunRoot) || !pathWithin(jobRoot, sandboxRunRoot)) {
+      throw new Error("development sandbox run identity is unsafe or already exists");
+    }
+    ensurePrivateDir(sandboxRunRoot);
+    const markerPath = join(input.evidenceRoot, "sandbox.json");
+    writeJsonAtomic(markerPath, cleanupMarker({
+      sandboxRunRoot,
+      workspace: input.job.worktreePath,
+      policyDigest: this.provider.policyDigest,
+      state: "pending",
+      createdAt: nowIso(),
+      cleanedAt: null,
+    }));
+    const results: Array<{
+      stage: "bootstrap" | "setup";
+      command: ValidationCommandConfig | ValidationBootstrapConfig;
+      stdoutPath: string;
+      stderrPath: string;
+      result: Awaited<ReturnType<SandboxProvider["run"]>> | null;
+      error: string | null;
+    }> = [];
+    let aggregateOutputBytes = 0;
+    let integrityFailure: "bootstrap" | "setup" | null = null;
+    let executionError: unknown = null;
+    try {
+      if (!(await this.developmentSourceIsIntact(input.job, input.sourceHeadSha))) {
+        integrityFailure = "setup";
+      }
+      const commands: Array<{
+        stage: "bootstrap" | "setup";
+        config: ValidationCommandConfig | ValidationBootstrapConfig;
+        provider: SandboxProvider;
+      }> = [
+        ...(this.bootstrap ? [{ stage: "bootstrap" as const, config: this.bootstrap.config, provider: this.bootstrap.provider }] : []),
+        ...input.commands.map((config) => ({ stage: "setup" as const, config, provider: this.provider })),
+      ];
+      for (let index = 0; integrityFailure === null && index < commands.length; index += 1) {
+        const entry = commands[index]!;
+        if (!(await this.developmentSourceIsIntact(input.job, input.sourceHeadSha))) {
+          integrityFailure = entry.stage;
+          break;
+        }
+        const prefix = `${String(index + 1).padStart(2, "0")}.${entry.stage}`;
+        const stdoutPath = join(input.evidenceRoot, `${prefix}.stdout.log`);
+        const stderrPath = join(input.evidenceRoot, `${prefix}.stderr.log`);
+        let result: Awaited<ReturnType<SandboxProvider["run"]>> | null = null;
+        let error: string | null = null;
+        try {
+          result = await entry.provider.run({
+            runRoot: sandboxRunRoot,
+            workspace: input.job.worktreePath,
+            command: entry.config.command,
+            environment: {
+              HERDR_RELEASE_ID: input.job.id,
+              HERDR_ISSUE_NUMBER: "",
+              HERDR_CANDIDATE_SHA: input.sourceHeadSha,
+            },
+            timeoutMs: entry.config.timeoutMs ?? 30 * 60_000,
+            stdoutPath,
+            stderrPath,
+            stdoutByteLimit: input.stdoutByteLimit,
+            stderrByteLimit: input.stderrByteLimit,
+            aggregateByteLimit: Math.max(0, input.aggregateByteLimit - aggregateOutputBytes),
+          });
+          aggregateOutputBytes += result.stdoutBytes + result.stderrBytes;
+        } catch (caught) {
+          error = (caught instanceof Error ? caught.message : String(caught)).slice(0, 4_000);
+        }
+        results.push({ stage: entry.stage, command: entry.config, stdoutPath, stderrPath, result, error });
+        if (!(await this.developmentSourceIsIntact(input.job, input.sourceHeadSha))) {
+          integrityFailure = entry.stage;
+          break;
+        }
+        if (result === null || !commandPassed(result)) break;
+      }
+      return {
+        results,
+        integrityFailure,
+        sandboxPolicyDigest: this.provider.policyDigest,
+        bootstrapPolicyDigest: this.bootstrapPolicyDigest,
+      };
+    } catch (error) {
+      executionError = error;
+      throw error;
+    } finally {
+      try {
+        rmSync(sandboxRunRoot, { recursive: true, force: true });
+        writeJsonAtomic(markerPath, cleanupMarker({
+          sandboxRunRoot,
+          workspace: input.job.worktreePath,
+          policyDigest: this.provider.policyDigest,
+          state: "clean",
+          createdAt: readMarker(markerPath).createdAt,
+          cleanedAt: nowIso(),
+        }));
+      } catch (cleanupError) {
+        if (executionError === null) throw cleanupError;
+      }
+    }
+  }
+
+  private async developmentSourceIsIntact(job: JobState, expectedHead: string): Promise<boolean> {
+    try {
+      await this.git.remoteIdentity();
+      await this.git.verifyWorktree(job);
+      return await this.git.head(job.worktreePath) === expectedHead
+        && await this.git.branch(job.worktreePath) === job.branch
+        && await this.git.isClean(job.worktreePath);
+    } catch {
+      return false;
     }
   }
 
@@ -331,14 +457,15 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
       if (!existsSync(markerPath)) continue;
       const marker = readMarker(markerPath);
       if (marker.state === "clean") continue;
-      if (!pathWithin(this.sandboxRoot, marker.sandboxRunRoot)
-        || !pathWithin(marker.sandboxRunRoot, marker.workspace)) {
+      const sandboxRunRoot = resolve(marker.sandboxRunRoot);
+      if (dirname(dirname(sandboxRunRoot)) !== this.sandboxRoot
+        || basename(sandboxRunRoot) !== safeToken(entry.name)) {
         throw new Error("validation sandbox cleanup marker escapes its configured root");
       }
-      if (existsSync(marker.sandboxRunRoot)) {
-        const stat = lstatSync(marker.sandboxRunRoot);
+      if (existsSync(sandboxRunRoot)) {
+        const stat = lstatSync(sandboxRunRoot);
         if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("validation sandbox cleanup target is unsafe");
-        rmSync(marker.sandboxRunRoot, { recursive: true, force: true });
+        rmSync(sandboxRunRoot, { recursive: true, force: true });
       }
       writeJsonAtomic(markerPath, cleanupMarker({
         sandboxRunRoot: marker.sandboxRunRoot,

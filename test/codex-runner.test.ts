@@ -80,6 +80,16 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
     const execution = await runner.run({ job, kind: "worker", issueNumber: 1, prompt: "Implement the fixture.", runsRoot: store.runsRoot(job.id) });
     assert.equal(execution.workerResult?.status, "completed");
     const args = JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+    const offlineRuntimeInvariants = [
+      "--ignore-user-config",
+      "sandbox_workspace_write.network_access=false",
+      "mcp_servers={}",
+      "hooks={}",
+      "plugins={}",
+      "features.plugins=false",
+      'shell_environment_policy.inherit="none"',
+    ];
+    for (const invariant of offlineRuntimeInvariants) assert.ok(args.includes(invariant));
     assert.deepEqual(args.slice(0, 3), ["--ask-for-approval", "never", "exec"]);
     assert.ok(args.includes("--ephemeral"));
     assert.ok(args.includes("--ignore-user-config"));
@@ -117,6 +127,7 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
         runsRoot: store.runsRoot(job.id),
       });
       const writingArgs = JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+      for (const invariant of offlineRuntimeInvariants) assert.ok(writingArgs.includes(invariant));
       assert.equal(optionValue(writingArgs, "--model"), "gpt-5.6-terra");
       assert.ok(writingArgs.includes('model_reasoning_effort="high"'));
       assert.ok(!writingArgs.includes("gpt-5.6-sol"));
@@ -131,6 +142,7 @@ test("CodexRunner uses fresh structured non-interactive execution with least-pri
     });
     assert.equal(review.reviewResult?.status, "pass");
     const reviewArgs = JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+    for (const invariant of offlineRuntimeInvariants) assert.ok(reviewArgs.includes(invariant));
     assert.ok(reviewArgs.includes("read-only"));
     assert.equal(optionValue(reviewArgs, "--model"), "gpt-5.6-sol");
     assert.ok(reviewArgs.includes('model_reasoning_effort="max"'));

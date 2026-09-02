@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import type { CommandResult, ControllerConfig } from "./types.js";
@@ -69,10 +69,15 @@ export class CodexSandboxProvider implements SandboxProvider {
       profile: profileTemplate(this.deniedRoots, config.networkAccess ?? false),
       isolatedTemporaryDirectory: {
         location: "validation-run-sibling",
-        scope: "command-projection",
+        scope: "sandbox-invocation",
         access: "write",
         cleanup: "validation-run",
       },
+      isolatedHomeAndCache: {
+        location: "validation-run-sibling",
+        cleanup: "validation-run",
+      },
+      workspaceGitMetadata: "deny-safe-file-when-present",
       nodeStdioShimSha256: sha256PrefixedUtf8(NODE_STDIO_SHIM),
       environmentPath: config.environmentPath,
       shell: config.shell,
@@ -83,19 +88,28 @@ export class CodexSandboxProvider implements SandboxProvider {
   async run(input: SandboxRunInput): Promise<CommandResult> {
     const runRoot = realpathSync(input.runRoot);
     const workspace = realpathSync(input.workspace);
-    if (!pathWithin(runRoot, workspace)) throw new Error("validation workspace escapes its private run root");
+    if (pathWithin(workspace, runRoot)) throw new Error("validation runtime root must stay outside its workspace");
     const runtimeRoot = resolve(runRoot, "runtime", basename(workspace));
-    if (!pathWithin(runRoot, runtimeRoot) || pathWithin(workspace, runtimeRoot)) {
+    if (!pathWithin(runRoot, runtimeRoot) || pathWithin(workspace, runtimeRoot) || pathWithin(runtimeRoot, workspace)) {
       throw new Error("validation runtime root is outside its private command scope");
     }
     const profileRoot = ensurePrivateDir(join(runtimeRoot, "sandbox-profile"));
-    const isolatedHome = ensurePrivateDir(join(workspace, ".herdr-home"));
+    const isolatedHome = ensurePrivateDir(join(runtimeRoot, "home"));
     const isolatedTmp = ensurePrivateDir(join(runtimeRoot, "tmp"));
-    const cacheRoot = ensurePrivateDir(join(workspace, ".herdr-cache"));
+    const cacheRoot = ensurePrivateDir(join(runtimeRoot, "cache"));
+    const gitMetadata = join(workspace, ".git");
+    const deniedRoots = [...this.deniedRoots];
+    if (existsSync(gitMetadata)) {
+      const stat = lstatSync(gitMetadata);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+        throw new Error("validation workspace Git metadata pointer is unsafe");
+      }
+      deniedRoots.push(gitMetadata);
+    }
     const nodeStdioShim = join(profileRoot, "node-stdio.cjs");
     writeTextAtomic(
       join(profileRoot, "config.toml"),
-      profileTemplate(this.deniedRoots, this.config.networkAccess ?? false, isolatedTmp),
+      profileTemplate(deniedRoots, this.config.networkAccess ?? false, runtimeRoot),
     );
     writeTextAtomic(nodeStdioShim, NODE_STDIO_SHIM);
     const environment = sandboxEnvironment({
@@ -207,9 +221,9 @@ function sensitiveRoots(additional: string[]): string[] {
   return canonical.filter((entry, index) => !canonical.slice(0, index).some((parent) => pathWithin(parent, entry)));
 }
 
-function profileTemplate(deniedRoots: string[], networkAccess: boolean, isolatedTmp?: string): string {
+function profileTemplate(deniedRoots: string[], networkAccess: boolean, isolatedRuntimeRoot?: string): string {
   const denied = deniedRoots.map((entry) => `${tomlString(entry)} = "deny"`).join("\n");
-  const temporary = isolatedTmp ? `${tomlString(isolatedTmp)} = "write"\n` : "";
+  const runtime = isolatedRuntimeRoot ? `${tomlString(isolatedRuntimeRoot)} = "write"\n` : "";
   return `default_permissions = "validation"
 
 [permissions.validation]
@@ -217,7 +231,7 @@ extends = ":read-only"
 
 [permissions.validation.filesystem]
 ${denied}
-${temporary}
+${runtime}
 [permissions.validation.filesystem.":workspace_roots"]
 "." = "write"
 

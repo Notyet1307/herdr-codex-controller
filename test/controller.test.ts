@@ -52,6 +52,13 @@ function evidencePaths(root: string, name: string): string[] {
     .sort();
 }
 
+function ignoreDevelopmentDependencies(repo: ReturnType<typeof createTestRepo>): void {
+  writeFileSync(join(repo.source, ".gitignore"), "node_modules/\n", "utf8");
+  git(repo.source, ["add", ".gitignore"]);
+  git(repo.source, ["commit", "-m", "ignore prepared dependencies"]);
+  git(repo.source, ["push", "origin", "main"]);
+}
+
 test("two ordered Issues use fresh Workers, one aggregate review, and Controller-owned commits", async () => {
   const repo = createTestRepo();
   try {
@@ -61,7 +68,7 @@ test("two ordered Issues use fresh Workers, one aggregate review, and Controller
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient);
-    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     const final = await runToPhase(controller, store, job.id, "deliver");
     assert.equal(final.status, "running");
@@ -91,7 +98,7 @@ test("bootstrap config drift is rejected before release side effects", async () 
       git: gitClient,
       github: new FakeGitHub(),
       codex: new FakeCodex(gitClient),
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     config.validation.bootstrap!.command = "changed-after-job-creation";
@@ -101,6 +108,184 @@ test("bootstrap config drift is rejected before release side effects", async () 
     assert.equal(result.action, "blocked");
     assert.equal(blocked.blocked?.code, "config_drift");
     assert.equal(existsSync(created.worktreePath), false);
+  } finally { repo.cleanup(); }
+});
+
+test("Development Bootstrap failure blocks in prepare before any Worker run", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: { command: "exit 17", timeoutMs: 10_000, networkAccess: false },
+        setup: [{ command: "true" }],
+      } as any,
+    });
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const codex = new FakeCodex(gitClient);
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+
+    const result = await controller.step(created.id);
+    const blocked = store.load(created.id);
+
+    assert.equal(result.action, "blocked");
+    assert.equal(blocked.phase, "prepare");
+    assert.equal(blocked.blocked?.code, "development_bootstrap_failed");
+    assert.equal(blocked.runs.length, 0);
+    assert.equal(codex.calls.length, 0);
+    assert.equal(existsSync(join(blocked.worktreePath, "issue-1.txt")), false);
+    assert.equal(existsSync(blocked.blocked!.detailsPath!), true);
+  } finally { repo.cleanup(); }
+});
+
+test("Development Gate permits ignored dependencies and enters implement with an unchanged clean HEAD", async () => {
+  const repo = createTestRepo();
+  try {
+    ignoreDevelopmentDependencies(repo);
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: {
+          command: "if printf forbidden >> .git 2>/dev/null; then exit 97; fi; printf home > \"$HOME/bootstrap-home\" && printf cache > \"$XDG_CACHE_HOME/bootstrap-cache\" && mkdir -p node_modules && printf prepared > node_modules/dependency",
+          timeoutMs: 10_000,
+          networkAccess: false,
+        },
+        setup: [{ command: "test -f node_modules/dependency" }],
+      } as any,
+    });
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const codex = new FakeCodex(gitClient);
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+
+    const result = await controller.step(created.id);
+    const prepared = store.load(created.id);
+
+    assert.equal(result.action, "release_prepared");
+    assert.equal(prepared.phase, "implement");
+    assert.equal(await gitClient.head(prepared.worktreePath), plan.baseSha);
+    assert.equal(await gitClient.isClean(prepared.worktreePath), true);
+    assert.equal(existsSync(join(prepared.worktreePath, "node_modules", "dependency")), true);
+    assert.equal(prepared.runs.length, 0);
+    assert.equal(codex.calls.length, 0);
+  } finally { repo.cleanup(); }
+});
+
+test("Development Bootstrap source pollution fails closed before any Worker run", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: { command: "printf polluted > README.md", timeoutMs: 10_000, networkAccess: false },
+        setup: [{ command: "true" }],
+      } as any,
+    });
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const codex = new FakeCodex(gitClient);
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+
+    await controller.step(created.id);
+    const blocked = store.load(created.id);
+
+    assert.equal(blocked.blocked?.code, "development_bootstrap_mutated_source");
+    assert.equal(blocked.phase, "prepare");
+    assert.equal(blocked.runs.length, 0);
+    assert.equal(codex.calls.length, 0);
+    assert.equal(await gitClient.isClean(blocked.worktreePath), false);
+    assert.equal(existsSync(blocked.blocked!.detailsPath!), true);
+  } finally { repo.cleanup(); }
+});
+
+test("Offline Development Setup source pollution fails closed before any Worker run", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo, {
+      validation: {
+        setup: [{ command: "printf polluted > README.md" }],
+      } as any,
+    });
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const codex = new FakeCodex(gitClient);
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+
+    await controller.step(created.id);
+    const blocked = store.load(created.id);
+
+    assert.equal(blocked.blocked?.code, "development_setup_mutated_source");
+    assert.equal(blocked.phase, "prepare");
+    assert.equal(blocked.runs.length, 0);
+    assert.equal(codex.calls.length, 0);
+    assert.equal(await gitClient.isClean(blocked.worktreePath), false);
+  } finally { repo.cleanup(); }
+});
+
+test("explicit retry reruns the complete Development Gate before the first Worker", async () => {
+  const repo = createTestRepo();
+  try {
+    ignoreDevelopmentDependencies(repo);
+    const config = testConfig(repo, {
+      validation: {
+        bootstrap: {
+          command: "mkdir -p node_modules && printf x >> node_modules/bootstrap-runs",
+          timeoutMs: 10_000,
+          networkAccess: false,
+        },
+        setup: [{ command: "printf s >> node_modules/setup-runs; test -f node_modules/setup-ready" }],
+      } as any,
+    });
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const codex = new FakeCodex(gitClient);
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+
+    await controller.step(created.id);
+    let job = store.load(created.id);
+    assert.equal(job.blocked?.code, "development_setup_failed");
+    assert.equal(readFileSync(join(job.worktreePath, "node_modules", "bootstrap-runs"), "utf8"), "x");
+    assert.equal(readFileSync(join(job.worktreePath, "node_modules", "setup-runs"), "utf8"), "s");
+    assert.equal(codex.calls.length, 0);
+
+    writeFileSync(join(job.worktreePath, "node_modules", "setup-ready"), "ready\n", "utf8");
+    const evidencePath = join(store.root(job.id), "environment-restored.json");
+    const evidence = "{\"setup\":\"ready\"}\n";
+    writeFileSync(evidencePath, evidence, "utf8");
+    job = retryBlockedJob(job, {
+      previousBlockedCode: "development_setup_failed",
+      previousBlockedPhase: "prepare",
+      previousDetailsPath: job.blocked?.detailsPath ?? null,
+      operatorReason: "The synthetic setup dependency is now available.",
+      recoveryEvidencePath: evidencePath,
+      evidenceDigest: sha256(evidence),
+      authorizedAt: "2026-09-02T00:00:00.000Z",
+    }, store.root(job.id));
+    store.save(job);
+
+    const prepared = await controller.step(job.id);
+    job = store.load(job.id);
+    assert.equal(prepared.action, "release_prepared");
+    assert.equal(job.phase, "implement");
+    assert.equal(readFileSync(join(job.worktreePath, "node_modules", "bootstrap-runs"), "utf8"), "xx");
+    assert.equal(readFileSync(join(job.worktreePath, "node_modules", "setup-runs"), "utf8"), "ss");
+    assert.equal(codex.calls.length, 0);
+
+    await controller.step(job.id);
+    assert.equal(codex.calls.filter((call) => call.kind === "worker").length, 1);
   } finally { repo.cleanup(); }
 });
 
@@ -136,7 +321,7 @@ test("failed Issue validation schedules one fresh repair over the preserved work
       }
       return { review: { status: "pass", summary: "pass", findings: [] } };
     });
-    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     const final = await runToPhase(controller, store, job.id, "deliver");
     assert.equal(final.status, "running");
@@ -182,7 +367,7 @@ test("blocking aggregate review triggers one hardening commit, full revalidation
       }
       return {};
     });
-    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     const final = await runToPhase(controller, store, job.id, "deliver");
     assert.equal(final.status, "running");
@@ -216,7 +401,7 @@ test("semantically inconsistent aggregate review is rejected before push or PR c
     const codex = new FakeCodex(gitClient, async ({ kind }) => kind === "review"
       ? { review: { status: "changes", summary: "inconsistent", findings: [minor] } }
       : {});
-    const controller = new ReleaseController({ store, git: gitClient, github, codex, validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github, codex, validator: new Validator(config, gitClient) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     const final = await runToTerminal(controller, store, created.id);
     assert.equal(final.status, "blocked");
@@ -280,7 +465,7 @@ test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", asy
       git: gitClient,
       github: new FakeGitHub(),
       codex,
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({
       configPath,
@@ -359,7 +544,7 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
       git: gitClient,
       github: new FakeGitHub(),
       codex,
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({
       configPath,
@@ -413,7 +598,7 @@ test("release validation evidence remains exactly bound after hardening exhausti
       git: gitClient,
       github: new FakeGitHub(),
       codex: new FakeCodex(gitClient),
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({
       configPath,
@@ -468,7 +653,7 @@ test("release validation writes stay disposable and cannot mutate the candidate 
       git: gitClient,
       github: new FakeGitHub(),
       codex: new FakeCodex(gitClient),
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({
       configPath,
@@ -533,7 +718,7 @@ test("latest blocking review and run remain exactly bound after hardening exhaus
       git: gitClient,
       github: new FakeGitHub(),
       codex,
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({
       configPath,
@@ -593,7 +778,7 @@ test("validated review evidence is checkpointed before post-run worktree policy"
       git: gitClient,
       github: new FakeGitHub(),
       codex,
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({
       configPath,
@@ -815,7 +1000,7 @@ test("an interrupted Worker run is reconciled as a fresh recovery run without se
     const store = new JobStore(config);
     const gitClient = new TestGitClient(config);
     const codex = new FakeCodex(gitClient);
-    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     await controller.step(job.id); // prepare
     let active = store.load(job.id);
@@ -884,7 +1069,7 @@ test("production completes only after exact candidate, required checks, and merg
       override async enableAutoMerge() { this.autoMergeEnabled = true; }
     }
     const github = new DeliveryGitHub();
-    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let observed = store.load(job.id);
     for (let index = 0; index < 100 && observed.deliveryAuthority?.status !== "authorized"; index += 1) {
@@ -975,7 +1160,7 @@ test("auto-merge receives the exact reviewed candidate identity", async () => {
       git: gitClient,
       github,
       codex: new FakeCodex(gitClient),
-      validator: new Validator(config),
+      validator: new Validator(config, gitClient),
     });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let observed = store.load(created.id);
@@ -1082,7 +1267,7 @@ test("a merged PR without Controller authority is rejected before Result creatio
         }
       }
       const gitClient = new TestGitClient(config);
-      const controller = new ReleaseController({ store, git: gitClient, github: new MergedSourceGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+      const controller = new ReleaseController({ store, git: gitClient, github: new MergedSourceGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
       const result = await controller.step(job.id);
       const blocked = store.load(job.id);
       assert.equal(result.action, "blocked", scenario);
@@ -1141,7 +1326,7 @@ test("required check missing, pending, or failed never authorizes merge", async 
         }
       }
       const gitClient = new TestGitClient(config);
-      const controller = new ReleaseController({ store, git: gitClient, github: new ChecksGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+      const controller = new ReleaseController({ store, git: gitClient, github: new ChecksGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
       const result = await controller.step(job.id);
       assert.equal(result.action, scenario.action);
       const observed = store.load(job.id);
@@ -1177,7 +1362,7 @@ test("auto-merge fails closed when GitHub cannot prove latest-base protection", 
     }
     const github = new UnprotectedGitHub();
     const gitClient = new TestGitClient(config);
-    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     const blocked = await runToTerminal(controller, store, job.id);
     assert.equal(blocked.blocked?.code, "base_up_to_date_policy_unverified");
@@ -1214,7 +1399,7 @@ test("delivery rejects an existing PR that targets the wrong base branch", async
     }
     const controller = new ReleaseController({
       store, git: gitClient, github: new WrongBaseGitHub(),
-      codex: new FakeCodex(gitClient), validator: new Validator(config),
+      codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient),
     });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     const final = await runToTerminal(controller, store, created.id);
@@ -1249,7 +1434,7 @@ test("abort revokes auto-merge and quarantines the exact remote branch", async (
         autoMergeEnabled = false;
       }
     }
-    const controller = new ReleaseController({ store, git: gitClient, github: new LifecycleGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new LifecycleGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.baseSha = plan.baseSha;
     job.candidateSha = candidateSha;
@@ -1304,7 +1489,7 @@ test("Issue text drift after admission does not invalidate an authorized Job", a
       override async disableAutoMerge() { autoMergeEnabled = false; disabled += 1; }
     }
     const github = new DriftGitHub();
-    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let job = store.load(created.id);
     for (let index = 0; index < 100 && job.deliveryAuthority?.status !== "authorized"; index += 1) {
@@ -1343,7 +1528,7 @@ test("revocation refuses a wrong PR identity", async () => {
         };
       }
     }
-    const controller = new ReleaseController({ store, git: gitClient, github: new WrongIdentityGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new WrongIdentityGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.baseSha = plan.baseSha;
     job.candidateSha = candidateSha;
@@ -1386,7 +1571,7 @@ test("revocation resumes after interruption between disable and quarantine", asy
       override async disableAutoMerge() { autoMergeEnabled = false; }
     }
     const github = new InterruptedLifecycleGitHub();
-    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     job.baseSha = plan.baseSha;
     job.candidateSha = candidateSha;
@@ -1396,7 +1581,7 @@ test("revocation resumes after interruption between disable and quarantine", asy
     store.save(job);
     await assert.rejects(() => controller.abort(job.id, "first abort"), (error: any) => error?.code === "delivery_authority_revocation_failed");
     assert.equal(store.load(job.id).deliveryAuthority?.status, "revocation_failed");
-    job = await new ReleaseController({ store: new JobStore(config), git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) }).abort(job.id, "resume abort");
+    job = await new ReleaseController({ store: new JobStore(config), git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) }).abort(job.id, "resume abort");
     assert.equal(job.status, "failed");
     assert.equal(job.deliveryAuthority?.status, "revoked");
     assert.equal(job.pullRequest?.state, "OPEN");
@@ -1429,7 +1614,7 @@ test("missing and pending required checks reach durable deadlines without resett
           };
         }
       }
-      const controller = new ReleaseController({ store, git: gitClient, github: new DeadlineGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+      const controller = new ReleaseController({ store, git: gitClient, github: new DeadlineGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
       let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       job.baseSha = plan.baseSha;
       job.candidateSha = candidateSha;
@@ -1492,7 +1677,7 @@ test("CI code and infrastructure failures consume separate budgets and only code
         }
         override async rerunCheck(_check: any, sha: string) { assert.equal(sha, candidateSha); reruns += 1; }
       }
-      const controller = new ReleaseController({ store, git: gitClient, github: new ClassifiedGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+      const controller = new ReleaseController({ store, git: gitClient, github: new ClassifiedGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
       let job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       job.baseSha = plan.baseSha;
       job.candidateSha = candidateSha;
@@ -1546,7 +1731,7 @@ test("a Controller hardening commit is salvaged after a crash before job state u
       }
       return {};
     });
-    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     let job = store.load(created.id);
     for (let index = 0; index < 100 && job.phase !== "repair"; index += 1) {

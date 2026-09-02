@@ -47,7 +47,7 @@ cp examples/release-plan.example.json /PRIVATE/PATH/release-plan.json
 
 Config v4 只保留操作者真实选择：路径、timeout、输出限制、validation commands、变更/repair budget、required-check identity、merge method 与 poll interval。Review、critical/major 阻断、PR、required checks、exact-head auto-merge、禁用 custom profile、Worker/Reviewer 断网均为代码不变量。
 
-可选 `validation.bootstrap` 是 Controller 私有 HOW：它在每一条 setup、Issue 或 Release command 的全新 disposable projection 中先运行，立即重验 tracked candidate，再由断网 validation policy 执行原始 semantic command 并再次重验。每条 command 的 TMP 是 candidate 根之外的私有 runtime sibling；bootstrap 与对应 semantic command 共享该 runtime，但不同 command、Job 或 repository 不共享。`validation.setup` 是 baseline validation，不是依赖缓存。推荐 Node 项目使用 `npm ci --ignore-scripts --no-audit --no-fund`，仅 bootstrap 可按配置联网；bootstrap 不进入 Plan、`oracleCommands` 或 `commandSetDigest`。
+可选 `validation.bootstrap` 是 Controller 私有 HOW。Prepare Gate 在真实 Release Worktree 中执行一次 bootstrap，再由断网 policy 执行 `validation.setup`；它们前后都重验 HEAD、branch、remote 与 Git-visible clean，只有被忽略的依赖/cache 可以留下。后续每条 Issue 或 Release semantic command 仍在全新 disposable projection 中先独立运行 bootstrap，再断网验证 candidate。推荐 Node 项目使用 `npm ci --ignore-scripts --no-audit --no-fund`；bootstrap 不进入 Plan、`oracleCommands` 或 semantic `commandSetDigest`。
 
 新 validation 写入 Receipt v4，分别绑定 validation/bootstrap policy、每轮 bootstrap 有界结果、两次 source-integrity 检查和 cleanup。历史 v2/v3 receipt 只读兼容。
 

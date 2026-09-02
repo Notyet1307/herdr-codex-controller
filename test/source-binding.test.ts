@@ -37,7 +37,7 @@ test("admission verifies exact base and every Parent/Child is open before creati
     const store = new JobStore(config);
     const gitClient = new CountingGit(config);
     const github = new SourceGitHub();
-    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     const result = await controller.step(created.id);
     assert.equal(result.action, "release_prepared");
@@ -60,7 +60,7 @@ test("base or Issue state drift fails before Worktree, validation, or Codex", as
       const store = new JobStore(config);
       const gitClient = new CountingGit(config, scenario === "base" ? "f".repeat(40) : null);
       const codex = new FakeCodex(gitClient);
-      const controller = new ReleaseController({ store, git: gitClient, github: new SourceGitHub(changes), codex, validator: new Validator(config) });
+      const controller = new ReleaseController({ store, git: gitClient, github: new SourceGitHub(changes), codex, validator: new Validator(config, gitClient) });
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       const result = await controller.step(created.id);
       assert.equal(result.action, "blocked", scenario);
@@ -82,7 +82,7 @@ test("Issue wording changes after admission do not invalidate the running Job", 
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new CountingGit(config);
-    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     await controller.step(created.id);
     changes.set(1, { title: "wording changed" });
@@ -114,7 +114,7 @@ test("remote base is rechecked before delivery and auto-merge authorization", as
         override async enableAutoMerge() { this.enabled = true; }
       }
       const github = new DeliveryGitHub();
-      const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config) });
+      const controller = new ReleaseController({ store, git: gitClient, github, codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
       const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
       let job = store.load(created.id);
       for (let index = 0; index < 30 && (job.phase !== "deliver" || (boundary === "authorization" && job.pullRequest === null)); index += 1) {
@@ -143,7 +143,7 @@ test("Job reload rejects config or Plan digest drift", async () => {
     const { configPath, planPath } = writeInputs(repo, config, plan);
     const store = new JobStore(config);
     const gitClient = new CountingGit(config);
-    const controller = new ReleaseController({ store, git: gitClient, github: new SourceGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config) });
+    const controller = new ReleaseController({ store, git: gitClient, github: new SourceGitHub(), codex: new FakeCodex(gitClient), validator: new Validator(config, gitClient) });
     const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
     store.config.policy.maxChangedLines += 1;
     const result = await controller.step(created.id);
