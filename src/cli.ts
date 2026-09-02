@@ -62,14 +62,6 @@ async function main(): Promise<void> {
       if (active.length > 0) {
         throw new Error(`repository already has an active release job: ${active.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
       }
-      const startGit = new GitClient(config);
-      const startGithub = new GitHubClient(config);
-      const startCodex = new CodexRunner(config, startGit);
-      const startValidator = new Validator(config, startGit);
-      await startGit.preflight();
-      await startGithub.preflight();
-      await startCodex.preflight();
-      await startValidator.preflight();
       return store.create({
         configPath: resolve(configPath),
         planPath: resolve(planPath),

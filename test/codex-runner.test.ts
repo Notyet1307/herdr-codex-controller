@@ -10,6 +10,7 @@ import { JobStore } from "../src/state.js";
 import { digestJson } from "../src/util.js";
 import { createTestRepo, TestGitClient, testConfig, testPlan, writeInputs } from "./support.js";
 import { codexRuntimeControlArgs } from "../src/runtime-identity.js";
+import { ControllerError } from "../src/errors.js";
 
 test("canonical review status is derived from blocking findings", () => {
   const finding = {
@@ -57,6 +58,28 @@ test("fixed Codex config parses and excludes repository AGENTS from model input"
   } finally {
     rmSync(codexHome, { recursive: true, force: true });
   }
+});
+
+test("Codex preflight reports a stable recoverable cause without echoing provider secrets", async () => {
+  const repo = createTestRepo();
+  try {
+    const fake = join(repo.root, "failed-preflight-codex.mjs");
+    writeFileSync(fake, `#!/usr/bin/env node
+const args=process.argv.slice(2);
+if(args[0]==="--version"){console.log("codex-test");process.exit(0)}
+if(args[0]==="exec"&&args[1]==="--help"){console.log("--ignore-user-config --ignore-rules --output-schema --output-last-message");process.exit(0)}
+if(args[0]==="login"&&args[1]==="status"){console.error("PASSWORD=must-not-leak");process.exit(7)}
+process.exit(2);
+`, "utf8");
+    chmodSync(fake, 0o700);
+    const config = testConfig(repo, { codex: { ...testConfig(repo).codex, bin: fake } } as any);
+    await assert.rejects(
+      new CodexRunner(config, new TestGitClient(config)).preflight(),
+      (error: unknown) => error instanceof ControllerError
+        && error.code === "codex_preflight_failed"
+        && !error.message.includes("must-not-leak"),
+    );
+  } finally { repo.cleanup(); }
 });
 
 test("CodexRunner uses fresh structured non-interactive execution with least-privilege sandbox flags", async () => {

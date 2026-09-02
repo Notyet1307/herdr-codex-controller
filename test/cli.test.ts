@@ -35,6 +35,50 @@ test("CLI validates the semantic Plan and starts with one approved digest", () =
   } finally { repo.cleanup(); }
 });
 
+test("CLI start persists a retryable Job before Codex environment preflight", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan(repo, [1]);
+    const env = installPreflightFakes(repo, config, { codexLoginFails: true });
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    writeFileSync(configPath, `${JSON.stringify(configInput(config), null, 2)}\n`, "utf8");
+    const cli = resolve("dist/src/cli.js");
+    const run = (...args: string[]) => spawnSync("node", [cli, ...args], { cwd: resolve("."), env, encoding: "utf8" });
+
+    const start = run("start", "--config", configPath, "--plan", planPath, "--approve-plan", digestJson(plan), "--json");
+    assert.equal(start.status, 0, start.stderr);
+    const store = new JobStore(config);
+    let job = store.load(plan.id);
+    assert.equal(job.phase, "prepare");
+    assert.equal(job.status, "running");
+    assert.equal(existsSync(job.worktreePath), false);
+
+    const firstStep = run("step", "--config", configPath, "--job", plan.id, "--json");
+    assert.equal(firstStep.status, 0, firstStep.stderr);
+    assert.equal(JSON.parse(String(firstStep.stdout)).action, "blocked");
+    job = store.load(plan.id);
+    assert.equal(job.blocked?.code, "codex_preflight_failed");
+    assert.equal(job.blocked?.kind, "recoverable");
+    assert.equal(job.runs.length, 0);
+    assert.equal(existsSync(job.worktreePath), false);
+
+    const retry = run("retry", "--config", configPath, "--job", plan.id, "--reason", "Provider login will be checked again.", "--evidence", planPath, "--json");
+    assert.equal(retry.status, 0, retry.stderr);
+    job = store.load(plan.id);
+    assert.equal(job.status, "running");
+    assert.equal(job.phase, "prepare");
+    assert.equal(job.retryAuthorizations.length, 1);
+
+    assert.equal(run("step", "--config", configPath, "--job", plan.id, "--json").status, 0);
+    job = store.load(plan.id);
+    assert.equal(job.blocked?.code, "codex_preflight_failed");
+    assert.equal(job.retryAuthorizations.length, 1);
+    assert.equal(job.runs.length, 0);
+    assert.equal(existsSync(job.worktreePath), false);
+  } finally { repo.cleanup(); }
+});
+
 test("CLI rejects invalid and legacy start approvals before Job creation", () => {
   const repo = createTestRepo();
   try {
@@ -183,7 +227,11 @@ test("public status is bounded, redacted, mode-exclusive, and legacy read-only",
   } finally { repo.cleanup(); }
 });
 
-function installPreflightFakes(repo: ReturnType<typeof createTestRepo>, config: ReturnType<typeof testConfig>) {
+function installPreflightFakes(
+  repo: ReturnType<typeof createTestRepo>,
+  config: ReturnType<typeof testConfig>,
+  options: { codexLoginFails?: boolean } = {},
+) {
   const bin = join(repo.root, "preflight-bin");
   mkdirSync(bin, { mode: 0o700 });
   const codex = join(bin, "codex");
@@ -191,7 +239,7 @@ function installPreflightFakes(repo: ReturnType<typeof createTestRepo>, config: 
 const a=process.argv.slice(2);
 if(a[0]==="--version"){console.log("codex-test");process.exit(0)}
 if(a[0]==="exec"&&a[1]==="--help"){console.log("--ignore-user-config --ignore-rules --output-schema --output-last-message");process.exit(0)}
-if(a[0]==="login"&&a[1]==="status"){console.log("logged in");process.exit(0)}
+if(a[0]==="login"&&a[1]==="status"){${options.codexLoginFails ? 'console.error("PASSWORD=must-not-leak");process.exit(7)' : 'console.log("logged in");process.exit(0)'}}
 process.exit(2);
 `, "utf8");
   chmodSync(codex, 0o700);
