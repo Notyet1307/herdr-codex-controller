@@ -111,6 +111,36 @@ test("bootstrap config drift is rejected before release side effects", async () 
   } finally { repo.cleanup(); }
 });
 
+test("Codex preflight failure is recoverable and blocks before Worktree or Worker", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    class FailedPreflightCodex extends FakeCodex {
+      override async preflight(): Promise<void> {
+        throw new ControllerError("codex_preflight_failed", "Codex preflight failed.");
+      }
+    }
+    const codex = new FailedPreflightCodex(gitClient);
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+
+    const result = await controller.step(created.id);
+    const blocked = store.load(created.id);
+
+    assert.equal(result.action, "blocked");
+    assert.equal(blocked.blocked?.code, "codex_preflight_failed");
+    assert.equal(blocked.blocked?.kind, "recoverable");
+    assert.equal(blocked.phase, "prepare");
+    assert.equal(blocked.runs.length, 0);
+    assert.equal(codex.calls.length, 0);
+    assert.equal(existsSync(blocked.worktreePath), false);
+  } finally { repo.cleanup(); }
+});
+
 test("Development Bootstrap failure blocks in prepare before any Worker run", async () => {
   const repo = createTestRepo();
   try {
@@ -856,6 +886,7 @@ test("Controller classifies deterministic Plan drift, environment failures, and 
       ["development_setup_failed", "recoverable"],
       ["validation_sandbox_capability_unavailable", "recoverable"],
       ["codex_worker_failed", "recoverable"],
+      ["codex_preflight_failed", "recoverable"],
       ["ci_infrastructure_exhausted", "recoverable"],
       ["development_bootstrap_policy_failed", "manual"],
       ["codex_worker_replan_required", "manual"],

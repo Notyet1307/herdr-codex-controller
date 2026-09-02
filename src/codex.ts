@@ -40,42 +40,49 @@ export class CodexRunner {
   ) {}
 
   async preflight(): Promise<void> {
-    const version = await runCommand({
-      command: this.config.codex.bin,
-      args: ["--version"],
-      cwd: this.config.localPath,
-      timeoutMs: 30_000,
-      maxTailBytes: 64 * 1024,
-      stdoutByteLimit: 64 * 1024,
-      stderrByteLimit: 64 * 1024,
-      aggregateByteLimit: 128 * 1024,
-    });
-    requireCommandSuccess(version, "codex --version");
-    const surface = await runCommand({
-      command: this.config.codex.bin,
-      args: ["exec", "--help"],
-      cwd: this.config.localPath,
-      timeoutMs: 30_000,
-      maxTailBytes: 128 * 1024,
-      stdoutByteLimit: 128 * 1024,
-      stderrByteLimit: 64 * 1024,
-      aggregateByteLimit: 192 * 1024,
-    });
-    requireCommandSuccess(surface, "codex exec --help");
-    for (const flag of ["--ignore-user-config", "--ignore-rules", "--output-schema", "--output-last-message"]) {
-      if (!surface.stdoutTail.includes(flag)) throw new Error(`Codex runtime does not support required flag ${flag}`);
+    try {
+      const version = await runCommand({
+        command: this.config.codex.bin,
+        args: ["--version"],
+        cwd: this.config.localPath,
+        timeoutMs: 30_000,
+        maxTailBytes: 64 * 1024,
+        stdoutByteLimit: 64 * 1024,
+        stderrByteLimit: 64 * 1024,
+        aggregateByteLimit: 128 * 1024,
+      });
+      requireCommandSuccess(version, "codex --version");
+      const surface = await runCommand({
+        command: this.config.codex.bin,
+        args: ["exec", "--help"],
+        cwd: this.config.localPath,
+        timeoutMs: 30_000,
+        maxTailBytes: 128 * 1024,
+        stdoutByteLimit: 128 * 1024,
+        stderrByteLimit: 64 * 1024,
+        aggregateByteLimit: 192 * 1024,
+      });
+      requireCommandSuccess(surface, "codex exec --help");
+      for (const flag of ["--ignore-user-config", "--ignore-rules", "--output-schema", "--output-last-message"]) {
+        if (!surface.stdoutTail.includes(flag)) throw new Error(`Codex runtime does not support required flag ${flag}`);
+      }
+      const auth = await runCommand({
+        command: this.config.codex.bin,
+        args: ["login", "status"],
+        cwd: this.config.localPath,
+        timeoutMs: 30_000,
+        maxTailBytes: 64 * 1024,
+        stdoutByteLimit: 64 * 1024,
+        stderrByteLimit: 64 * 1024,
+        aggregateByteLimit: 128 * 1024,
+      });
+      requireCommandSuccess(auth, "codex login status");
+    } catch {
+      throw new ControllerError(
+        "codex_preflight_failed",
+        "Codex CLI, Provider, or authentication preflight failed.",
+      );
     }
-    const auth = await runCommand({
-      command: this.config.codex.bin,
-      args: ["login", "status"],
-      cwd: this.config.localPath,
-      timeoutMs: 30_000,
-      maxTailBytes: 64 * 1024,
-      stdoutByteLimit: 64 * 1024,
-      stderrByteLimit: 64 * 1024,
-      aggregateByteLimit: 128 * 1024,
-    });
-    requireCommandSuccess(auth, "codex login status");
   }
 
   async run(input: {

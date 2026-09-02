@@ -37,6 +37,7 @@ const RECOVERABLE_CAUSES = new Set([
   "ci_infrastructure_exhausted",
   "codex_hardening_failed",
   "codex_hardening_recoverable",
+  "codex_preflight_failed",
   "codex_review_failed",
   "codex_worker_failed",
   "codex_worker_recoverable",
