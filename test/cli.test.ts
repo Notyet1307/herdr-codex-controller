@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { digestJson } from "../src/util.js";
 import { configInput, createTestRepo, git, testConfig, testPlan, writeInputs } from "./support.js";
+import { blockJob, JobStore } from "../src/state.js";
+import { publicStatus } from "../src/public-status.js";
 
 test("CLI validates the semantic Plan and starts with one approved digest", () => {
   const repo = createTestRepo();
@@ -72,6 +74,112 @@ test("CLI rejects unsupported contract majors and removed commands", () => {
       assert.notEqual(removed.status, 0);
       assert.match(String(removed.stderr), /unknown command/);
     }
+  } finally { repo.cleanup(); }
+});
+
+test("public status is bounded, redacted, mode-exclusive, and legacy read-only", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    created.baseSha = plan.baseSha;
+    store.save(created);
+    const cli = resolve("dist/src/cli.js");
+    const run = (...args: string[]) => spawnSync("node", [cli, ...args], { cwd: resolve("."), encoding: "utf8" });
+
+    const running = run("status", "--config", configPath, "--job", created.id, "--public", "--json");
+    assert.equal(running.status, 0, running.stderr);
+    const runningStatus = JSON.parse(String(running.stdout));
+    assert.deepEqual(Object.keys(runningStatus), [
+      "id", "status", "phase", "repo", "planDigest", "baseSha", "currentIssueNumber", "issues",
+      "candidateSha", "blocked", "result", "updatedAt", "legacy",
+    ]);
+    assert.equal(runningStatus.status, "running");
+    assert.equal(runningStatus.legacy, false);
+    assert.deepEqual(runningStatus.issues, [{ number: 1, status: "pending" }]);
+    const defaultStatus = JSON.parse(String(run("status", "--config", configPath, "--job", created.id, "--json").stdout));
+    const operator = JSON.parse(String(run("status", "--config", configPath, "--job", created.id, "--operator", "--json").stdout));
+    assert.equal(defaultStatus.worktreePath, created.worktreePath);
+    assert.equal(operator.activeRun, null);
+    assert.match(operator.nextAction, /Run step or run/u);
+
+    for (const [code, kind] of [
+      ["development_setup_failed", "recoverable"],
+      ["repair_scope_unattributed", "manual"],
+      ["plan_base_drift", "replan_required"],
+    ] as const) {
+      const view = publicStatus(config, blockJob(structuredClone(created), code, "bounded message"));
+      assert.equal(view.blocked?.code, code);
+      assert.equal(view.blocked?.kind, kind);
+    }
+
+    const completed = structuredClone(created);
+    completed.status = "completed";
+    completed.phase = "complete";
+    completed.candidateSha = "a".repeat(40);
+    completed.result = {
+      schema: "herdr-codex-controller:release-result:v1",
+      releaseId: completed.id,
+      planDigest: completed.planDigest,
+      status: "merged",
+      baseSha: plan.baseSha,
+      candidateSha: completed.candidateSha,
+      pullRequest: { number: 7, url: "https://github.com/example/project/pull/7" },
+      requiredChecks: { names: ["verify"], status: "passed" },
+      mergeSha: "b".repeat(40),
+      completedAt: "2026-09-02T00:00:00.000Z",
+    };
+    assert.deepEqual(publicStatus(config, completed).result, {
+      status: "merged",
+      mergeSha: "b".repeat(40),
+      completedAt: "2026-09-02T00:00:00.000Z",
+    });
+
+    let blocked = blockJob(
+      created,
+      "repair_scope_unattributed",
+      `${config.stateDir}/private TOKEN=top-secret password=hunter2 detailsPath=/Users/example/private`,
+      join(store.root(created.id), "private-details.json"),
+    );
+    store.save(blocked);
+    const redacted = run("status", "--config", configPath, "--job", created.id, "--public", "--json");
+    assert.equal(redacted.status, 0, redacted.stderr);
+    const redactedText = String(redacted.stdout);
+    assert.doesNotMatch(redactedText, /configPath|planPath|stateDir|worktreePath|promptPath|stderrPath|detailsPath|token|password|secret|\/Users\/|\/private\//iu);
+    assert.equal(JSON.parse(redactedText).blocked.kind, "manual");
+
+    blocked = store.load(created.id);
+    blocked.blocked = { ...blocked.blocked!, code: "replan_required" };
+    delete blocked.blocked.kind;
+    writeFileSync(store.path(created.id), `${JSON.stringify(blocked, null, 2)}\n`, "utf8");
+    const legacyBytes = readFileSync(store.path(created.id), "utf8");
+    const legacy = run("status", "--config", configPath, "--job", created.id, "--public", "--json");
+    assert.equal(legacy.status, 0, legacy.stderr);
+    assert.equal(readFileSync(store.path(created.id), "utf8"), legacyBytes);
+    assert.equal(JSON.parse(String(legacy.stdout)).legacy, true);
+    assert.equal(JSON.parse(String(legacy.stdout)).blocked.kind, "replan_required");
+    const legacyRetry = run("retry", "--config", configPath, "--job", created.id, "--reason", "retry", "--evidence", planPath, "--json");
+    assert.notEqual(legacyRetry.status, 0);
+    assert.match(String(legacyRetry.stderr), /replan_required/u);
+    assert.equal(readFileSync(store.path(created.id), "utf8"), legacyBytes);
+
+    const conflict = run("status", "--config", configPath, "--job", created.id, "--public", "--operator", "--json");
+    assert.notEqual(conflict.status, 0);
+    assert.match(String(conflict.stderr), /status_mode_conflict/u);
+    const missing = run("status", "--config", configPath, "--job", "not-started", "--public", "--json");
+    assert.notEqual(missing.status, 0);
+    assert.match(String(missing.stderr), /job_not_found/u);
+
+    const corrupt = JSON.parse(legacyBytes);
+    corrupt.id = "/Users/private/TOKEN=top-secret";
+    writeFileSync(store.path(created.id), `${JSON.stringify(corrupt, null, 2)}\n`, "utf8");
+    const rejected = run("status", "--config", configPath, "--job", created.id, "--public", "--json");
+    assert.notEqual(rejected.status, 0);
+    assert.doesNotMatch(`${rejected.stdout}${rejected.stderr}`, /top-secret|\/Users\/private/iu);
+    assert.match(String(rejected.stderr), /job state identity does not match/u);
   } finally { repo.cleanup(); }
 });
 

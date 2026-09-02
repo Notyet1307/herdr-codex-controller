@@ -31,14 +31,20 @@ node dist/src/cli.js start \
 
 node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job RELEASE_ID --json
 node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --operator --json
+node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --public --json
 ```
 
 `--approve-plan` 必须等于 `plan validate` 返回的 64 位 digest。Controller 私下 snapshot config/Plan 并在恢复时拒绝 drift，但不要求 Planner 批准 config 或 Controller build。
 
+`--public` 与 `--operator` 互斥。Public Status 只投影 release/Plan identity、phase、Issue 进度、candidate、脱敏 Block 摘要和精简 merge 结果；不包含路径、日志、prompt、retry evidence、环境或凭据。它是按需读取，不产生 public receipt，也不轮询。不存在的 Job 返回稳定 `job_not_found`。
+
 ## Blocked 与中断
 
-- `replan_required`：保存 report/receipt，执行 `abort`，回 Planner 生成并批准新 Plan，再创建新 Job。
-- recoverable：修复不改变 Plan authority 的基础设施问题，提供新的 regular evidence file，再执行 `retry --reason ... --evidence ...`。
+- `recoverable`：确定的环境/执行器故障；修复后提供新的 regular evidence file，再显式 `retry --reason ... --evidence ...`。
+- `manual`：Controller 不能确定应 retry、人工修复还是 abort/replan；只允许 Operator 做出决定后显式操作。
+- `replan_required`：仅确定性的 Plan/base/Parent/Child 权威失效；保存 report/receipt，显式 `abort`，回 Planner 生成并批准新 Plan，再创建新 Job。
+
+`blocked.code` 始终保留原始 cause；`blocked.kind` 才是恢复路由。模型自称 replan、越界、repair budget 耗尽、Reviewer blocked 和未知 code 均为 `manual`。旧 Job 缺少 kind 时继续只读兼容，Public Status 标记 `legacy=true`，status 不改写其 bytes。
 
 `development_bootstrap_failed` 与 `development_setup_failed` 是可修复环境失败；`development_bootstrap_mutated_source`、`development_setup_mutated_source` 与 bootstrap policy 失败需要人工检查。不要因此给 Worker 开网。
 

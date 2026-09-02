@@ -134,6 +134,7 @@ test("Development Bootstrap failure blocks in prepare before any Worker run", as
     assert.equal(result.action, "blocked");
     assert.equal(blocked.phase, "prepare");
     assert.equal(blocked.blocked?.code, "development_bootstrap_failed");
+    assert.equal(blocked.blocked?.kind, "recoverable");
     assert.equal(blocked.runs.length, 0);
     assert.equal(codex.calls.length, 0);
     assert.equal(existsSync(join(blocked.worktreePath, "issue-1.txt")), false);
@@ -197,6 +198,7 @@ test("Development Bootstrap source pollution fails closed before any Worker run"
     const blocked = store.load(created.id);
 
     assert.equal(blocked.blocked?.code, "development_bootstrap_mutated_source");
+    assert.equal(blocked.blocked?.kind, "manual");
     assert.equal(blocked.phase, "prepare");
     assert.equal(blocked.runs.length, 0);
     assert.equal(codex.calls.length, 0);
@@ -225,6 +227,7 @@ test("Offline Development Setup source pollution fails closed before any Worker 
     const blocked = store.load(created.id);
 
     assert.equal(blocked.blocked?.code, "development_setup_mutated_source");
+    assert.equal(blocked.blocked?.kind, "manual");
     assert.equal(blocked.phase, "prepare");
     assert.equal(blocked.runs.length, 0);
     assert.equal(codex.calls.length, 0);
@@ -257,6 +260,7 @@ test("explicit retry reruns the complete Development Gate before the first Worke
     await controller.step(created.id);
     let job = store.load(created.id);
     assert.equal(job.blocked?.code, "development_setup_failed");
+    assert.equal(job.blocked?.kind, "recoverable");
     assert.equal(readFileSync(join(job.worktreePath, "node_modules", "bootstrap-runs"), "utf8"), "x");
     assert.equal(readFileSync(join(job.worktreePath, "node_modules", "setup-runs"), "utf8"), "s");
     assert.equal(codex.calls.length, 0);
@@ -410,7 +414,7 @@ test("semantically inconsistent aggregate review is rejected before push or PR c
   } finally { repo.cleanup(); }
 });
 
-test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", async () => {
+test("a Worker replan claim remains a manual Controller decision", async () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
@@ -477,9 +481,41 @@ test("a finding that requires changing bound scope reaches REPLAN_REQUIRED", asy
 
     const settled = await runToTerminal(controller, store, created.id);
 
-    assert.equal(settled.blocked?.code, "replan_required");
+    assert.equal(settled.blocked?.code, "codex_hardening_replan_required");
+    assert.equal(settled.blocked?.kind, "manual");
     assert.equal(settled.status, "blocked");
     assert.equal(settled.phase, "repair");
+  } finally { repo.cleanup(); }
+});
+
+test("an Issue Worker replan claim preserves its cause and becomes manual", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const codex = new FakeCodex(gitClient, async ({ kind }) => kind === "worker"
+      ? {
+          worker: {
+            status: "blocked",
+            summary: "The model recommends replanning.",
+            selfReview: { performed: true, findingsFixed: [], remainingConcerns: [] },
+            testsRun: [],
+            residualRisks: [],
+            blockedReason: "The approved scope may need to change.",
+            blockedKind: "replan_required",
+          },
+        }
+      : {});
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const created = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+
+    const settled = await runToTerminal(controller, store, created.id);
+
+    assert.equal(settled.blocked?.code, "codex_worker_replan_required");
+    assert.equal(settled.blocked?.kind, "manual");
   } finally { repo.cleanup(); }
 });
 
@@ -555,6 +591,7 @@ test("a recoverable hardening blocker can resume once with new infrastructure ev
     });
     let job = await runToTerminal(controller, store, created.id);
     assert.equal(job.blocked?.code, "codex_hardening_recoverable");
+    assert.equal(job.blocked?.kind, "recoverable");
 
     const evidencePath = join(store.root(job.id), "dependency-restored.json");
     const evidence = "{\"dependency\":\"ready\"}\n";
@@ -610,8 +647,8 @@ test("release validation evidence remains exactly bound after hardening exhausti
 
     const settled = await runToTerminal(controller, store, created.id);
     assert.equal(settled.status, "blocked");
-    assert.equal(settled.blocked?.code, "replan_required");
-    assert.match(settled.blocked?.message ?? "", /release_repair_exhausted/);
+    assert.equal(settled.blocked?.code, "release_repair_exhausted");
+    assert.equal(settled.blocked?.kind, "manual");
 
     const restarted = new JobStore(config).load(created.id);
     const releaseBinding = restarted.validations.at(-1);
@@ -730,8 +767,8 @@ test("latest blocking review and run remain exactly bound after hardening exhaus
 
     const settled = await runToTerminal(controller, store, created.id);
     assert.equal(settled.status, "blocked");
-    assert.equal(settled.blocked?.code, "replan_required");
-    assert.match(settled.blocked?.message ?? "", /release_repair_exhausted/);
+    assert.equal(settled.blocked?.code, "release_repair_exhausted");
+    assert.equal(settled.blocked?.kind, "manual");
 
     const restarted = new JobStore(config).load(created.id);
     const reviewRuns = restarted.runs.filter((run) => run.kind === "review");
@@ -791,6 +828,7 @@ test("validated review evidence is checkpointed before post-run worktree policy"
     const settled = await runToTerminal(controller, store, created.id);
     assert.equal(settled.status, "blocked");
     assert.equal(settled.blocked?.code, "validator_mutated_worktree");
+    assert.equal(settled.blocked?.kind, "manual");
 
     const restarted = new JobStore(config).load(created.id);
     const reviewRun = restarted.runs.filter((run) => run.kind === "review").at(-1);
@@ -806,7 +844,51 @@ test("validated review evidence is checkpointed before post-run worktree policy"
   } finally { repo.cleanup(); }
 });
 
-test("REPLAN_REQUIRED after repair exhaustion cannot be retried", () => {
+test("Controller classifies deterministic Plan drift, environment failures, and ambiguous blocks centrally", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan(repo, [1]);
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    const cases = [
+      ["development_setup_failed", "recoverable"],
+      ["validation_sandbox_capability_unavailable", "recoverable"],
+      ["codex_worker_failed", "recoverable"],
+      ["ci_infrastructure_exhausted", "recoverable"],
+      ["development_bootstrap_policy_failed", "manual"],
+      ["codex_worker_replan_required", "manual"],
+      ["codex_hardening_replan_required", "manual"],
+      ["issue_scope_path_drift", "manual"],
+      ["repair_scope_unattributed", "manual"],
+      ["issue_scope_budget_exceeded", "manual"],
+      ["release_diff_too_large", "manual"],
+      ["release_repair_exhausted", "manual"],
+      ["ci_code_repair_exhausted", "manual"],
+      ["release_review_blocked", "manual"],
+      ["unknown_future_code", "manual"],
+      ["plan_base_drift", "replan_required"],
+      ["runtime_source_base_drift", "replan_required"],
+      ["plan_parent_not_open", "replan_required"],
+      ["plan_issue_not_open", "replan_required"],
+      ["plan_drift", "replan_required"],
+    ] as const;
+    for (const [code, kind] of cases) {
+      const blocked = blockJob(structuredClone(job), code, "original cause");
+      assert.equal(blocked.blocked?.code, code);
+      assert.equal(blocked.blocked?.kind, kind, code);
+      assert.equal(blocked.blocked?.message, "original cause");
+    }
+    const drifted = blockJob(job, "plan_base_drift", "base changed");
+    assert.throws(
+      () => retryBlockedJob(drifted),
+      (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
+    );
+  } finally { repo.cleanup(); }
+});
+
+test("repair exhaustion stays manual instead of forcing replan", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo, {
@@ -831,10 +913,11 @@ test("REPLAN_REQUIRED after repair exhaustion cannot be retried", () => {
       join(store.root(job.id), "review-02.json"),
     );
 
-    assert.equal(job.blocked?.code, "replan_required");
+    assert.equal(job.blocked?.code, "release_repair_exhausted");
+    assert.equal(job.blocked?.kind, "manual");
     assert.throws(
       () => retryBlockedJob(job),
-      (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
+      (error: unknown) => error instanceof ControllerError && error.code === "retry_evidence_required",
     );
     assert.equal(job.status, "blocked");
     assert.equal(job.codeRepairRounds, 1);
@@ -844,7 +927,7 @@ test("REPLAN_REQUIRED after repair exhaustion cannot be retried", () => {
   }
 });
 
-test("REPLAN_REQUIRED after an oversized release diff cannot be retried", () => {
+test("an oversized release diff stays manual instead of forcing replan", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
@@ -867,10 +950,11 @@ test("REPLAN_REQUIRED after an oversized release diff cannot be retried", () => 
       join(store.root(job.id), "release-validation.json"),
     );
 
-    assert.equal(job.blocked?.code, "replan_required");
+    assert.equal(job.blocked?.code, "release_diff_too_large");
+    assert.equal(job.blocked?.kind, "manual");
     assert.throws(
       () => retryBlockedJob(job),
-      (error: unknown) => error instanceof ControllerError && error.code === "replan_required",
+      (error: unknown) => error instanceof ControllerError && error.code === "retry_evidence_required",
     );
     assert.equal(job.status, "blocked");
     assert.equal(job.codeRepairRounds, 3);
@@ -904,6 +988,7 @@ test("new infrastructure evidence authorizes one fresh recovery without changing
       "CI repair requires operator authority",
       join(store.root(job.id), "hardening-02-ci-failure.md"),
     );
+    assert.equal(job.blocked?.kind, "manual");
     const authorityBefore = {
       plan: job.plan,
       planDigest: job.planDigest,
@@ -1331,7 +1416,10 @@ test("required check missing, pending, or failed never authorizes merge", async 
       assert.equal(result.action, scenario.action);
       const observed = store.load(job.id);
       assert.notEqual(observed.deliveryAuthority?.status, "authorized");
-      if (scenario.action === "blocked") assert.equal(observed.blocked?.code, "ci_code_repair_exhausted");
+      if (scenario.action === "blocked") {
+        assert.equal(observed.blocked?.code, "ci_code_repair_exhausted");
+        assert.equal(observed.blocked?.kind, "manual");
+      }
     } finally { repo.cleanup(); }
   }
 });

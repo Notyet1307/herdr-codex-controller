@@ -66,6 +66,7 @@ node dist/src/cli.js start \
   --approve-plan 64位小写HEX \
   --json
 node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job RELEASE_ID --json
+node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --public --json
 ```
 
 任意 Job 状态都可动态导出人工审查入口：
@@ -80,6 +81,6 @@ verified merge 后可导出机器结果：
 node dist/src/cli.js result export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/release-result.json --json
 ```
 
-两种输出都不会公开 prompt、events、完整日志、环境变量、凭据或私有绝对路径。`review.md` 与 PR Body 使用同一 report model；`release-result:v1` 只包含 Plan、candidate、PR、required checks、merge 与完成时间。
+Public Status 是按需读取的有界脱敏投影，不是新 receipt；它和两种导出都不会公开 prompt、events、完整日志、环境变量、凭据或私有绝对路径。`review.md` 与 PR Body 使用同一 report model；`release-result:v1` 只包含 Plan、candidate、PR、required checks、merge 与完成时间。
 
-可恢复 blocked 需要新的 Job-private evidence。`replan_required` 只能 `abort → Planner 新 Plan → 新 Job`。Controller 恢复保留 Worktree，但总是启动 fresh Codex execution。
+Block 保留原始 code，并分类为 `recoverable | manual | replan_required`。前两者都需要 Operator 决定和新的 Job-private evidence 才能 retry；只有确定性 Plan 权威失效使用 `abort → Planner 新 Plan → 新 Job`。Controller 恢复保留 Worktree，但总是启动 fresh Codex execution。

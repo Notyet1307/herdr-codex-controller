@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { assertPlanCompatibleWithConfig, loadPlan } from "./plan.js";
-import { JobStore, REPLAN_REQUIRED_CODE, retryBlockedJob } from "./state.js";
+import { effectiveBlockedKind, JobStore, retryBlockedJob } from "./state.js";
 import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
 import { CodexRunner } from "./codex.js";
@@ -22,6 +22,7 @@ import { ControllerError } from "./errors.js";
 import { exportReleaseResult } from "./release-result.js";
 import { exportReleaseReport } from "./report.js";
 import { DemoRunner } from "./demo.js";
+import { publicStatus } from "./public-status.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -109,10 +110,19 @@ async function main(): Promise<void> {
 
   const jobId = requiredOption(args, "job");
   if (args.command === "status") {
+    assertOnlyOptions(args, ["config", "job", "json", "operator", "public"]);
+    if (args.options.public && args.options.operator) {
+      throw new ControllerError("status_mode_conflict", "--public and --operator are mutually exclusive.");
+    }
+    if (args.options.public && !existsSync(store.path(jobId))) {
+      throw new ControllerError("job_not_found", `No Controller Job exists for ${jobId}.`);
+    }
     const job = store.load(jobId);
-    output(args, args.options.operator
-      ? operatorStatus(job)
-      : summarizeJob(job));
+    output(args, args.options.public
+      ? publicStatus(config, job)
+      : args.options.operator
+        ? operatorStatus(job)
+        : summarizeJob(job));
     return;
   }
   if (args.command === "result-export") {
@@ -176,7 +186,7 @@ async function main(): Promise<void> {
       const reason = requiredOption(args, "reason");
       let job = store.load(jobId);
       if (job.status !== "blocked" || !job.blocked) throw new Error("job is not blocked");
-      if (job.blocked.code === REPLAN_REQUIRED_CODE) retryBlockedJob(job);
+      if (effectiveBlockedKind(job.blocked) === "replan_required") retryBlockedJob(job);
       const evidence = readRecoveryEvidence(requiredOption(args, "evidence"));
       const evidenceDigest = sha256(evidence);
       const authorizationId = newId("operator-retry");
@@ -254,7 +264,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     const token = argv[index]!;
     if (!token.startsWith("--")) throw new Error(`unexpected positional argument: ${token}`);
     const key = token.slice(2);
-    if (key === "json" || key === "operator") {
+    if (key === "json" || key === "operator" || key === "public") {
       options[key] = true;
       continue;
     }
@@ -356,16 +366,19 @@ function operatorStatus(job: JobState) {
 }
 
 function nextAction(job: JobState): string {
-  if (job.status === "blocked" && job.blocked?.code === REPLAN_REQUIRED_CODE) {
+  if (job.status === "blocked" && job.blocked && effectiveBlockedKind(job.blocked) === "replan_required") {
     return "Run abort, return to Planner for a new Release Plan, then start a new Job.";
   }
-  if (job.status === "blocked") return `Inspect blocked evidence and run retry --reason TEXT --evidence PATH after resolving ${job.blocked?.code ?? "the blocker"}.`;
+  if (job.status === "blocked" && job.blocked && effectiveBlockedKind(job.blocked) === "manual") {
+    return "Inspect public summary and private operator evidence, then explicitly choose retry, manual repair, or abort for replan.";
+  }
+  if (job.status === "blocked") return `Resolve ${job.blocked?.code ?? "the blocker"}, then run retry --reason TEXT --evidence PATH with fresh evidence.`;
   if (job.status === "completed" || job.status === "failed") return "No workflow action remains; cleanup is optional.";
   return `Run step or run to continue phase ${job.phase}.`;
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate    --config PATH [--json]\n  plan validate      --config PATH --plan PATH [--json]\n  result export      --config PATH --job ID --out FILE [--json]\n  report export      --config PATH --job ID --out FILE [--json]\n  doctor             --config PATH [--json]\n  start              --config PATH --plan PATH --approve-plan 64HEX [--json]\n  status             --config PATH --job ID [--operator] [--json]\n  step               --config PATH --job ID [--json]\n  run                --config PATH --job ID [--max-steps N] [--json]\n  retry              --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort              --config PATH --job ID --reason TEXT [--json]\n  cleanup            --config PATH --job ID [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate    --config PATH [--json]\n  plan validate      --config PATH --plan PATH [--json]\n  result export      --config PATH --job ID --out FILE [--json]\n  report export      --config PATH --job ID --out FILE [--json]\n  doctor             --config PATH [--json]\n  start              --config PATH --plan PATH --approve-plan 64HEX [--json]\n  status             --config PATH --job ID [--public | --operator] [--json]\n  step               --config PATH --job ID [--json]\n  run                --config PATH --job ID [--max-steps N] [--json]\n  retry              --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort              --config PATH --job ID --reason TEXT [--json]\n  cleanup            --config PATH --job ID [--json]\n`);
 }
 
 main().catch((error) => {

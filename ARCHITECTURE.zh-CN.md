@@ -20,6 +20,8 @@ semantic Release Plan
 
 Prepare Gate 通过后才持久化 `phase=implement`。Gate 失败保留同一 Job 作为恢复锚点，但不会产生产品 Worker run、Worker result、commit、push、PR 或 GitHub mutation；显式 retry 从完整 Gate 重新开始。
 
+Block 保留原始 `code`，并集中分类为 `recoverable | manual | replan_required`。只有 base/Plan/Parent/Child 的确定性权威失效要求 abort 后重规划；模型建议、scope drift、repair/review 耗尽与未知原因都停在 manual。`status --public --json` 只按需投影脱敏运行摘要，不成为 Planner 或 Job 的新权威。
+
 ## 语义边界
 
 Plan 只携带目标、repo/base、Parent/Child number、顺序和依赖、目标与 AC、可选 expected paths、`low|normal|high` risk、可选 Oracle command、Release AC 与 review focus。唯一兼容键是 `controllerContractVersion: 1`。

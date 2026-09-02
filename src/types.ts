@@ -291,8 +291,11 @@ export type JobPhase =
   | "deliver"
   | "complete";
 
+export type BlockedKind = "recoverable" | "replan_required" | "manual";
+
 export type BlockedState = {
   code: string;
+  kind?: BlockedKind;
   message: string;
   fromPhase: JobPhase;
   createdAt: string;

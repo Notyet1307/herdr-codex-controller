@@ -6,7 +6,7 @@ import { ControllerError } from "./errors.js";
 import { readJsonFile, writePublicTextAtomic } from "./fs-atomic.js";
 import type { GitPort } from "./ports.js";
 import type { JobStore } from "./state.js";
-import { REPLAN_REQUIRED_CODE } from "./state.js";
+import { effectiveBlockedKind } from "./state.js";
 import type {
   ControllerConfig,
   GhCheckSummary,
@@ -129,7 +129,7 @@ export async function buildReleaseReportModel(input: {
   jobRoot: string;
   git: GitPort;
 }): Promise<ReleaseReportModel> {
-  const clean = cleaner(input.config, input.job);
+  const clean = createPublicTextCleaner(input.config, input.job);
   const diff = await input.git.reportDiffStats(input.job);
   const validationChecks: ReleaseReportModel["checks"] = [];
   const validationDigests: string[] = [];
@@ -290,9 +290,11 @@ export async function buildReleaseReportModel(input: {
       items: concerns,
       blockedReason: input.job.blocked ? clean(`${input.job.blocked.code}: ${input.job.blocked.message}`, 2_000) : null,
       recovery: input.job.blocked
-        ? input.job.blocked.code === REPLAN_REQUIRED_CODE
+        ? effectiveBlockedKind(input.job.blocked) === "replan_required"
           ? "Abort this Job, return to Planner for a new approved Plan, and start a new Job."
-          : "Resolve the blocker and provide fresh recovery evidence before retrying this Job."
+          : effectiveBlockedKind(input.job.blocked) === "manual"
+            ? "Inspect private operator evidence and explicitly choose retry, manual repair, or abort for replan."
+            : "Resolve the blocker and provide fresh recovery evidence before retrying this Job."
         : null,
     },
     howToReview: {
@@ -507,7 +509,7 @@ function jobConfig(jobRoot: string, job: JobState): ControllerConfig {
 function renderCiChecks(
   checks: GhCheckSummary | null,
   job: JobState,
-  clean: ReturnType<typeof cleaner>,
+  clean: ReturnType<typeof createPublicTextCleaner>,
 ): ReleaseReportModel["checks"] {
   if (!checks) {
     return job.status === "completed" && job.result
@@ -534,7 +536,7 @@ function ciCheck(
   name: string,
   status: "PASS" | "FAIL" | "PENDING" | "MISSING",
   url: string | null,
-  clean: ReturnType<typeof cleaner>,
+  clean: ReturnType<typeof createPublicTextCleaner>,
 ): ReleaseReportModel["checks"][number] {
   return {
     stage: "CI",
@@ -593,7 +595,7 @@ function safePrivateFile(root: string, path: string): boolean {
   return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && realpathSync(absolute) === absolute;
 }
 
-function cleaner(config: ControllerConfig, job: JobState) {
+export function createPublicTextCleaner(config: ControllerConfig, job: JobState) {
   const privatePaths = [
     config.localPath,
     config.stateDir,
