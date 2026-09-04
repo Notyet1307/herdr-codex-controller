@@ -29,12 +29,12 @@ node dist/src/cli.js start \
   --approve-plan PLAN_DIGEST \
   --json
 
-node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job RELEASE_ID --json
-node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --operator --json
-node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --public --json
+node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job JOB_ID --json
+node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job JOB_ID --operator --json
+node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --plan /PRIVATE/PATH/release-plan.json --public --json
 ```
 
-`--approve-plan` 必须等于 `plan validate` 返回的 64 位 digest。Controller 私下 snapshot config/Plan 并在恢复时拒绝 drift，但不要求 Planner 批准 config 或 Controller build。
+`--approve-plan` 必须等于 `plan validate` 返回的 64 位 digest。runtime `JOB_ID` 固定为 `job-<完整 planDigest>`；公开 `releaseId`、Git trailer 与 `HERDR_RELEASE_ID` 始终是 `plan.id`。同一精确 Plan 的 `start` 幂等返回原 Job；`status --plan` 按精确 Plan 查询。Controller 私下 snapshot config/Plan 并在恢复时拒绝 drift，但不要求 Planner 批准 config 或 Controller build。
 
 `start` 只验证 Config/Plan/精确批准并持久化 `prepare` Job；Git/GitHub/Codex/Sandbox preflight 由后续 `step/run` 的 Prepare Gate 执行。这样环境失败仍有同一 Job 作为显式 retry/abort 的恢复锚点。
 
@@ -57,8 +57,8 @@ Codex CLI、Provider 或登录检查失败统一保留为 `codex_preflight_faile
 ## 输出
 
 ```bash
-node dist/src/cli.js report export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/review.md --json
-node dist/src/cli.js result export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/release-result.json --json
+node dist/src/cli.js report export --config /PRIVATE/PATH/controller.json --job JOB_ID --out /PUBLIC/PATH/review.md --json
+node dist/src/cli.js result export --config /PRIVATE/PATH/controller.json --job JOB_ID --out /PUBLIC/PATH/release-result.json --json
 ```
 
 `report export` 可用于非终态 Job；Result 只允许 verified merged Job。输出必须位于 `stateDir` 外，已有不同字节的目标文件会被拒绝。

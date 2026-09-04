@@ -229,7 +229,7 @@ export class ReleaseController {
     job.phase = "implement";
     job.currentIssueNumber = null;
     this.deps.store.save(job);
-    return stepResult("release_prepared", true, false, null, `Release ${job.id} prepared at ${verified.baseSha}.`);
+    return stepResult("release_prepared", true, false, null, `Release ${job.plan.id} prepared at ${verified.baseSha}.`);
   }
 
   private async verifyPlanSourceBeforeSideEffects(job: JobState): Promise<{
@@ -315,12 +315,14 @@ export class ReleaseController {
     sha: string,
   ): Promise<void> {
     const stats = await this.deps.git.commitStats(job, sha);
+    const budget = issue.scopeBudget;
     if (stats.entries.some(({ binary }) => binary)
       || stats.files > this.deps.store.config.policy.maxChangedFiles
-      || stats.changedLines > this.deps.store.config.policy.maxChangedLines) {
+      || stats.changedLines > this.deps.store.config.policy.maxChangedLines
+      || stats.files > budget.maxFiles || stats.changedLines > budget.maxChangedLines) {
       throw new ControllerError(
         "issue_scope_budget_exceeded",
-        `Issue #${issue.number} commit exceeds the configured change budget.`,
+        `Issue #${issue.number} commit exceeds its approved or configured change budget.`,
       );
     }
     if (issue.expectedPaths.length > 0
@@ -928,7 +930,7 @@ export class ReleaseController {
     job.phase = "complete";
     job.blocked = null;
     this.deps.store.save(job);
-    return stepResult("release_merged", true, true, null, `Release ${job.id} was merged.`);
+    return stepResult("release_merged", true, true, null, `Release ${job.plan.id} was merged.`);
   }
 
   private checkpointCodexRun(

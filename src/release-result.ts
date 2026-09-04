@@ -21,7 +21,7 @@ export function createReleaseResult(input: {
   }
   const result: ReleaseResultV1 = {
     schema: "herdr-codex-controller:release-result:v1",
-    releaseId: input.job.id,
+    releaseId: input.job.plan.id,
     planDigest: input.job.planDigest,
     status: "merged",
     baseSha: input.job.plan.baseSha,
@@ -50,7 +50,7 @@ export async function exportReleaseResult(input: {
   const proof = readCandidateProof(job, input.store.root(job.id));
   for (const commit of proof.issueCommits) {
     if (!(await input.git.verifyIssueCommit({
-      jobId: job.id,
+      releaseId: job.plan.id,
       planDigest: job.planDigest,
       issueNumber: commit.issueNumber,
       sha: commit.sha,

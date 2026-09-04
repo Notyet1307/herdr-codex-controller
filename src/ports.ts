@@ -28,7 +28,7 @@ export interface GitPort {
     mergeMethod: "merge" | "squash" | "rebase";
   }): Promise<"verified" | "base_mismatch" | "candidate_mismatch">;
   verifyIssueCommit(input: {
-    jobId: string;
+    releaseId: string;
     planDigest: string;
     issueNumber: number;
     sha: string;

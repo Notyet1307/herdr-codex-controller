@@ -10,7 +10,7 @@ const PLAN_KEYS = [
   "plannerContextDigest", "releaseAcceptanceCriteria", "repo", "reviewFocus", "title",
 ];
 const ISSUE_KEYS = [
-  "acceptanceCriteria", "dependsOn", "expectedPaths", "number", "objective", "oracleCommands", "order", "risk",
+  "acceptanceCriteria", "dependsOn", "expectedPaths", "number", "objective", "oracleCommands", "order", "risk", "scopeBudget",
 ];
 
 export function loadPlan(path: string): ReleasePlan {
@@ -20,8 +20,8 @@ export function loadPlan(path: string): ReleasePlan {
 export function validatePlan(value: unknown): ReleasePlan {
   const object = expectObject(value, "plan");
   expectExactKeys(object, PLAN_KEYS, "plan", ["plannerContextDigest"]);
-  if (object.controllerContractVersion !== 1) {
-    throw new ControllerError("unsupported_controller_contract_version", "controllerContractVersion must be 1.");
+  if (object.controllerContractVersion !== 2) {
+    throw new ControllerError("unsupported_controller_contract_version", "controllerContractVersion must be 2.");
   }
   const issues = validateIssueGraph(object.issues);
   const id = boundedText(object.id, "plan.id", 80);
@@ -31,7 +31,7 @@ export function validatePlan(value: unknown): ReleasePlan {
   const baseSha = boundedExactText(object.baseSha, "plan.baseSha", 40);
   if (!/^[a-f0-9]{40}$/u.test(baseSha)) throw new Error("plan.baseSha must be 40 lowercase hexadecimal characters");
   return {
-    controllerContractVersion: 1,
+    controllerContractVersion: 2,
     id,
     title: boundedText(object.title, "plan.title", 500),
     objective: boundedText(object.objective, "plan.objective", 8_000),
@@ -56,6 +56,9 @@ export function assertPlanCompatibleWithConfig(plan: ReleasePlan, config: Contro
     throw new ControllerError("plan_base_ref_mismatch", "Release Plan baseRef does not exactly match config.baseRef.");
   }
   for (const issue of plan.issues) {
+    if (issue.scopeBudget.maxFiles > config.policy.maxChangedFiles || issue.scopeBudget.maxChangedLines > config.policy.maxChangedLines) {
+      throw new ControllerError("issue_scope_budget_exceeds_policy", `Issue #${issue.number} scopeBudget exceeds configured change limits.`);
+    }
     for (const command of issue.oracleCommands) {
       const matches = config.validation.release.filter((entry) => entry.command === command);
       if (matches.length !== 1) {
@@ -90,16 +93,16 @@ function validateIssueGraph(value: unknown): ReleasePlanIssue[] {
 function validateIssue(value: unknown, index: number): ReleasePlanIssue {
   const label = `plan.issues[${index}]`;
   const object = expectObject(value, label);
-  expectExactKeys(object, ISSUE_KEYS, label, ["expectedPaths", "oracleCommands"]);
+  expectExactKeys(object, ISSUE_KEYS, label);
   const number = parsePositiveInteger(object.number, `${label}.number`, 1, Number.MAX_SAFE_INTEGER);
   const dependsOn = integerArray(object.dependsOn, `${label}.dependsOn`, 50);
   if (dependsOn.includes(number)) throw new Error(`issue #${number} depends on itself`);
   if (object.risk !== "low" && object.risk !== "normal" && object.risk !== "high") {
     throw new Error(`${label}.risk must be low, normal, or high`);
   }
-  const oracleCommands = boundedStringArray(object.oracleCommands ?? [], `${label}.oracleCommands`, 20, 512);
-  if (object.risk !== "high" && oracleCommands.length > 0) {
-    throw new Error(`${label}.oracleCommands are allowed only for high-risk work`);
+  const oracleCommands = boundedStringArray(object.oracleCommands, `${label}.oracleCommands`, 20, 512);
+  if ((object.risk === "high" && oracleCommands.length === 0) || (object.risk !== "high" && oracleCommands.length > 0)) {
+    throw new Error(`${label}.oracleCommands must be non-empty for high-risk work and empty otherwise`);
   }
   return {
     number,
@@ -107,9 +110,25 @@ function validateIssue(value: unknown, index: number): ReleasePlanIssue {
     dependsOn,
     objective: boundedText(object.objective, `${label}.objective`, 8_000),
     acceptanceCriteria: nonEmptyStrings(object.acceptanceCriteria, `${label}.acceptanceCriteria`, 20, 2_000),
-    expectedPaths: pathArray(object.expectedPaths ?? [], `${label}.expectedPaths`, 20),
+    expectedPaths: nonEmptyPaths(object.expectedPaths, `${label}.expectedPaths`, 20),
+    scopeBudget: scopeBudget(object.scopeBudget, `${label}.scopeBudget`),
     risk: object.risk,
     oracleCommands,
+  };
+}
+
+function nonEmptyPaths(value: unknown, label: string, maximum: number): string[] {
+  const paths = pathArray(value, label, maximum);
+  if (paths.length === 0) throw new Error(`${label} must not be empty`);
+  return paths;
+}
+
+function scopeBudget(value: unknown, label: string): { maxFiles: number; maxChangedLines: number } {
+  const object = expectObject(value, label);
+  expectExactKeys(object, ["maxFiles", "maxChangedLines"], label);
+  return {
+    maxFiles: parsePositiveInteger(object.maxFiles, `${label}.maxFiles`, 1, 1_000),
+    maxChangedLines: parsePositiveInteger(object.maxChangedLines, `${label}.maxChangedLines`, 1, 100_000),
   };
 }
 

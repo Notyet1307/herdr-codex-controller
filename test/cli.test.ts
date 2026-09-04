@@ -20,7 +20,7 @@ test("CLI validates the semantic Plan and starts with one approved digest", () =
     const validated = spawnSync("node", [cli, "plan", "validate", "--config", configPath, "--plan", planPath, "--json"], { cwd: resolve("."), encoding: "utf8" });
     assert.equal(validated.status, 0, validated.stderr);
     const output = JSON.parse(String(validated.stdout));
-    assert.equal(output.plan.controllerContractVersion, 1);
+    assert.equal(output.plan.controllerContractVersion, 2);
     assert.equal(output.planDigest, digestJson(plan));
     assert.equal("provenance" in output, false);
 
@@ -29,9 +29,40 @@ test("CLI validates the semantic Plan and starts with one approved digest", () =
     });
     assert.equal(start.status, 0, start.stderr);
     const job = JSON.parse(String(start.stdout));
-    assert.equal(job.id, plan.id);
+    assert.equal(job.id, `job-${output.planDigest}`);
+    assert.equal(job.jobId, job.id);
+    assert.equal(job.releaseId, plan.id);
     assert.equal(job.planDigest, output.planDigest);
     assert.equal("provenance" in job, false);
+    const repeated = spawnSync("node", [cli, "start", "--config", configPath, "--plan", planPath, "--approve-plan", output.planDigest, "--json"], {
+      cwd: resolve("."), env, encoding: "utf8",
+    });
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.equal(JSON.parse(String(repeated.stdout)).id, job.id);
+    const status = spawnSync("node", [cli, "status", "--config", configPath, "--plan", planPath, "--public", "--json"], {
+      cwd: resolve("."), env, encoding: "utf8",
+    });
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(String(status.stdout)).baseSha, plan.baseSha);
+  } finally { repo.cleanup(); }
+});
+
+test("different semantic Plan revisions receive separate runtime Jobs", () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const first = testPlan(repo, [1]);
+    const second = { ...structuredClone(first), title: "same release, revised plan" };
+    const { configPath, planPath } = writeInputs(repo, config, first);
+    const store = new JobStore(config);
+    const firstJob = store.create({ configPath, planPath, plan: first, configDigest: digestJson(config), planDigest: digestJson(first) });
+    firstJob.status = "failed";
+    store.save(firstJob);
+    const secondPath = join(repo.root, "release-plan-revision.json");
+    writeFileSync(secondPath, `${JSON.stringify(second)}\n`, "utf8");
+    const secondJob = store.create({ configPath, planPath: secondPath, plan: second, configDigest: digestJson(config), planDigest: digestJson(second) });
+    assert.equal(firstJob.plan.id, secondJob.plan.id);
+    assert.notEqual(firstJob.id, secondJob.id);
   } finally { repo.cleanup(); }
 });
 
@@ -49,29 +80,29 @@ test("CLI start persists a retryable Job before Codex environment preflight", ()
     const start = run("start", "--config", configPath, "--plan", planPath, "--approve-plan", digestJson(plan), "--json");
     assert.equal(start.status, 0, start.stderr);
     const store = new JobStore(config);
-    let job = store.load(plan.id);
+    let job = store.load(`job-${digestJson(plan)}`);
     assert.equal(job.phase, "prepare");
     assert.equal(job.status, "running");
     assert.equal(existsSync(job.worktreePath), false);
 
-    const firstStep = run("step", "--config", configPath, "--job", plan.id, "--json");
+    const firstStep = run("step", "--config", configPath, "--job", job.id, "--json");
     assert.equal(firstStep.status, 0, firstStep.stderr);
     assert.equal(JSON.parse(String(firstStep.stdout)).action, "blocked");
-    job = store.load(plan.id);
+    job = store.load(job.id);
     assert.equal(job.blocked?.code, "codex_preflight_failed");
     assert.equal(job.blocked?.kind, "recoverable");
     assert.equal(job.runs.length, 0);
     assert.equal(existsSync(job.worktreePath), false);
 
-    const retry = run("retry", "--config", configPath, "--job", plan.id, "--reason", "Provider login will be checked again.", "--evidence", planPath, "--json");
+    const retry = run("retry", "--config", configPath, "--job", job.id, "--reason", "Provider login will be checked again.", "--evidence", planPath, "--json");
     assert.equal(retry.status, 0, retry.stderr);
-    job = store.load(plan.id);
+    job = store.load(job.id);
     assert.equal(job.status, "running");
     assert.equal(job.phase, "prepare");
     assert.equal(job.retryAuthorizations.length, 1);
 
-    assert.equal(run("step", "--config", configPath, "--job", plan.id, "--json").status, 0);
-    job = store.load(plan.id);
+    assert.equal(run("step", "--config", configPath, "--job", job.id, "--json").status, 0);
+    job = store.load(job.id);
     assert.equal(job.blocked?.code, "codex_preflight_failed");
     assert.equal(job.retryAuthorizations.length, 1);
     assert.equal(job.runs.length, 0);
@@ -98,7 +129,7 @@ test("CLI rejects invalid and legacy start approvals before Job creation", () =>
       const result = spawnSync("node", [...base, ...fixture.args], { cwd: resolve("."), encoding: "utf8" });
       assert.notEqual(result.status, 0);
       assert.match(String(result.stderr), new RegExp(fixture.code));
-      assert.equal(existsSync(join(config.stateDir, "jobs", plan.id, "job.json")), false);
+    assert.equal(existsSync(join(config.stateDir, "jobs", `job-${digestJson(plan)}`, "job.json")), false);
     }
   } finally { repo.cleanup(); }
 });
@@ -107,7 +138,7 @@ test("CLI rejects unsupported contract majors and removed commands", () => {
   const repo = createTestRepo();
   try {
     const config = testConfig(repo);
-    const plan = { ...testPlan(repo, [1]), controllerContractVersion: 2 };
+    const plan = { ...testPlan(repo, [1]), controllerContractVersion: 1 };
     const { configPath, planPath } = writeInputs(repo, config, plan as any);
     const cli = resolve("dist/src/cli.js");
     const invalid = spawnSync("node", [cli, "plan", "validate", "--config", configPath, "--plan", planPath], { cwd: resolve("."), encoding: "utf8" });
@@ -138,7 +169,7 @@ test("public status is bounded, redacted, mode-exclusive, and legacy read-only",
     assert.equal(running.status, 0, running.stderr);
     const runningStatus = JSON.parse(String(running.stdout));
     assert.deepEqual(Object.keys(runningStatus), [
-      "id", "status", "phase", "repo", "planDigest", "baseSha", "currentIssueNumber", "issues",
+      "id", "jobId", "releaseId", "status", "phase", "repo", "planDigest", "baseSha", "currentIssueNumber", "issues",
       "candidateSha", "blocked", "result", "updatedAt", "legacy",
     ]);
     assert.equal(runningStatus.status, "running");
@@ -166,7 +197,7 @@ test("public status is bounded, redacted, mode-exclusive, and legacy read-only",
     completed.candidateSha = "a".repeat(40);
     completed.result = {
       schema: "herdr-codex-controller:release-result:v1",
-      releaseId: completed.id,
+      releaseId: completed.plan.id,
       planDigest: completed.planDigest,
       status: "merged",
       baseSha: plan.baseSha,

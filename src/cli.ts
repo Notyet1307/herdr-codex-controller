@@ -59,6 +59,10 @@ async function main(): Promise<void> {
     }
     const store = new JobStore(config);
     const job = await withControllerLock(store.repositoryLockPath(), async () => {
+      const exactJobId = `job-${planDigest}`;
+      if (existsSync(store.path(exactJobId))) {
+        return store.create({ configPath: resolve(configPath), planPath: resolve(planPath), plan, configDigest, planDigest });
+      }
       const goalRuns = new GoalStore(config).active();
       if (goalRuns.length > 0) {
         throw new Error(`repository already has an active Goal run: ${goalRuns.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
@@ -105,12 +109,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  const jobId = requiredOption(args, "job");
   if (args.command === "status") {
-    assertOnlyOptions(args, ["config", "job", "json", "operator", "public"]);
+    assertOnlyOptions(args, ["config", "job", "json", "operator", "plan", "public"]);
     if (args.options.public && args.options.operator) {
       throw new ControllerError("status_mode_conflict", "--public and --operator are mutually exclusive.");
     }
+    if (args.options.plan && args.options.job) throw new ControllerError("status_selector_conflict", "--job and --plan are mutually exclusive.");
+    const jobId = args.options.plan
+      ? (() => { const plan = loadPlan(requiredOption(args, "plan")); assertPlanCompatibleWithConfig(plan, config); return `job-${digestJson(plan)}`; })()
+      : requiredOption(args, "job");
     if (args.options.public && !existsSync(store.path(jobId))) {
       throw new ControllerError("job_not_found", `No Controller Job exists for ${jobId}.`);
     }
@@ -122,6 +129,7 @@ async function main(): Promise<void> {
         : summarizeJob(job));
     return;
   }
+  const jobId = requiredOption(args, "job");
   if (args.command === "result-export") {
     const artifact = await withControllerLock(store.repositoryLockPath(), () => exportReleaseResult({
       store,
@@ -328,6 +336,8 @@ function output(args: ParsedArgs, value: unknown): void {
 function summarizeJob(job: JobState) {
   return {
     id: job.id,
+    jobId: job.id,
+    releaseId: job.plan.id,
     status: job.status,
     phase: job.phase,
     repo: job.repo,
@@ -375,7 +385,7 @@ function nextAction(job: JobState): string {
 }
 
 function printHelp(): void {
-  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate    --config PATH [--json]\n  plan validate      --config PATH --plan PATH [--json]\n  result export      --config PATH --job ID --out FILE [--json]\n  report export      --config PATH --job ID --out FILE [--json]\n  doctor             --config PATH [--json]\n  start              --config PATH --plan PATH --approve-plan 64HEX [--json]\n  status             --config PATH --job ID [--public | --operator] [--json]\n  step               --config PATH --job ID [--json]\n  run                --config PATH --job ID [--max-steps N] [--json]\n  retry              --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort              --config PATH --job ID --reason TEXT [--json]\n  cleanup            --config PATH --job ID [--json]\n`);
+  process.stdout.write(`Herdr Codex Controller\n\nCommands:\n  config validate    --config PATH [--json]\n  plan validate      --config PATH --plan PATH [--json]\n  result export      --config PATH --job ID --out FILE [--json]\n  report export      --config PATH --job ID --out FILE [--json]\n  doctor             --config PATH [--json]\n  start              --config PATH --plan PATH --approve-plan 64HEX [--json]\n  status             --config PATH (--job ID | --plan PATH) [--public | --operator] [--json]\n  step               --config PATH --job ID [--json]\n  run                --config PATH --job ID [--max-steps N] [--json]\n  retry              --config PATH --job ID --reason TEXT --evidence PATH [--json]\n  abort              --config PATH --job ID --reason TEXT [--json]\n  cleanup            --config PATH --job ID [--json]\n`);
 }
 
 main().catch((error) => {

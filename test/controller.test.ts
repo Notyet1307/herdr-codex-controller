@@ -81,6 +81,28 @@ test("two ordered Issues use fresh Workers, one aggregate review, and Controller
   } finally { repo.cleanup(); }
 });
 
+test("Controller enforces the approved per-Issue budget below its configured ceiling", async () => {
+  const repo = createTestRepo();
+  try {
+    const config = testConfig(repo);
+    const plan = testPlan(repo, [1]);
+    plan.issues[0]!.expectedPaths.push("extra.txt");
+    plan.issues[0]!.scopeBudget = { maxFiles: 1, maxChangedLines: 1_000 };
+    const { configPath, planPath } = writeInputs(repo, config, plan);
+    const store = new JobStore(config);
+    const gitClient = new TestGitClient(config);
+    const codex = new FakeCodex(gitClient, async ({ job, issueNumber }) => {
+      writeFileSync(join(job.worktreePath, `issue-${issueNumber}.txt`), "issue\n", "utf8");
+      writeFileSync(join(job.worktreePath, "extra.txt"), "extra\n", "utf8");
+      return { worker: completedWorker("Implemented beyond the approved file budget.") };
+    });
+    const controller = new ReleaseController({ store, git: gitClient, github: new FakeGitHub(), codex, validator: new Validator(config, gitClient) });
+    const job = store.create({ configPath, planPath, plan, configDigest: digestJson(config), planDigest: digestJson(plan) });
+    const blocked = await runToTerminal(controller, store, job.id);
+    assert.equal(blocked.blocked?.code, "issue_scope_budget_exceeded");
+  } finally { repo.cleanup(); }
+});
+
 test("bootstrap config drift is rejected before release side effects", async () => {
   const repo = createTestRepo();
   try {
@@ -1541,7 +1563,7 @@ test("abort revokes auto-merge and quarantines the exact remote branch", async (
     class LifecycleGitHub extends FakeGitHub {
       override async inspectPullRequest() {
         return {
-          pullRequest: { number: 44, url: "https://github.com/example/project/pull/44", state: "OPEN" as const, headRef: "agent/release/release-fixture", baseRef: "main", headSha: candidateSha, mergeSha: null },
+          pullRequest: { number: 44, url: "https://github.com/example/project/pull/44", state: "OPEN" as const, headRef: `${config.branchPrefix}/job-${digestJson(plan)}`, baseRef: "main", headSha: candidateSha, mergeSha: null },
           checks: { state: "success" as const, missing: [], failures: [], pending: [] },
           mergedAt: null,
           autoMergeEnabled,
@@ -1640,7 +1662,7 @@ test("revocation refuses a wrong PR identity", async () => {
     class WrongIdentityGitHub extends FakeGitHub {
       override async inspectPullRequest() {
         return {
-          pullRequest: { number: 45, url: "https://github.com/example/project/pull/45", state: "OPEN" as const, headRef: "agent/release/high-risk-release-fixture", baseRef: "main", headSha: "f".repeat(40), mergeSha: null },
+          pullRequest: { number: 45, url: "https://github.com/example/project/pull/45", state: "OPEN" as const, headRef: `${config.branchPrefix}/job-${digestJson(plan)}`, baseRef: "main", headSha: "f".repeat(40), mergeSha: null },
           checks: { state: "success" as const, missing: [], failures: [], pending: [] },
           mergedAt: null,
           autoMergeEnabled: true,
@@ -1681,7 +1703,7 @@ test("revocation resumes after interruption between disable and quarantine", asy
     class InterruptedLifecycleGitHub extends FakeGitHub {
       override async inspectPullRequest() {
         return {
-          pullRequest: { number: 49, url: "https://github.com/example/project/pull/49", state: "OPEN" as const, headRef: "agent/release/high-risk-release-fixture", baseRef: "main", headSha: candidateSha, mergeSha: null },
+          pullRequest: { number: 49, url: "https://github.com/example/project/pull/49", state: "OPEN" as const, headRef: `${config.branchPrefix}/job-${digestJson(plan)}`, baseRef: "main", headSha: candidateSha, mergeSha: null },
           checks: { state: "success" as const, missing: [], failures: [], pending: [] },
           mergedAt: null,
           autoMergeEnabled,
@@ -1726,7 +1748,7 @@ test("missing and pending required checks reach durable deadlines without resett
             ? summarizeChecks([], contract)
             : summarizeChecks([{ name: "verify", status: "IN_PROGRESS", conclusion: null, app: { id: 15368 } }], contract);
           return {
-            pullRequest: { number: 46, url: "https://github.com/example/project/pull/46", state: "OPEN" as const, headRef: "agent/release/high-risk-release-fixture", baseRef: "main", headSha: candidateSha, mergeSha: null },
+            pullRequest: { number: 46, url: "https://github.com/example/project/pull/46", state: "OPEN" as const, headRef: `${config.branchPrefix}/job-${digestJson(plan)}`, baseRef: "main", headSha: candidateSha, mergeSha: null },
             checks,
             mergedAt: null,
             autoMergeEnabled: false,
@@ -1783,7 +1805,7 @@ test("CI code and infrastructure failures consume separate budgets and only code
         override async inspectPullRequest() {
           const conclusion = scenario === "code" ? "FAILURE" : "CANCELLED";
           return {
-            pullRequest: { number: 47, url: "https://github.com/example/project/pull/47", state: "OPEN" as const, headRef: "agent/release/high-risk-release-fixture", baseRef: "main", headSha: candidateSha, mergeSha: null },
+            pullRequest: { number: 47, url: "https://github.com/example/project/pull/47", state: "OPEN" as const, headRef: `${config.branchPrefix}/job-${digestJson(plan)}`, baseRef: "main", headSha: candidateSha, mergeSha: null },
             checks: summarizeChecks([{ name: "verify", status: "COMPLETED", conclusion, app: { id: 15368 }, detailsUrl: "https://github.com/example/project/actions/runs/123/job/456" }], contract),
             mergedAt: null,
             autoMergeEnabled: false,

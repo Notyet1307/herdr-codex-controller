@@ -77,9 +77,18 @@ export class JobStore {
     assertPlanCompatibleWithConfig(input.plan, this.config);
     if (input.configDigest !== digestJson(this.config)) throw new Error("job configDigest is not the current validated config digest");
     if (input.planDigest !== digestJson(input.plan)) throw new Error("job planDigest is not the current validated plan digest");
-    const id = safeToken(input.plan.id);
+    const id = `job-${input.planDigest}`;
     const root = this.root(id);
-    if (existsSync(root)) throw new Error(`job already exists: ${id}`);
+    if (existsSync(root)) {
+      const existing = this.load(id);
+      if (existing.configDigest !== input.configDigest || existing.planDigest !== input.planDigest
+        || digestJson(existing.plan) !== digestJson(input.plan)
+        || digestJson(readJsonFile<ControllerConfig>(join(root, "config.snapshot.json"))) !== input.configDigest
+        || digestJson(readJsonFile<ReleasePlan>(join(root, "plan.snapshot.json"))) !== input.planDigest) {
+        throw new Error(`existing job snapshot conflicts with exact Plan: ${id}`);
+      }
+      return existing;
+    }
     ensurePrivateDir(root);
     copyJsonSnapshot(input.configPath, join(root, "config.snapshot.json"));
     copyJsonSnapshot(input.planPath, join(root, "plan.snapshot.json"));
@@ -259,8 +268,12 @@ export function retryBlockedJob(job: JobState, authorization?: RetryAuthorizatio
 }
 
 export function assertJob(job: JobState): void {
-  if (!job || job.version !== 1 || !job.id || !job.plan || job.planDigest !== digestJson(job.plan)) {
+  if (!job || job.version !== 1 || !job.id || !job.plan || job.plan.controllerContractVersion !== 2
+    || job.planDigest !== digestJson(job.plan)) {
     throw new Error("job state is invalid or its plan digest drifted");
+  }
+  if (job.id !== `job-${job.planDigest}`) {
+    throw new Error("job runtime identity does not bind its semantic Plan");
   }
   for (const value of [job.codeRepairRounds, job.infrastructureReruns]) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("job repair counters are invalid");
@@ -300,7 +313,7 @@ export function assertJob(job: JobState): void {
   if (job.status === "completed") {
     if (!job.result) throw new Error("completed Job must have a Release Result");
     assertReleaseResult(job.result);
-    if (job.result.releaseId !== job.id || job.result.planDigest !== job.planDigest
+    if (job.result.releaseId !== job.plan.id || job.result.planDigest !== job.planDigest
       || job.result.candidateSha !== job.candidateSha || job.result.mergeSha !== job.pullRequest?.mergeSha) {
       throw new Error("job Release Result differs from its delivery state");
     }

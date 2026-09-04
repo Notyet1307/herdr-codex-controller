@@ -401,7 +401,7 @@ console.log(JSON.stringify({ owner: ${JSON.stringify(owner)}, workspace, tempora
     assert.equal(secondReport.owner, "second");
     assert.notEqual(firstReport.workspace, secondReport.workspace);
     assert.notEqual(firstReport.temporary, secondReport.temporary);
-    assert.deepEqual(readdirSync(join(first.sandbox, highRiskPlan(first, [1]).id)), []);
+    assert.deepEqual(readdirSync(join(first.sandbox, `job-${digestJson(highRiskPlan(first, [1]))}`)), []);
   } finally {
     second.cleanup();
     first.cleanup();

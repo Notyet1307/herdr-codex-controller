@@ -20,11 +20,13 @@ export function publicStatus(config: ControllerConfig, job: JobState) {
     : null;
   return {
     id: job.id,
+    jobId: job.id,
+    releaseId: job.plan.id,
     status: job.status,
     phase: job.phase,
     repo: job.repo,
     planDigest: job.planDigest,
-    baseSha: job.baseSha,
+    baseSha: job.plan.baseSha,
     currentIssueNumber: job.currentIssueNumber,
     issues: job.issues.map((issue) => ({ number: issue.number, status: issue.status })),
     candidateSha: job.candidateSha,
@@ -43,7 +45,8 @@ function assertPublicStatusSource(config: ControllerConfig, job: JobState): void
   const sha = (value: string | null) => value === null || /^[a-f0-9]{40}$/u.test(value);
   let canonicalId = false;
   try { canonicalId = job.id === safeToken(job.id); } catch {}
-  if (!canonicalId || job.repo !== config.repo
+  const boundId = job.plan?.controllerContractVersion === 2 && job.id === `job-${job.planDigest}`;
+  if (!canonicalId || !boundId || job.repo !== config.repo
     || !["running", "blocked", "completed", "failed"].includes(job.status)
     || !["prepare", "implement", "verify", "review", "repair", "deliver", "complete"].includes(job.phase)
     || !/^[a-f0-9]{64}$/u.test(job.planDigest)

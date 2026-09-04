@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Herdr Codex Release Plan contract v1",
+  "title": "Herdr Codex Release Plan contract v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["controllerContractVersion", "id", "title", "objective", "repo", "baseRef", "baseSha", "parentIssue", "issues", "releaseAcceptanceCriteria", "reviewFocus"],
   "properties": {
-    "controllerContractVersion": { "const": 1 },
+    "controllerContractVersion": { "const": 2 },
     "id": { "type": "string", "pattern": "^[a-z0-9._-]+$", "minLength": 1, "maxLength": 80 },
     "title": { "type": "string", "minLength": 1, "maxLength": 500 },
     "objective": { "type": "string", "minLength": 1, "maxLength": 8000 },
@@ -21,16 +21,18 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["number", "order", "dependsOn", "objective", "acceptanceCriteria", "risk"],
-        "if": { "properties": { "risk": { "enum": ["low", "normal"] } }, "required": ["risk"] },
-        "then": { "properties": { "oracleCommands": { "maxItems": 0 } } },
+        "required": ["number", "order", "dependsOn", "objective", "acceptanceCriteria", "expectedPaths", "scopeBudget", "risk", "oracleCommands"],
+        "if": { "properties": { "risk": { "const": "high" } }, "required": ["risk"] },
+        "then": { "properties": { "oracleCommands": { "minItems": 1 } } },
+        "else": { "properties": { "oracleCommands": { "maxItems": 0 } } },
         "properties": {
           "number": { "type": "integer", "minimum": 1 },
           "order": { "type": "integer", "minimum": 1 },
           "dependsOn": { "type": "array", "maxItems": 50, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
           "objective": { "type": "string", "minLength": 1, "maxLength": 8000 },
           "acceptanceCriteria": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-          "expectedPaths": { "type": "array", "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+          "expectedPaths": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+          "scopeBudget": { "type": "object", "additionalProperties": false, "required": ["maxFiles", "maxChangedLines"], "properties": { "maxFiles": { "type": "integer", "minimum": 1, "maximum": 1000 }, "maxChangedLines": { "type": "integer", "minimum": 1, "maximum": 100000 } } },
           "risk": { "enum": ["low", "normal", "high"] },
           "oracleCommands": { "type": "array", "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 512 } }
         }
