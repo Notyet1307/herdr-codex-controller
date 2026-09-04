@@ -2,20 +2,21 @@
 
 ## Project purpose
 
-This repository is a thin Codex-first release delivery controller. It executes an ordered group of GitHub Issues on one release branch/worktree, using one fresh `codex exec --ephemeral` Worker per Issue, deterministic Controller-owned validation, and one fresh read-only aggregate release review after all Issues are committed.
+This repository contains the thin Codex-first release Controller and a separate opt-in Goal Runner. Controller executes one fresh `codex exec --ephemeral` Worker per Issue. Goal Runner uses one persistent Goal thread per Issue, deterministic Runner-owned validation/commit checkpoints, a fresh read-only release review, and human merge.
 
 ## Non-negotiable boundaries
 
 - The Controller owns release state, Git commits, pushes, pull requests, CI observation, and merge facts.
 - Codex owns implementation inside the worktree, including its internal planning, self-review, and optional native subagents.
-- Do not add Pi, Herdr sessions, pi-subagents, Agent Teams, model-turn persistence, transcript resume, child-agent state, or per-Issue independent review.
+- The Controller path does not use Pi, Herdr sessions, pi-subagents, Agent Teams, model-turn persistence, transcript resume, child-agent state, or per-Issue independent review.
 - Never treat a model statement as proof that Git, validation, PR, CI, or merge succeeded.
-- Recovery uses the current Git worktree and fresh Codex execution. Do not resume a prior Codex session.
+- Controller recovery uses the current Git worktree and fresh Codex execution; it never resumes a prior session. Goal Runner may resume only the exact Thread recorded for the current Ticket.
 - One repository release is serial. Parallelism belongs above this controller, across isolated repositories/jobs.
 - Validation commands are trusted operator configuration and must remain observational: they may not change the Git-visible worktree.
-- Worker and hardening Codex runs may not commit, push, invoke `gh`, change branches/remotes, or modify GitHub state.
+- Worker, hardening, and Goal Codex runs may not commit, push, invoke `gh`, change branches/remotes, or modify GitHub state.
 - The release reviewer is read-only and reviews one exact `baseSha...candidateSha` aggregate candidate.
 - Production accepts only semantic `controllerContractVersion: 1` Plans and always delivers through reviewed PR checks plus exact-head Controller auto-merge.
+- Goal Runner state and Controller Job state never substitute for each other. Goal Runner accepts only a dedicated exact Goal handoff, keeps one Thread inside each Ticket, starts a fresh Thread for the next Ticket, and stops at human merge.
 
 ## Build and verification
 
@@ -42,6 +43,7 @@ Do not weaken tests, enlarge retry loops, or hide command failures to make a gat
 - `src/demo.ts`: optional isolated exact-candidate demonstration.
 - `src/prompts.ts`: Issue Worker, release hardening, and aggregate review prompts.
 - `src/cli.ts`: operator commands.
+- `src/goal-cli.ts`, `src/goal-runner.ts`, and `src/goal-app-server.ts`: separate Goal-channel commands, evidence state machine, and App Server adapter.
 
 ## Change discipline
 

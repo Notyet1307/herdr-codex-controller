@@ -54,7 +54,7 @@ declare module "node:fs" {
   export const writeFileSync: any;
   export const writeSync: any;
 };
-declare module "node:os" { export const homedir: any; export const tmpdir: any; }
+declare module "node:os" { export const homedir: any; export const hostname: any; export const tmpdir: any; }
 declare module "node:path" {
   export const basename: any;
   export const dirname: any;
