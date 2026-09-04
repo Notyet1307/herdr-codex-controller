@@ -1,6 +1,6 @@
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { CommandResult, ControllerConfig } from "./types.js";
 import { runCommand } from "./command.js";
 import { ensurePrivateDir, writeTextAtomic } from "./fs-atomic.js";
@@ -98,7 +98,10 @@ export class CodexSandboxProvider implements SandboxProvider {
     const isolatedTmp = ensurePrivateDir(join(runtimeRoot, "tmp"));
     const cacheRoot = ensurePrivateDir(join(runtimeRoot, "cache"));
     const gitMetadata = join(workspace, ".git");
-    const deniedRoots = [...this.deniedRoots];
+    const deniedRoots = [
+      ...deniedRootsForWorkspace(this.deniedRoots, workspace),
+      ...siblingDenies(workspace, runRoot),
+    ];
     if (existsSync(gitMetadata)) {
       const stat = lstatSync(gitMetadata);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
@@ -210,6 +213,24 @@ function sandboxEnvironment(input: {
     NODE_OPTIONS: `--require=${JSON.stringify(input.nodeStdioShim)}`,
     ...input.configured,
   };
+}
+
+function deniedRootsForWorkspace(deniedRoots: string[], workspace: string): string[] {
+  return deniedRoots.filter((root) => root !== workspace && !pathWithin(root, workspace));
+}
+
+function siblingDenies(workspace: string, runRoot: string): string[] {
+  const parent = dirname(workspace);
+  if (!existsSync(parent) || parent === runRoot || pathWithin(runRoot, parent)) return [];
+  const denied: string[] = [];
+  for (const name of readdirSync(parent)) {
+    const sibling = resolve(parent, name);
+    let resolved: string;
+    try { resolved = realpathSync(sibling); } catch { continue; }
+    if (resolved === workspace) continue;
+    denied.push(resolved);
+  }
+  return denied;
 }
 
 function sensitiveRoots(additional: string[]): string[] {

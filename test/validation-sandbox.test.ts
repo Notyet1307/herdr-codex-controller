@@ -1068,3 +1068,54 @@ fs.writeFileSync("report.json", JSON.stringify(report));
     rmSync(secretRoot, { recursive: true, force: true });
   }
 });
+
+test("sandbox allows Node realpath inside a nested worktree without exposing HOME", async () => {
+  const repo = createTestRepo();
+  const worktreeRoot = realpathSync(mkdtempSync(join("/var/tmp", "herdr-nested-worktree-")));
+  try {
+    const workspace = join(worktreeRoot, "job-nested");
+    const sibling = join(worktreeRoot, "job-sibling");
+    mkdirSync(workspace, { recursive: true, mode: 0o700 });
+    mkdirSync(sibling, { recursive: true, mode: 0o700 });
+    writeFileSync(join(sibling, "secret.txt"), "sibling-secret\n", "utf8");
+    writeFileSync(join(workspace, "probe.mjs"), `
+import fs from "node:fs";
+const self = process.argv[1];
+const resolved = fs.realpathSync(self);
+let homeReadable = false;
+try { fs.readdirSync(${JSON.stringify(process.env.HOME)}).length; homeReadable = true; } catch {}
+let siblingReadable = false;
+try { fs.readFileSync(${JSON.stringify(join(sibling, "secret.txt"))}, "utf8"); siblingReadable = true; } catch {}
+console.log(JSON.stringify({ resolved, homeReadable, siblingReadable }));
+`);
+    const provider = new CodexSandboxProvider({
+      codexBin: testSandboxBin,
+      shell: "/bin/bash",
+      environmentPath: [dirname(realpathSync(process.argv[0]!)), "/usr/bin", "/bin"],
+      deniedReadPaths: [repo.source, repo.state, worktreeRoot],
+      terminationGraceMs: 2_000,
+    });
+    const runRoot = join(repo.sandbox, "realpath-run");
+    mkdirSync(runRoot, { recursive: true, mode: 0o700 });
+    const result = await provider.run({
+      runRoot,
+      workspace,
+      command: "node probe.mjs",
+      environment: { HERDR_RELEASE_ID: "sandbox-test" },
+      timeoutMs: 10_000,
+      stdoutPath: join(runRoot, "stdout.log"),
+      stderrPath: join(runRoot, "stderr.log"),
+      stdoutByteLimit: 16_384,
+      stderrByteLimit: 16_384,
+      aggregateByteLimit: 24_576,
+    });
+    assert.equal(result.exitCode, 0, result.stderrTail || result.stdoutTail);
+    const report = JSON.parse(result.stdoutTail.trim().split("\n").at(-1)!);
+    assert.equal(report.resolved, realpathSync(join(workspace, "probe.mjs")));
+    assert.equal(report.homeReadable, false);
+    assert.equal(report.siblingReadable, false);
+  } finally {
+    rmSync(worktreeRoot, { recursive: true, force: true });
+    repo.cleanup();
+  }
+});

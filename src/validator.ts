@@ -34,7 +34,7 @@ export class Validator {
       codexBin: sandbox.bin,
       shell: config.shell,
       environmentPath: sandbox.environmentPath,
-      deniedReadPaths: [config.localPath, config.stateDir, config.worktreeRoot],
+      deniedReadPaths: [config.localPath, config.stateDir],
       terminationGraceMs: config.codex.terminationGraceMs,
     });
     const bootstrap = config.validation.bootstrap
@@ -44,7 +44,7 @@ export class Validator {
             codexBin: sandbox.bin,
             shell: config.shell,
             environmentPath: sandbox.environmentPath,
-            deniedReadPaths: [config.localPath, config.stateDir, config.worktreeRoot],
+            deniedReadPaths: [config.localPath, config.stateDir],
             networkAccess: config.validation.bootstrap.networkAccess,
             terminationGraceMs: config.codex.terminationGraceMs,
           }),
