@@ -208,7 +208,7 @@ export async function buildReleaseReportModel(input: {
     result: {
       status: reportStatus(input.job),
       phase: input.job.phase,
-      releaseId: clean(input.job.id, 120),
+      releaseId: clean(input.job.plan.id, 120),
       baseSha: input.job.baseSha,
       candidateSha: input.job.candidateSha,
       mergeSha: input.job.pullRequest?.mergeSha ?? null,

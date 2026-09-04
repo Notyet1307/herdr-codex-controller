@@ -1,5 +1,5 @@
 {
-  "controllerContractVersion": 1,
+  "controllerContractVersion": 2,
   "id": "release-id",
   "title": "Release title",
   "objective": "One observable release objective",
@@ -15,6 +15,7 @@
       "objective": "Implement one observable behavior",
       "acceptanceCriteria": ["The behavior is observable and covered"],
       "expectedPaths": ["src/*.ts", "test/*.test.ts"],
+      "scopeBudget": { "maxFiles": 8, "maxChangedLines": 1500 },
       "risk": "normal",
       "oracleCommands": []
     }

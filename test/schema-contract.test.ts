@@ -20,7 +20,7 @@ test("canonical Planner Plan fixture agrees across schema and runtime", () => {
     const validate = new Ajv2020({ allErrors: true, strict: false }).compile(schema("release-plan.schema.json"));
     assert.equal(validate(plan), true, JSON.stringify(validate.errors));
     assert.deepEqual(validatePlan(plan), plan);
-    const invalid = { ...plan, controllerContractVersion: 2 };
+    const invalid = { ...plan, controllerContractVersion: 1 };
     assert.equal(validate(invalid), false);
     assert.throws(() => validatePlan(invalid), (error: any) => error?.code === "unsupported_controller_contract_version");
   } finally { repo.cleanup(); }

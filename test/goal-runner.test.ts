@@ -13,6 +13,7 @@ import {
   type GoalStatus,
 } from "../src/goal-state.js";
 import { GoalRunner, exportGoalReleaseResult } from "../src/goal-runner.js";
+import { ControllerError } from "../src/errors.js";
 import { Validator } from "../src/validator.js";
 import { writeJsonAtomic } from "../src/fs-atomic.js";
 import { digestJson } from "../src/util.js";
@@ -173,6 +174,32 @@ test("failed deterministic validation returns to the same Ticket Goal thread", a
   assert.equal(goal.createdThreads.length, 1);
   assert.deepEqual(goal.turnsPerThread, [2]);
   assert.equal(ready.issues[0]!.validationRounds, 1);
+});
+
+test("Goal Runner enforces the approved per-Ticket budget below its configured ceiling", async (t: any) => {
+  const repo = createTestRepo();
+  t.after(() => repo.cleanup());
+  const config = testConfig(repo);
+  const plan = testPlan(repo, [1]);
+  plan.issues[0]!.expectedPaths.push("extra.txt");
+  plan.issues[0]!.scopeBudget = { maxFiles: 1, maxChangedLines: 1_000 };
+  const { configPath } = writeInputs(repo, config, plan);
+  const handoff = goalHandoff(plan);
+  const handoffPath = join(repo.root, "goal-handoff.json");
+  writeJsonAtomic(handoffPath, handoff);
+  const store = new GoalStore(config);
+  const state = store.create({ configPath, handoffPath, handoff, handoffDigest: goalHandoffFingerprint(handoff) });
+  const gitClient = new TestGitClient(config);
+  const goal = new FakeGoalRuntime((input, _count, number) => {
+    writeFileSync(join(input.cwd, `issue-${number}.txt`), "issue\n", "utf8");
+    writeFileSync(join(input.cwd, "extra.txt"), "extra\n", "utf8");
+  });
+  const runner = new GoalRunner({ config, store, git: gitClient, github: new FakeGitHub(), validator: new Validator(config, gitClient), reviewer: new FakeCodex(gitClient), goal });
+  let failure: unknown = null;
+  for (let index = 0; index < 20 && failure === null; index += 1) {
+    try { await runner.step(store.load(state.id)); } catch (error) { failure = error; }
+  }
+  assert.equal((failure as ControllerError)?.code, "goal_scope_budget_exceeded");
 });
 
 class FakeGoalRuntime implements GoalRuntimePort {

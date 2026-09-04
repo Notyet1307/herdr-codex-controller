@@ -218,7 +218,7 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
             workspace: input.job.worktreePath,
             command: entry.config.command,
             environment: {
-              HERDR_RELEASE_ID: input.job.id,
+              HERDR_RELEASE_ID: input.job.plan.id,
               HERDR_ISSUE_NUMBER: "",
               HERDR_CANDIDATE_SHA: input.sourceHeadSha,
             },
@@ -349,7 +349,7 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
             workspace: commandWorkspace,
             command: this.bootstrap.config.command,
             environment: {
-              HERDR_RELEASE_ID: input.job.id,
+              HERDR_RELEASE_ID: input.job.plan.id,
               HERDR_ISSUE_NUMBER: input.issueNumber === null ? "" : String(input.issueNumber),
               HERDR_CANDIDATE_SHA: input.sourceHeadSha,
             },
@@ -385,7 +385,7 @@ fs.writeSync(1, JSON.stringify(report) + "\\n");
           workspace: commandWorkspace,
           command: command.command,
           environment: {
-            HERDR_RELEASE_ID: input.job.id,
+            HERDR_RELEASE_ID: input.job.plan.id,
             HERDR_ISSUE_NUMBER: input.issueNumber === null ? "" : String(input.issueNumber),
             HERDR_CANDIDATE_SHA: input.sourceHeadSha,
           },

@@ -316,10 +316,12 @@ export class GoalRunner {
   private async assertCommitScope(state: GoalRunState, issue: GoalIssueState, sha: string): Promise<void> {
     const stats = await this.deps.git.commitStats(goalJobView(state), sha);
     const planIssue = state.plan.issues.find((entry) => entry.number === issue.number)!;
+    const budget = planIssue.scopeBudget;
     if (stats.entries.some((entry) => entry.binary)
       || stats.files > this.deps.config.policy.maxChangedFiles
-      || stats.changedLines > this.deps.config.policy.maxChangedLines) {
-      throw new ControllerError("goal_scope_budget_exceeded", `Ticket #${issue.number} exceeds the configured change budget.`);
+      || stats.changedLines > this.deps.config.policy.maxChangedLines
+      || stats.files > budget.maxFiles || stats.changedLines > budget.maxChangedLines) {
+      throw new ControllerError("goal_scope_budget_exceeded", `Ticket #${issue.number} exceeds its approved or configured change budget.`);
     }
     if (planIssue.expectedPaths.length > 0
       && stats.paths.some((path) => !planIssue.expectedPaths.some((pattern) => expectedPathMatches(pattern, path)))) {
@@ -360,7 +362,7 @@ export async function exportGoalReleaseResult(input: {
   await input.git.fetchBase();
   for (const issue of state.issues) {
     if (!issue.commitSha || !(await input.git.verifyIssueCommit({
-      jobId: state.id,
+      releaseId: state.plan.id,
       planDigest: state.planDigest,
       issueNumber: issue.number,
       sha: issue.commitSha,

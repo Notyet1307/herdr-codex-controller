@@ -17,7 +17,7 @@ pi-ticket-planning 的 release-plan.json
 → review.md + release-result.json
 ```
 
-项目不实现通用 Agent Runtime、Transcript Resume、per-Issue Reviewer、Evidence Manifest 或 Proof Closure。生产只有一条语义 Plan 主路径；Dispatcher、Plan v1/v2 兼容执行、人工 merge、Completion v1-v3、Controller provenance、runtime lock 与 identity history 已删除。
+项目不实现通用 Agent Runtime、Transcript Resume、per-Issue Reviewer、Evidence Manifest 或 Proof Closure。生产只有一条语义 Plan 主路径；Dispatcher、旧 Plan v1/v2-direct 兼容执行、人工 merge、Completion v1-v3、Controller provenance、runtime lock 与 identity history 已删除。
 
 ## 权限与事实
 
@@ -67,9 +67,11 @@ node dist/src/cli.js start \
   --plan /PRIVATE/PATH/release-plan.json \
   --approve-plan 64位小写HEX \
   --json
-node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job RELEASE_ID --json
-node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --public --json
+node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job JOB_ID --json
+node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --plan /PRIVATE/PATH/release-plan.json --public --json
 ```
+
+`JOB_ID` 固定为 `job-<完整 planDigest>`；语义 `releaseId` 始终是 `plan.id`。同一 Plan 的重复 `start` 返回原 Job，不创建第二条执行链。
 
 Goal 通道使用专用、精确批准的 `goal-handoff:v1`：
 
@@ -85,13 +87,13 @@ node dist/src/goal-cli.js result export --config /PRIVATE/PATH/controller.json -
 任意 Job 状态都可动态导出人工审查入口：
 
 ```bash
-node dist/src/cli.js report export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/review.md --json
+node dist/src/cli.js report export --config /PRIVATE/PATH/controller.json --job JOB_ID --out /PUBLIC/PATH/review.md --json
 ```
 
 verified merge 后可导出机器结果：
 
 ```bash
-node dist/src/cli.js result export --config /PRIVATE/PATH/controller.json --job RELEASE_ID --out /PUBLIC/PATH/release-result.json --json
+node dist/src/cli.js result export --config /PRIVATE/PATH/controller.json --job JOB_ID --out /PUBLIC/PATH/release-result.json --json
 ```
 
 Public Status 是按需读取的有界脱敏投影，不是新 receipt；它和两种导出都不会公开 prompt、events、完整日志、环境变量、凭据或私有绝对路径。`review.md` 与 PR Body 使用同一 report model；`release-result:v1` 只包含 Plan、candidate、PR、required checks、merge 与完成时间。

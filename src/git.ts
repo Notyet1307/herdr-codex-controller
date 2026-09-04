@@ -88,7 +88,7 @@ export class GitClient {
   }
 
   async verifyIssueCommit(input: {
-    jobId: string;
+    releaseId: string;
     planDigest: string;
     issueNumber: number;
     sha: string;
@@ -101,7 +101,7 @@ export class GitClient {
     if (ancestor.exitCode !== 0) throw new Error(`cannot verify Issue commit ancestry: ${ancestor.stderrTail || ancestor.stdoutTail}`);
     const message = await this.textRaw(this.config.localPath, ["show", "-s", "--format=%B", input.sha]);
     return hasExactTrailers(message, [
-      ["Herdr-Release-Id", input.jobId],
+      ["Herdr-Release-Id", input.releaseId],
       ["Herdr-Issue", String(input.issueNumber)],
       ["Herdr-Plan-Digest", input.planDigest],
     ]);
@@ -336,7 +336,7 @@ export class GitClient {
     const body = [
       `Issue: #${issueNumber}`,
       "",
-      `Herdr-Release-Id: ${job.id}`,
+      `Herdr-Release-Id: ${job.plan.id}`,
       `Herdr-Issue: ${issueNumber}`,
       `Herdr-Plan-Digest: ${job.planDigest}`,
     ].join("\n");
@@ -357,7 +357,7 @@ export class GitClient {
     const [sha, ...bodyLines] = message.split(/\r?\n/);
     if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) return null;
     return hasExactTrailers(bodyLines.join("\n"), [
-      ["Herdr-Release-Id", job.id],
+      ["Herdr-Release-Id", job.plan.id],
       ["Herdr-Issue", String(issueNumber)],
       ["Herdr-Plan-Digest", job.planDigest],
     ]) ? sha : null;
@@ -369,7 +369,7 @@ export class GitClient {
     const [sha, ...bodyLines] = message.split(/\r?\n/);
     if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) return null;
     return hasExactTrailers(bodyLines.join("\n"), [
-      ["Herdr-Release-Id", job.id],
+      ["Herdr-Release-Id", job.plan.id],
       ["Herdr-Hardening-Round", String(round)],
       ["Herdr-Plan-Digest", job.planDigest],
     ]) ? sha : null;
@@ -383,7 +383,7 @@ export class GitClient {
     const body = [
       "Hardening evidence is retained in the private Controller state directory.",
       "",
-      `Herdr-Release-Id: ${job.id}`,
+      `Herdr-Release-Id: ${job.plan.id}`,
       `Herdr-Hardening-Round: ${job.codeRepairRounds}`,
       `Herdr-Hardening-Evidence-Digest: ${sha256(reason)}`,
       `Herdr-Plan-Digest: ${job.planDigest}`,

@@ -107,12 +107,13 @@ export type ReleasePlanIssue = {
   objective: string;
   acceptanceCriteria: string[];
   expectedPaths: string[];
+  scopeBudget: { maxFiles: number; maxChangedLines: number };
   risk: "low" | "normal" | "high";
   oracleCommands: string[];
 };
 
 export type ReleasePlan = {
-  controllerContractVersion: 1;
+  controllerContractVersion: 2;
   id: string;
   title: string;
   objective: string;

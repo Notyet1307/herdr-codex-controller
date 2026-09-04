@@ -15,7 +15,7 @@ This repository contains the thin Codex-first release Controller and a separate 
 - Validation commands are trusted operator configuration and must remain observational: they may not change the Git-visible worktree.
 - Worker, hardening, and Goal Codex runs may not commit, push, invoke `gh`, change branches/remotes, or modify GitHub state.
 - The release reviewer is read-only and reviews one exact `baseSha...candidateSha` aggregate candidate.
-- Production accepts only semantic `controllerContractVersion: 1` Plans and always delivers through reviewed PR checks plus exact-head Controller auto-merge.
+- Production accepts only semantic `controllerContractVersion: 2` Plans and always delivers through reviewed PR checks plus exact-head Controller auto-merge.
 - Goal Runner state and Controller Job state never substitute for each other. Goal Runner accepts only a dedicated exact Goal handoff, keeps one Thread inside each Ticket, starts a fresh Thread for the next Ticket, and stops at human merge.
 
 ## Build and verification

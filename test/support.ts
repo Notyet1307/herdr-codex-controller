@@ -200,7 +200,7 @@ export class TestGitClient extends GitClient {
 
 export function testPlan(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlan {
   return {
-    controllerContractVersion: 1,
+    controllerContractVersion: 2,
     id: "release-fixture",
     title: "Fixture release",
     objective: "Implement all fixture issues as one coherent release.",
@@ -215,6 +215,7 @@ export function testPlan(repo: TestRepo, issueNumbers = [1, 2]): ReleasePlan {
       objective: `Implement fixture issue ${number}.`,
       acceptanceCriteria: [`issue-${number}.txt exists`],
       expectedPaths: index === 0 ? [`issue-${number}.txt`, "hardening.txt"] : [`issue-${number}.txt`],
+      scopeBudget: { maxFiles: 10, maxChangedLines: 1_000 },
       risk: "normal",
       oracleCommands: [],
     })),

@@ -29,28 +29,25 @@ test("current config exposes only operator choices", () => {
   } finally { repo.cleanup(); }
 });
 
-test("semantic Release Plan is closed, deterministic, and supports optional scope and Oracle commands", () => {
+test("semantic Release Plan is closed, deterministic, and binds scope and Oracle commands", () => {
   const repo = createTestRepo();
   try {
     const ordinary = validatePlan(testPlan(repo, [1]));
-    assert.equal(ordinary.controllerContractVersion, 1);
+    assert.equal(ordinary.controllerContractVersion, 2);
     assert.deepEqual(ordinary.issues[0]?.oracleCommands, []);
     const high = validatePlan(highRiskPlan(repo, [1]));
     assert.equal(high.issues[0]?.risk, "high");
     assert.equal(high.issues[0]?.oracleCommands.length, 1);
     assert.equal(digestJson(high), digestJson(structuredClone(high)));
 
-    const optional = structuredClone(ordinary) as any;
-    delete optional.issues[0].expectedPaths;
-    delete optional.issues[0].oracleCommands;
-    assert.deepEqual(validatePlan(optional).issues[0]?.expectedPaths, []);
-
     for (const fixture of [
-      { mutate: (plan: any) => { plan.controllerContractVersion = 2; }, code: "unsupported_controller_contract_version" },
+      { mutate: (plan: any) => { plan.controllerContractVersion = 1; }, code: "unsupported_controller_contract_version" },
       { mutate: (plan: any) => { plan.extra = true; }, pattern: /unknown keys/ },
       { mutate: (plan: any) => { plan.id = "Release-ID"; }, pattern: /lowercase safe token/ },
       { mutate: (plan: any) => { plan.issues[0].risk = "critical"; }, pattern: /low, normal, or high/ },
-      { mutate: (plan: any) => { plan.issues[0].oracleCommands = ["npm test"]; }, pattern: /only for high-risk/ },
+      { mutate: (plan: any) => { plan.issues[0].oracleCommands = ["npm test"]; }, pattern: /must be non-empty/ },
+      { mutate: (plan: any) => { plan.issues[0].expectedPaths = []; }, pattern: /must not be empty/ },
+      { mutate: (plan: any) => { delete plan.issues[0].scopeBudget; }, pattern: /scopeBudget/ },
       { mutate: (plan: any) => { plan.issues[0].expectedPaths = ["*.ts"]; }, pattern: /invalid_expected_path_pattern/ },
       { mutate: (plan: any) => { plan.issues[0].acceptanceCriteria = []; }, pattern: /must not be empty/ },
     ]) {
@@ -63,6 +60,9 @@ test("semantic Release Plan is closed, deterministic, and supports optional scop
           : fixture.pattern,
       );
     }
+    const overBudget = structuredClone(ordinary);
+    overBudget.issues[0]!.scopeBudget.maxFiles = testConfig(repo).policy.maxChangedFiles + 1;
+    assert.throws(() => assertPlanCompatibleWithConfig(overBudget, testConfig(repo)), (error: any) => error?.code === "issue_scope_budget_exceeds_policy");
   } finally { repo.cleanup(); }
 });
 

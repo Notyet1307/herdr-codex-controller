@@ -50,7 +50,7 @@ export class DemoRunner implements DemoPort {
         workspace,
         command: demo.command,
         environment: {
-          HERDR_RELEASE_ID: input.job.id,
+          HERDR_RELEASE_ID: input.job.plan.id,
           HERDR_CANDIDATE_SHA: input.job.candidateSha,
           HERDR_REVIEW_DEMO: "1",
         },

@@ -39,7 +39,7 @@ function issueData(job: JobState) {
 
 function releaseData(job: JobState) {
   return {
-    id: job.id,
+    id: job.plan.id,
     title: job.plan.title,
     objective: job.plan.objective,
     planDigest: job.planDigest,
