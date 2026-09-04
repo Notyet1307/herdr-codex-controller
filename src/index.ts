@@ -10,4 +10,8 @@ export * from "./validator.js";
 export * from "./report.js";
 export * from "./demo.js";
 export * from "./release-result.js";
+export * from "./goal-app-server.js";
+export * from "./goal-runner.js";
+export * from "./goal-state.js";
+export * from "./scope.js";
 export { digestJson, sha256PrefixedUtf8, stableStringify } from "./util.js";

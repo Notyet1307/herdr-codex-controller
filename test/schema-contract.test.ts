@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { hostname } from "node:os";
 import test from "node:test";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { validateConfig } from "../src/config.js";
 import { validatePlan } from "../src/plan.js";
 import { assertReleaseResult } from "../src/release-result.js";
+import { assertGoalReleaseResult, validateGoalHandoff } from "../src/goal-state.js";
+import { digestJson } from "../src/util.js";
 import { configInput, createTestRepo, testConfig, testPlan } from "./support.js";
 
 const schema = (name: string) => JSON.parse(readFileSync(resolve("schemas", name), "utf8"));
@@ -72,4 +75,47 @@ test("Release Result v1 fixture agrees across schema and runtime", () => {
     assert.equal(validate(invalid), false);
     assert.throws(() => assertReleaseResult(invalid), /Release Result is invalid/);
   }
+});
+
+test("Goal handoff and Goal Result fixtures agree across schema and runtime", () => {
+  const repo = createTestRepo();
+  try {
+    const plan = testPlan(repo, [1]);
+    const handoff = {
+      schema: "pi-ticket-planning:goal-handoff:v1",
+      releaseId: plan.id,
+      repo: plan.repo,
+      baseSha: plan.baseSha,
+      planDigest: digestJson(plan),
+      channel: "GOAL_LOCAL",
+      runnerRef: "local",
+      runnerDigest: `sha256:${digestJson({ ref: "local" })}`,
+      runnerHost: hostname(),
+      releasePlan: plan,
+    };
+    const ajv = new Ajv2020({ allErrors: true, strict: false, validateFormats: false });
+    ajv.addSchema(schema("release-plan.schema.json"), "https://schemas.pi-ticket-planning.invalid/release-plan.schema.json");
+    const validateHandoff = ajv.compile(schema("goal-handoff.schema.json"));
+    assert.equal(validateHandoff(handoff), true, JSON.stringify(validateHandoff.errors));
+    assert.deepEqual(validateGoalHandoff(handoff), handoff);
+    const result = {
+      schema: "pi-ticket-planning:goal-release-result:v1",
+      releaseId: plan.id,
+      planDigest: digestJson(plan),
+      baseSha: plan.baseSha,
+      channel: "GOAL_LOCAL",
+      runnerRef: "local",
+      handoffDigest: `sha256:${digestJson(handoff)}`,
+      status: "merged",
+      candidateSha: "3".repeat(40),
+      pullRequest: { number: 7, url: "https://github.com/example/project/pull/7" },
+      requiredChecks: { names: ["verify"], status: "passed" },
+      mergeSha: "4".repeat(40),
+      completedAt: "2026-09-03T00:00:00.000Z",
+      reviewReportDigest: `sha256:${"5".repeat(64)}`,
+    };
+    const validateResult = new Ajv2020({ allErrors: true, strict: false, validateFormats: false }).compile(schema("goal-release-result-v1.schema.json"));
+    assert.equal(validateResult(result), true, JSON.stringify(validateResult.errors));
+    assert.doesNotThrow(() => assertGoalReleaseResult(result));
+  } finally { repo.cleanup(); }
 });

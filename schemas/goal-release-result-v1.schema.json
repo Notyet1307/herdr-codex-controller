@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.pi-ticket-planning.invalid/goal-release-result-v1.schema.json",
+  "title": "Goal Release Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "releaseId", "planDigest", "baseSha", "channel", "runnerRef", "handoffDigest", "status", "candidateSha", "pullRequest", "requiredChecks", "mergeSha", "completedAt", "reviewReportDigest"],
+  "properties": {
+    "schema": { "const": "pi-ticket-planning:goal-release-result:v1" },
+    "releaseId": { "type": "string", "pattern": "^[a-z0-9._-]{1,80}$" },
+    "planDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "baseSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "channel": { "enum": ["GOAL_LOCAL", "GOAL_REMOTE"] },
+    "runnerRef": { "type": "string", "pattern": "^[a-z0-9._-]{1,80}$" },
+    "handoffDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "status": { "const": "merged" },
+    "candidateSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "pullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "url"],
+      "properties": {
+        "number": { "type": "integer", "minimum": 1 },
+        "url": { "type": "string", "pattern": "^https://" }
+      }
+    },
+    "requiredChecks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["names", "status"],
+      "properties": {
+        "names": { "type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+        "status": { "const": "passed" }
+      }
+    },
+    "mergeSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "completedAt": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "reviewReportDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}

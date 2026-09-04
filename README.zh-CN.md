@@ -2,6 +2,8 @@
 
 一个轻量、Codex-first 的 Release 交付控制器。
 
+仓库同时提供一个独立、显式启用的 Goal Runner。它不改变 Controller Job：每个 Ticket 使用一个 fresh Codex Thread，Ticket 内保持 persistent Goal，确定性验证后由 Runner commit，Release 级 fresh read-only Review 通过后停在人工 PR/合并。
+
 ```text
 pi-ticket-planning 的 release-plan.json
 → 修改前 baseline
@@ -68,6 +70,17 @@ node dist/src/cli.js start \
 node dist/src/cli.js run --config /PRIVATE/PATH/controller.json --job RELEASE_ID --json
 node dist/src/cli.js status --config /PRIVATE/PATH/controller.json --job RELEASE_ID --public --json
 ```
+
+Goal 通道使用专用、精确批准的 `goal-handoff:v1`：
+
+```bash
+node dist/src/goal-cli.js start --config /PRIVATE/PATH/controller.json --handoff /PRIVATE/PATH/goal-handoff.json --approve-handoff sha256:64HEX --runner-ref local --json
+node dist/src/goal-cli.js run --config /PRIVATE/PATH/controller.json --run-id RELEASE_ID --json
+node dist/src/goal-cli.js status --config /PRIVATE/PATH/controller.json --run-id RELEASE_ID --json
+node dist/src/goal-cli.js result export --config /PRIVATE/PATH/controller.json --run-id RELEASE_ID --pull-request 123 --out /PUBLIC/PATH/goal-release-result.json --json
+```
+
+`GOAL_REMOTE` 在 allowlist 指定的 SSH 目标上运行同一个 CLI，从 stdin 接收 handoff，并在建状态前核对获批 OS hostname；不把实验性的 App Server WebSocket transport 作为生产依赖。Goal shell 与 detached Reviewer 都保持断网，Thread start/resume 会清空 MCP、plugin、hook、项目文档和继承 shell 环境，并拒绝任何返回的 instruction source。
 
 任意 Job 状态都可动态导出人工审查入口：
 

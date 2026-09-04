@@ -41,3 +41,9 @@ PR 前 candidate 必须 clean、通过 Release validation、aggregate review 与
 `activeRun` 在 Codex 启动前持久化。中断后保留 Worktree 并使用 fresh recovery Worker；Controller commit 的 crash window 通过 exact trailers salvage。
 
 输出只有动态 `review.md`、精简 `release-result.json` 与可选 Demo artifacts。完整 receipt、structured Agent result 和 bounded logs 留在私有 state。
+
+## 独立 Goal 通道
+
+Goal Runner 不复用 Controller `job.json`，只复用 Release Plan v1、Git/Validation 安全原语和 read-only Reviewer。它从 exact Goal handoff 建立单一 Release Worktree，按顺序执行 `fresh Thread → persistent Goal → validation → Runner commit`，最后执行一次 detached Release Review 并停在 `review_ready`。人工合并后，Runner 重新验证 exact candidate、required checks、merge ancestry/tree，才导出独立的 `goal-release-result:v1`。
+
+`status` 是只读投影；Goal `complete` 只是进入确定性 validation 的条件，不是 commit、review 或 merge 证明。`GOAL_REMOTE` 在 allowlisted SSH 主机本地运行同一 Runner，通过 stdin 接收 handoff，并核对获批 hostname；不依赖 App Server WebSocket 远端传输。Goal Thread 使用显式 developer contract，清空外部工具与项目指令来源，shell 保持断网且不继承宿主环境。

@@ -32,6 +32,7 @@ import {
   renderReleaseReviewPrompt,
 } from "./prompts.js";
 import { buildReleaseReportModel, renderPullRequestBody } from "./report.js";
+import { expectedPathMatches } from "./scope.js";
 
 const MAX_REVIEW_DIFF_BYTES = 8 * 1024 * 1024;
 
@@ -1138,12 +1139,6 @@ function dedupeCommands(commands: CommandConfig[]): CommandConfig[] {
     }
   }
   return result;
-}
-
-function expectedPathMatches(pattern: string, path: string): boolean {
-  if (pattern.split("/", 1)[0]?.includes("*")) return false;
-  const source = pattern.split("*").map((part) => part.replace(/[|\\{}()[\]^$+?.]/gu, "\\$&")).join("[^/]*");
-  return new RegExp(`^${source}$`, "u").test(path);
 }
 
 function addMilliseconds(value: string, milliseconds: number): string {

@@ -23,6 +23,7 @@ import { exportReleaseResult } from "./release-result.js";
 import { exportReleaseReport } from "./report.js";
 import { DemoRunner } from "./demo.js";
 import { publicStatus } from "./public-status.js";
+import { GoalStore } from "./goal-state.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -58,6 +59,10 @@ async function main(): Promise<void> {
     }
     const store = new JobStore(config);
     const job = await withControllerLock(store.repositoryLockPath(), async () => {
+      const goalRuns = new GoalStore(config).active();
+      if (goalRuns.length > 0) {
+        throw new Error(`repository already has an active Goal run: ${goalRuns.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);
+      }
       const active = store.active();
       if (active.length > 0) {
         throw new Error(`repository already has an active release job: ${active.map((entry) => `${entry.id} (${entry.status}/${entry.phase})`).join(", ")}`);

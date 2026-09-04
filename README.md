@@ -31,6 +31,19 @@ node dist/src/cli.js status --config /private/controller.json --job RELEASE_ID -
 
 Public status is a bounded, redacted, on-demand projection. It never exposes private Job paths or replaces `release-result:v1`.
 
+## Opt-in Goal channel
+
+The separate Goal Runner consumes an exact `pi-ticket-planning:goal-handoff:v1`. It uses one fresh Thread per Issue, keeps the Goal persistent only inside that Issue, validates and commits deterministically, runs one detached read-only release review, then stops for human PR and merge.
+
+```bash
+node dist/src/goal-cli.js start --config /private/controller.json --handoff /private/goal-handoff.json --approve-handoff sha256:64HEX --runner-ref local --json
+node dist/src/goal-cli.js run --config /private/controller.json --run-id RELEASE_ID --json
+node dist/src/goal-cli.js status --config /private/controller.json --run-id RELEASE_ID --json
+node dist/src/goal-cli.js result export --config /private/controller.json --run-id RELEASE_ID --pull-request 123 --out /public/goal-release-result.json --json
+```
+
+`GOAL_REMOTE` runs this same CLI on the allowlisted SSH target, accepts the handoff on stdin, and verifies the approved OS hostname before creating state. WebSocket App Server transport is not a production dependency. Goal turns and the detached Reviewer remain network-disabled; the model control connection is separate. Goal Thread start/resume also clears MCP, plugins, hooks, project documents, inherited shell state, and rejects any reported instruction source.
+
 Export the human review bundle at any Job state:
 
 ```bash
